@@ -21,6 +21,12 @@ case "$1" in
     # Succeeds but prints nothing.
     exit 0
     ;;
+  count)
+    # Prints a different token on every run, and keeps the number of runs in the file `token-runs`.
+    runs=$(($(cat token-runs 2>/dev/null || echo 0) + 1))
+    echo "$runs" > token-runs
+    echo "t0ken-$runs"
+    ;;
   *)
     echo "token.sh: unknown mode '$1'" >&2
     exit 64

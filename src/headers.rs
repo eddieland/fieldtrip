@@ -6,7 +6,7 @@
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use reqwest::header::{HeaderName, HeaderValue};
 
@@ -51,9 +51,16 @@ enum Source {
         directory: PathBuf,
         /// The format the output is placed into, when one is configured.
         format: Option<Secret>,
+        /// How long an output is reused before the command runs again.
+        ttl: Duration,
+        /// The last output and when it was produced. The lock is held while the command runs, so that
+        /// concurrent requests share one run.
+        cached: tokio::sync::Mutex<Option<(Instant, Secret)>>,
     },
 }
 
+/// How long a command's output is reused when the config sets no `ttl`.
+const DEFAULT_TTL: Duration = Duration::from_secs(300);
 /// How long a header command may run.
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
 /// How much of a failed command's stderr to pass on.
@@ -80,12 +87,18 @@ impl Header {
         })
     }
 
-    /// Produces the header to send.
+    /// Whether the header comes from a command, whose output can go stale and be produced again.
+    pub(crate) const fn is_refreshable(&self) -> bool {
+        matches!(self.source, Source::Command { .. })
+    }
+
+    /// Produces the header to send. With `fresh`, a command runs again even if its last output is still in its
+    /// `ttl`.
     ///
     /// # Errors
     ///
     /// Returns a message that names the header and what it is waiting for, never a value.
-    pub(crate) async fn resolve(&self) -> Result<(HeaderName, HeaderValue), String> {
+    pub(crate) async fn resolve(&self, fresh: bool) -> Result<(HeaderName, HeaderValue), String> {
         let name = &self.name;
         let value =
             match &self.source {
@@ -103,7 +116,21 @@ impl Header {
                     argv,
                     directory,
                     format,
-                } => apply(format.as_ref(), &run(name, argv, directory).await?),
+                    ttl,
+                    cached,
+                } => {
+                    let mut cached = cached.lock().await;
+                    let reusable = cached.as_ref().filter(|(at, _)| !fresh && at.elapsed() < *ttl);
+                    let output = if let Some((_, Secret(output))) = reusable {
+                        output.clone()
+                    } else {
+                        let output = run(name, argv, directory).await?;
+                        *cached = Some((Instant::now(), Secret(output.clone())));
+                        output
+                    };
+                    drop(cached);
+                    apply(format.as_ref(), &output)
+                }
             };
         let mut value = HeaderValue::from_str(&value).map_err(|_error| {
             format!("The value of the header `{name}` has characters an HTTP header cannot carry.")
@@ -125,12 +152,28 @@ fn source_from_table(name: &str, mut table: toml::Table, directory: &Path) -> Re
         }
         Some(_) => return Err(format!("the `format` of header `{name}` must be a string")),
     };
+    let ttl = match table.remove("ttl") {
+        None => None,
+        Some(toml::Value::Integer(seconds)) => {
+            Some(Duration::from_secs(u64::try_from(seconds).map_err(|_error| {
+                format!("the `ttl` of header `{name}` cannot be negative")
+            })?))
+        }
+        Some(_) => {
+            return Err(format!(
+                "the `ttl` of header `{name}` must be a whole number of seconds"
+            ));
+        }
+    };
     let env = table.remove("env");
     let command = table.remove("command");
     if let Some(unknown) = table.keys().next() {
         return Err(format!("header `{name}` has an unknown key `{unknown}`. {PLUGS}"));
     }
     match (env, command) {
+        (Some(toml::Value::String(_)), None) if ttl.is_some() => {
+            Err(format!("header `{name}` sets `ttl`, which only applies to a `command`"))
+        }
         (Some(toml::Value::String(variable)), None) => Ok(Source::Env { variable, format }),
         (None, Some(command)) => {
             let argv = argv(name, command)?;
@@ -138,6 +181,8 @@ fn source_from_table(name: &str, mut table: toml::Table, directory: &Path) -> Re
                 argv,
                 directory: directory.to_path_buf(),
                 format,
+                ttl: ttl.unwrap_or(DEFAULT_TTL),
+                cached: tokio::sync::Mutex::new(None),
             })
         }
         (Some(_), Some(_)) => Err(format!(

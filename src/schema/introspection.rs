@@ -72,6 +72,13 @@ async fn attempt(
         "operationName": "IntrospectionQuery",
     });
     let reply = http.post(endpoint, &payload).await?;
+    if matches!(reply.status, 401 | 403) {
+        return Err(format!(
+            "{} answered HTTP {}: it did not accept the credentials. The user has to check the headers configured \
+             for this endpoint.",
+            endpoint.url, reply.status
+        ));
+    }
     let Ok(response) = serde_json::from_str::<Response>(&reply.body) else {
         let excerpt: String = reply.body.chars().take(EXCERPT).collect();
         return Ok(Err(format!(

@@ -3,9 +3,13 @@
 use std::error::Error as _;
 
 use crate::config::Endpoint;
+use crate::headers::Header;
 
 /// The `User-Agent` sent with every request.
 const USER_AGENT: &str = concat!(env!("CARGO_PKG_NAME"), "/", env!("CARGO_PKG_VERSION"));
+
+/// The status an endpoint answers with when it does not accept the credentials.
+const UNAUTHORIZED: u16 = 401;
 
 /// An HTTP client for GraphQL requests.
 #[derive(Debug, Clone)]
@@ -41,16 +45,33 @@ impl Client {
 
     /// Sends `payload` to `endpoint` as a GraphQL-over-HTTP POST and returns whatever came back.
     ///
+    /// When the endpoint answers 401 and one of its headers comes from a command, the command runs again and the
+    /// request is retried once: the usual cause is a token that expired while its output was being reused.
+    ///
     /// # Errors
     ///
     /// Returns a message when a header cannot be resolved or no response arrives. An HTTP error status is not an
     /// error here: GraphQL servers put useful detail in the body, so the caller decides what the status means.
     pub(crate) async fn post(&self, endpoint: &Endpoint, payload: &serde_json::Value) -> Result<Reply, String> {
+        let reply = self.send(endpoint, payload, false).await?;
+        if reply.status == UNAUTHORIZED && endpoint.headers.iter().any(Header::is_refreshable) {
+            return self.send(endpoint, payload, true).await;
+        }
+        Ok(reply)
+    }
+
+    /// Sends one request. With `fresh_headers`, header commands run again instead of reusing their last output.
+    async fn send(
+        &self,
+        endpoint: &Endpoint,
+        payload: &serde_json::Value,
+        fresh_headers: bool,
+    ) -> Result<Reply, String> {
         // Resolve every header before anything is sent, so a missing value never produces a half-authenticated
         // request.
         let mut headers = Vec::with_capacity(endpoint.headers.len());
         for header in &endpoint.headers {
-            headers.push(header.resolve().await?);
+            headers.push(header.resolve(fresh_headers).await?);
         }
         let mut request = self
             .http

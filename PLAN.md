@@ -53,7 +53,7 @@ cargo test --workspace --all-features
   runs with no shell. A non-zero exit or empty output is an error that gives the header name, exit status and
   stderr, and not the stdout.
   Done when: `cargo test headers_command`
-- [ ] **9. Command cache and refresh.** The command runs once within `ttl`. A 401 runs it again and retries the
+- [x] **9. Command cache and refresh.** The command runs once within `ttl`. A 401 runs it again and retries the
   request once.
   Done when: `cargo test headers_refresh`
 - [ ] **10. `execute`, approved.** With a client that accepts the prompt, the operation and variables reach the mock

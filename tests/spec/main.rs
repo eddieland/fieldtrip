@@ -13,6 +13,8 @@ mod estimate_cost;
 #[cfg(test)]
 mod headers_command;
 #[cfg(test)]
+mod headers_refresh;
+#[cfg(test)]
 mod headers_static;
 #[cfg(test)]
 mod introspect_file;
