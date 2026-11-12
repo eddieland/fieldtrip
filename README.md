@@ -130,14 +130,19 @@ assumed_list_size = 20
 
 ## Development
 
+The toolchain is pinned in `rust-toolchain.toml` (the MSRV is always the latest stable), so `rustup` picks it up
+automatically. Lints are configured in `Cargo.toml` and are warnings locally; CI fails on any warning.
+
 ```sh
-cargo build
-cargo test
-cargo clippy --all-targets -- -D warnings
-cargo fmt --check
+cargo fmt --all                                                   # 120-column formatting
+cargo clippy --workspace --all-targets --all-features             # pedantic + nursery + curated restriction lints
+RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --document-private-items
+cargo test --workspace --all-features
 ```
 
-[AGENTS.md](AGENTS.md) covers the architecture, the invariants the code has to hold, and the testing approach.
+Every public item needs a doc comment; functions returning `Result` need an `# Errors` section and functions that
+can panic need a `# Panics` section. To silence a lint locally, use `#[expect(lint, reason = "...")]` rather than
+`#[allow]`.
 
 ## License
 
