@@ -17,13 +17,18 @@ pub(crate) struct Client {
     http: reqwest::Client,
 }
 
+/// The most of a response body that is read. The rest is dropped, so a huge response cannot exhaust memory.
+const MAX_BODY_BYTES: usize = 1024 * 1024;
+
 /// What an endpoint answered.
 #[derive(Debug)]
 pub(crate) struct Reply {
     /// The HTTP status code.
     pub(crate) status: u16,
-    /// The response body as text.
+    /// The response body as text, up to [`MAX_BODY_BYTES`].
     pub(crate) body: String,
+    /// Whether the body was longer than what was read.
+    pub(crate) cut_short: bool,
 }
 
 impl Client {
@@ -83,25 +88,77 @@ impl Client {
             request = request.header(header.name, header.value);
             secrets.extend(header.secret);
         }
-        let response = request
+        let mut response = request
             .body(payload.to_string())
+            .timeout(endpoint.timeout)
             .send()
             .await
-            .map_err(|error| format!("The request to {} failed: {}", endpoint.url, explain(&error)))?;
+            .map_err(|error| {
+                if error.is_timeout() {
+                    timed_out(endpoint)
+                } else {
+                    format!("The request to {} failed: {}", endpoint.url, explain(&error))
+                }
+            })?;
         let status = response.status().as_u16();
-        let body = response.text().await.map_err(|error| {
-            format!(
-                "The response from {} could not be read: {}",
-                endpoint.url,
-                explain(&error)
-            )
-        })?;
+        if response.status().is_redirection() {
+            let target = response
+                .headers()
+                .get("location")
+                .and_then(|location| location.to_str().ok())
+                .unwrap_or("another URL");
+            return Err(format!(
+                "{} answered HTTP {status}, a redirect to {target}. fieldtrip does not follow redirects, because the \
+                 headers configured for this endpoint would go to a host the user did not name. The user has to put \
+                 the final URL in the fieldtrip config.",
+                endpoint.url
+            ));
+        }
+
+        let mut bytes = Vec::new();
+        let mut cut_short = false;
+        loop {
+            let chunk = response.chunk().await.map_err(|error| {
+                if error.is_timeout() {
+                    timed_out(endpoint)
+                } else {
+                    format!(
+                        "The response from {} could not be read: {}",
+                        endpoint.url,
+                        explain(&error)
+                    )
+                }
+            })?;
+            let Some(chunk) = chunk else { break };
+            let room = MAX_BODY_BYTES - bytes.len();
+            if chunk.len() > room {
+                bytes.extend_from_slice(chunk.get(..room).unwrap_or_default());
+                cut_short = true;
+                break;
+            }
+            bytes.extend_from_slice(&chunk);
+        }
+        let body = String::from_utf8_lossy(&bytes).into_owned();
         // A server can echo a credential back, in an error message for instance. It must not reach the caller.
         let body = secrets
             .iter()
             .fold(body, |body, secret| secret.scrub(&body).unwrap_or(body));
-        Ok(Reply { status, body })
+        Ok(Reply {
+            status,
+            body,
+            cut_short,
+        })
     }
+}
+
+/// The error for an endpoint that took longer than its `timeout`.
+fn timed_out(endpoint: &Endpoint) -> String {
+    format!(
+        "{} did not answer within {} seconds, the `timeout` for this endpoint. Nothing is known about whether the \
+         operation ran. For a query, ask for less. For a mutation, check its effect before sending it again.",
+        endpoint.url,
+        endpoint.timeout.as_secs()
+    )
 }
 
 /// An error and its causes on one line, without the request URL, which the caller adds where it is useful.

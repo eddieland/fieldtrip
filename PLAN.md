@@ -69,7 +69,7 @@ cargo test --workspace --all-features
 - [x] **13. No secrets in output.** With all three plugs configured, the header values appear in no tool result, no
   approval prompt, no error and nothing written to stderr, across every tool.
   Done when: `cargo test redaction`
-- [ ] **14. Limits.** A redirect from the endpoint is refused and its target receives no request. An oversized
+- [x] **14. Limits.** A redirect from the endpoint is refused and its target receives no request. An oversized
   response is truncated with a note. An endpoint that doesn't answer times out with an error.
   Done when: `cargo test limits`
 - [ ] **15. `--url` and `--schema`.** The server starts with no config file and serves one endpoint from the flags.

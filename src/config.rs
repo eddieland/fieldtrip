@@ -2,6 +2,7 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use serde::Deserialize;
 
@@ -62,6 +63,8 @@ pub(crate) struct Endpoint {
     pub(crate) headers: Vec<Header>,
     /// How many items to assume for a list whose size nothing bounds, when estimating cost.
     pub(crate) assumed_list_size: u64,
+    /// How long a request to this endpoint may take.
+    pub(crate) timeout: Duration,
     /// Who approves an operation before it is sent.
     pub(crate) approval: Approval,
     /// Queries with an estimated cost at or below this are sent without asking. Mutations always ask.
@@ -76,6 +79,9 @@ pub(crate) enum Approval {
     /// The MCP client's own tool approval is relied on, and fieldtrip does not ask.
     Client,
 }
+
+/// The `timeout` of an endpoint that does not set one.
+const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// The `assumed_list_size` of an endpoint that does not set one.
 const DEFAULT_ASSUMED_LIST_SIZE: u64 = 10;
@@ -99,6 +105,7 @@ struct RawEndpoint {
     assumed_list_size: Option<u64>,
     approval: Option<String>,
     auto_approve_cost: Option<u64>,
+    timeout: Option<u64>,
 }
 
 impl Config {
@@ -161,7 +168,11 @@ impl Endpoint {
             Some("client") => Approval::Client,
             Some(other) => return Err(format!("`approval` must be \"elicit\" or \"client\", got \"{other}\"")),
         };
+        if raw.timeout == Some(0) {
+            return Err("`timeout` is in seconds and must be at least 1".to_owned());
+        }
         Ok(Self {
+            timeout: raw.timeout.map_or(DEFAULT_TIMEOUT, Duration::from_secs),
             approval,
             auto_approve_cost: raw.auto_approve_cost,
             url: raw.url,

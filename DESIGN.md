@@ -37,6 +37,7 @@ schema            = "schemas/acme.graphql"   # optional SDL file, relative to th
 auto_approve_cost = 50                       # optional, queries only
 assumed_list_size = 20                       # optional, default 10
 approval          = "elicit"                 # or "client"
+timeout           = 30                       # optional, seconds, default 30
 
 [endpoints.acme.headers]
 X-Client      = "fieldtrip"
@@ -112,3 +113,6 @@ Settled. To change one, ask the user, then add a new dated line instead of editi
 - 2026-11-12: A value from an `env` or `command` plug is removed from response bodies, in case the server echoes it.
 - 2026-11-12: Literals and values shorter than 8 characters are not removed, because that would damage responses.
 - 2026-11-12: `FIELDTRIP_LOG` sets the log level for fieldtrip and the MCP SDK. Other crates stay at warnings.
+- 2026-11-12: A request has `timeout` seconds to complete, 30 unless the endpoint sets it.
+- 2026-11-12: A tool result carries at most 40,000 characters, and at most 1 MiB of a response body is read.
+- 2026-11-12: A redirect is reported as an error that names its target. It is never followed.

@@ -76,6 +76,23 @@ struct ExecuteArguments {
     variables: Variables,
 }
 
+/// The most characters a tool result carries. Schemas and responses can be far larger than a caller can use.
+const MAX_OUTPUT: usize = 40_000;
+
+/// Cuts `text` to [`MAX_OUTPUT`] characters and says so, with `advice` on how to get a smaller result.
+fn capped(text: String, advice: &str) -> String {
+    let length = text.chars().count();
+    if length <= MAX_OUTPUT {
+        return text;
+    }
+    let mut kept: String = text.chars().take(MAX_OUTPUT).collect();
+    let _ = write!(
+        kept,
+        "\n[fieldtrip cut this off at {MAX_OUTPUT} characters. The full result had at least {length}. {advice}]"
+    );
+    kept
+}
+
 /// How much of a response that is not JSON to quote in an error.
 const EXCERPT: usize = 300;
 
@@ -139,7 +156,11 @@ impl Fieldtrip {
     )]
     async fn describe(&self, Parameters(arguments): Parameters<DescribeArguments>) -> ToolResult {
         let schema = self.schema(&arguments.endpoint, false).await?;
-        schema.describe(&arguments.name)
+        let definition = schema.describe(&arguments.name)?;
+        Ok(capped(
+            definition,
+            "Describe one field at a time, as `Type.field`, or use `search_schema`.",
+        ))
     }
 
     #[tool(
@@ -208,12 +229,19 @@ impl Fieldtrip {
             reply.status,
             plan.cost
         );
+        let text = capped(
+            format!("{summary}\n{}", reply.body.trim()),
+            "Ask for less: fewer fields, or a smaller page with `first` or `limit`.",
+        );
+        if reply.cut_short {
+            // Too long to read in full, so it cannot be parsed. The status says whether it is a result.
+            return if reply.status < 400 { Ok(text) } else { Err(text) };
+        }
         let Ok(serde_json::Value::Object(response)) = serde_json::from_str::<serde_json::Value>(&reply.body) else {
             let excerpt: String = reply.body.chars().take(EXCERPT).collect();
             return Err(format!("{summary}\nThe response was not a GraphQL response: {excerpt}"));
         };
         let has_data = response.get("data").is_some_and(|data| !data.is_null());
-        let text = format!("{summary}\n{}", reply.body.trim());
         if has_data { Ok(text) } else { Err(text) }
     }
 

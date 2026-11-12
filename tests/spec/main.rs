@@ -27,6 +27,8 @@ mod introspect_file;
 #[cfg(test)]
 mod introspect_http;
 #[cfg(test)]
+mod limits;
+#[cfg(test)]
 mod list_endpoints;
 #[cfg(test)]
 mod redaction;
