@@ -1,0 +1,6 @@
+# Pinned toolchain. Keep `channel` in sync with `rust-version` in Cargo.toml: the MSRV is
+# always the latest stable release, bumped deliberately rather than drifting.
+[toolchain]
+channel = "1.100.0"
+components = ["clippy", "rustfmt"]
+profile = "minimal"
