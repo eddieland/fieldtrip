@@ -89,13 +89,34 @@ impl Part {
     const fn is_name(&self) -> bool {
         matches!(self, Self::Name(_))
     }
+
+    /// The name, or `None` for a `*`.
+    fn name(&self) -> Option<&str> {
+        match self {
+            Self::Name(name) => Some(name),
+            Self::Any => None,
+        }
+    }
+}
+
+/// One rule's pattern taken apart. `None` stands for a `*`.
+#[derive(Debug)]
+pub(crate) struct Shape<'map> {
+    /// The pattern as written.
+    pub(crate) text: &'map str,
+    /// The type the chain starts on.
+    pub(crate) anchor: Option<&'map str>,
+    /// The field names, outermost first.
+    pub(crate) fields: Vec<Option<&'map str>>,
+    /// The argument the rule's multiplier names, when it names one.
+    pub(crate) argument: Option<&'map str>,
 }
 
 /// One rule as written in the file.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawRule {
-    cost: Option<u64>,
+    cost: Option<toml::Value>,
     multiplier: Option<toml::Value>,
 }
 
@@ -137,6 +158,19 @@ impl CostMap {
         self.rules.len()
     }
 
+    /// Each rule's pattern, taken apart, for checking the map against a schema.
+    pub(crate) fn shapes(&self) -> impl Iterator<Item = Shape<'_>> {
+        self.rules.iter().map(|rule| Shape {
+            text: &rule.pattern.text,
+            anchor: rule.pattern.anchor.name(),
+            fields: rule.pattern.fields.iter().map(Part::name).collect(),
+            argument: match &rule.multiplier {
+                Some(Multiplier::Argument(argument)) => Some(argument),
+                _ => None,
+            },
+        })
+    }
+
     /// The cost a rule sets for the field at the end of `path`, with that rule's pattern as written.
     pub(crate) fn cost(&self, path: &[Step<'_>]) -> Option<(u64, &str)> {
         self.setting(path, |rule| rule.cost)
@@ -168,27 +202,38 @@ impl Rule {
         if raw.cost.is_none() && raw.multiplier.is_none() {
             return Err(format!("the rule `{pattern}` sets neither `cost` nor `multiplier`"));
         }
+        let cost = match &raw.cost {
+            None => None,
+            Some(toml::Value::Integer(cost)) => Some(u64::try_from(*cost).map_err(|_error| not_a_cost(pattern))?),
+            Some(_) => return Err(not_a_cost(pattern)),
+        };
         let multiplier = match &raw.multiplier {
             None => None,
-            Some(toml::Value::Integer(size)) => {
-                Some(Multiplier::Fixed(u64::try_from(*size).map_err(|_error| {
-                    format!("the `multiplier` of the rule `{pattern}` cannot be negative")
-                })?))
-            }
+            Some(toml::Value::Integer(size)) => Some(Multiplier::Fixed(
+                u64::try_from(*size).map_err(|_error| not_a_multiplier(pattern))?,
+            )),
             Some(toml::Value::String(argument)) if is_name(argument) => Some(Multiplier::Argument(argument.clone())),
-            Some(_) => {
-                return Err(format!(
-                    "the `multiplier` of the rule `{pattern}` must be a whole number, or the name of the argument \
-                     that carries the size"
-                ));
-            }
+            Some(_) => return Err(not_a_multiplier(pattern)),
         };
         Ok(Self {
             pattern: Pattern::parse(pattern)?,
-            cost: raw.cost,
+            cost,
             multiplier,
         })
     }
+}
+
+/// The error for a `cost` that is not a usable number.
+fn not_a_cost(pattern: &str) -> String {
+    format!("the `cost` of the rule `{pattern}` must be a whole number, zero or more")
+}
+
+/// The error for a `multiplier` that is neither a usable number nor an argument name.
+fn not_a_multiplier(pattern: &str) -> String {
+    format!(
+        "the `multiplier` of the rule `{pattern}` must be a whole number, zero or more, or the name of the argument \
+         that carries the size"
+    )
 }
 
 impl Pattern {

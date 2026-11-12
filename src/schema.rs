@@ -2,6 +2,7 @@
 
 mod describe;
 pub(crate) mod introspection;
+mod lint;
 mod overview;
 mod render;
 mod search;
@@ -72,6 +73,11 @@ impl Loaded {
     /// Returns a message when `query` has no words in it.
     pub(crate) fn search(&self, endpoint: &str, query: &str) -> Result<String, String> {
         search::search(self, endpoint, query)
+    }
+
+    /// Says which rules of `costs` can never match this schema. Empty when the endpoint has no cost map.
+    pub(crate) fn cost_map_report(&self, costs: &crate::costs::CostMap) -> String {
+        lint::report(self, costs)
     }
 
     /// Returns the schema's description, its type counts and the names of its root fields.

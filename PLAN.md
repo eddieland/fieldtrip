@@ -90,7 +90,7 @@ cargo test --workspace --all-features
   literal, through a variable, or by its default in the schema. With no value, the assumed size is used and the
   estimate says so.
   Done when: `cargo test cost_argument`
-- [ ] **20. Cost map checks.** A map that does not parse, or has a rule that is not valid, stops the server at
+- [x] **20. Cost map checks.** A map that does not parse, or has a rule that is not valid, stops the server at
   startup with a message that names the file and the rule. `introspect` reports the rules that match nothing in
   the schema.
   Done when: `cargo test cost_checks`

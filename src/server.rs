@@ -287,7 +287,11 @@ impl Fieldtrip {
             || format!("loaded by introspection from {}", endpoint.url),
             |path| format!("read from the file {}", path.display()),
         );
-        Ok(format!("Schema for `{name}`, {source}.\n{}", schema.overview()))
+        Ok(format!(
+            "Schema for `{name}`, {source}.\n{}{}",
+            schema.overview(),
+            schema.cost_map_report(&endpoint.costs)
+        ))
     }
 }
 

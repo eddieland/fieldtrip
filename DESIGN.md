@@ -149,3 +149,5 @@ Settled. To change one, ask the user, then add a new dated line instead of editi
 - 2026-11-12: When several rules match a field, each setting comes from the most specific: most names, then fewest `*`.
 - 2026-11-12: The cost map is config. No tool can change it, and it is read once, at startup.
 - 2026-11-12: The estimate lists every rule it used.
+- 2026-11-12: A cost map that is not valid stops the server at startup. A rule that cannot match is not an error.
+- 2026-11-12: `introspect` reports the rules that match nothing in the schema, so a misspelled rule is noticed.
