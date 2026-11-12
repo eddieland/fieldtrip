@@ -83,7 +83,7 @@ cargo test --workspace --all-features
   longer path wins over a shorter one. `list_endpoints` shows the map. A query made cheap by the map can pass
   `auto_approve_cost`.
   Done when: `cargo test cost_map`
-- [ ] **18. Cost map patterns.** `*` stands for any one type or field name. When several rules match, `cost` and
+- [x] **18. Cost map patterns.** `*` stands for any one type or field name. When several rules match, `cost` and
   `multiplier` each come from the most specific rule that sets them.
   Done when: `cargo test cost_patterns`
 - [ ] **19. Multiplier from an argument.** `multiplier = "take"` sizes the list by that argument, given as a

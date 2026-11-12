@@ -34,18 +34,52 @@ struct Rule {
     multiplier: Option<u64>,
 }
 
-/// A type followed by field names: `User.orders`, `Query.viewer.orders`.
+/// A type followed by field names: `User.orders`, `Query.viewer.orders`, `*.orders`.
 ///
 /// It matches a field that is reached through that chain of fields, starting from a selection on that type. A
-/// root type is only ever selected on at the root, so a pattern that starts with one is an exact path.
+/// root type is only ever selected on at the root, so a pattern that starts with one is an exact path. `*` stands
+/// for any one name.
 #[derive(Debug)]
 struct Pattern {
     /// The pattern as written, for reporting which rule was used.
     text: String,
     /// The type the chain starts on.
-    anchor: String,
+    anchor: Part,
     /// The field names, outermost first.
-    fields: Vec<String>,
+    fields: Vec<Part>,
+}
+
+/// One part of a pattern.
+#[derive(Debug, PartialEq, Eq)]
+enum Part {
+    /// A type or field name.
+    Name(String),
+    /// `*`: any one name.
+    Any,
+}
+
+impl Part {
+    /// Reads one part, or `None` when it is neither a name nor `*`.
+    fn parse(text: &str) -> Option<Self> {
+        if text == "*" {
+            Some(Self::Any)
+        } else {
+            is_name(text).then(|| Self::Name(text.to_owned()))
+        }
+    }
+
+    /// Whether this part stands for `name`.
+    fn is(&self, name: &str) -> bool {
+        match self {
+            Self::Name(own) => own == name,
+            Self::Any => true,
+        }
+    }
+
+    /// Whether this part is a name, not a `*`.
+    const fn is_name(&self) -> bool {
+        matches!(self, Self::Name(_))
+    }
 }
 
 /// One rule as written in the file.
@@ -104,13 +138,13 @@ impl CostMap {
         self.setting(path, |rule| rule.multiplier)
     }
 
-    /// Finds one setting among the rules that match `path`. The longest pattern wins.
+    /// Finds one setting among the rules that match `path` and set it. The most specific pattern wins.
     fn setting<T>(&self, path: &[Step<'_>], get: impl Fn(&Rule) -> Option<T>) -> Option<(T, &str)> {
         self.rules
             .iter()
             .filter(|rule| rule.pattern.matches(path))
             .filter_map(|rule| get(rule).map(|value| (value, &rule.pattern)))
-            .max_by_key(|(_, pattern)| pattern.fields.len())
+            .max_by_key(|(_, pattern)| pattern.specificity())
             .map(|(value, pattern)| (value, pattern.text.as_str()))
     }
 }
@@ -130,17 +164,19 @@ impl Rule {
 }
 
 impl Pattern {
-    /// Reads a pattern such as `User.orders`.
+    /// Reads a pattern such as `User.orders` or `*.orders`.
     fn parse(text: &str) -> Result<Self, String> {
-        let mut names = text.split('.').map(str::to_owned);
-        let anchor = names.next().unwrap_or_default();
-        let fields: Vec<String> = names.collect();
-        let well_formed = !fields.is_empty() && is_name(&anchor) && fields.iter().all(|field| is_name(field));
-        if !well_formed {
-            return Err(format!(
+        let not_a_pattern = || {
+            format!(
                 "the rule `{text}` is not a pattern. A pattern is a type name followed by one or more field names, \
-                 with dots between them, such as `User.orders` or `Query.viewer.orders`"
-            ));
+                 with dots between them, such as `User.orders` or `Query.viewer.orders`. `*` stands for any one name"
+            )
+        };
+        let mut parts = text.split('.').map(Part::parse);
+        let anchor = parts.next().flatten().ok_or_else(not_a_pattern)?;
+        let fields: Vec<Part> = parts.collect::<Option<_>>().ok_or_else(not_a_pattern)?;
+        if fields.is_empty() {
+            return Err(not_a_pattern());
         }
         Ok(Self {
             text: text.to_owned(),
@@ -155,8 +191,24 @@ impl Pattern {
             return false;
         };
         let Some(chain) = path.get(start..) else { return false };
-        chain.first().is_some_and(|step| step.parent == self.anchor)
-            && chain.iter().zip(&self.fields).all(|(step, field)| step.field == field)
+        chain.first().is_some_and(|step| self.anchor.is(step.parent))
+            && chain.iter().zip(&self.fields).all(|(step, field)| field.is(step.field))
+    }
+
+    /// How specific the pattern is, for choosing between rules that match the same field. Greater wins.
+    ///
+    /// More parts beat fewer. Then more names beat more stars. Then a name nearer the field beats one further
+    /// away, so `*.orders` beats `User.*`.
+    fn specificity(&self) -> (usize, usize, Vec<bool>) {
+        let nearest_first: Vec<bool> = self
+            .fields
+            .iter()
+            .rev()
+            .chain(std::iter::once(&self.anchor))
+            .map(Part::is_name)
+            .collect();
+        let names = nearest_first.iter().filter(|is_name| **is_name).count();
+        (nearest_first.len(), names, nearest_first)
     }
 }
 

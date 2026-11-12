@@ -13,6 +13,8 @@ mod cli_flags;
 #[cfg(test)]
 mod cost_map;
 #[cfg(test)]
+mod cost_patterns;
+#[cfg(test)]
 mod describe;
 #[cfg(test)]
 mod estimate_cost;
