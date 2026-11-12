@@ -98,3 +98,7 @@ Settled. To change one, ask the user, then add a new dated line instead of editi
 - 2026-11-12: Every slice in PLAN.md is checked by an integration test that drives the binary over MCP.
 - 2026-11-12: The server speaks MCP up to revision 2025-11-25 until PLAN slice 16 adds 2026-07-28.
 - 2026-11-12: `list_endpoints` shows header names, so the agent can tell whether auth is configured.
+- 2026-11-12: Cost: a size argument on a non-list field bounds the lists directly inside it, as connections page.
+- 2026-11-12: Cost: a size argument left out takes the default the schema declares for it, when there is one.
+- 2026-11-12: Cost: every fragment on an abstract type is counted, which is the worst case.
+- 2026-11-12: Cost: introspection fields such as `__typename` are free.

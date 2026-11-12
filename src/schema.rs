@@ -7,7 +7,7 @@ mod render;
 mod search;
 
 use apollo_compiler::collections::HashMap;
-use apollo_compiler::schema::Implementers;
+use apollo_compiler::schema::{ExtendedType, Implementers};
 use apollo_compiler::validation::Valid;
 use apollo_compiler::{Name, Schema};
 
@@ -40,6 +40,20 @@ impl Loaded {
         })?;
         let implementers = schema.implementers_map();
         Ok(Self { schema, implementers })
+    }
+
+    /// The validated schema, for checking operations against.
+    pub(crate) const fn schema(&self) -> &Valid<Schema> {
+        &self.schema
+    }
+
+    /// The names of the fields of the object or interface called `type_name`. Empty for anything else.
+    pub(crate) fn field_names(&self, type_name: &str) -> Vec<&str> {
+        match self.schema.types.get(type_name) {
+            Some(ExtendedType::Object(object)) => object.fields.keys().map(Name::as_str).collect(),
+            Some(ExtendedType::Interface(interface)) => interface.fields.keys().map(Name::as_str).collect(),
+            _ => Vec::new(),
+        }
     }
 
     /// Returns compact SDL for the type or `Type.field` called `name`.

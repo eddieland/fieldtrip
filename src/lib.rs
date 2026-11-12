@@ -6,6 +6,7 @@
 mod cli;
 mod config;
 mod http;
+mod plan;
 mod schema;
 mod server;
 mod suggest;

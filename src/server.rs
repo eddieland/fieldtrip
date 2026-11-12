@@ -13,6 +13,7 @@ use tokio::sync::Mutex;
 
 use crate::config::{Config, Endpoint};
 use crate::http::Client;
+use crate::plan::{Plan, Variables};
 use crate::schema::{Loaded, introspection};
 use crate::suggest::backticked;
 
@@ -48,6 +49,18 @@ struct SearchArguments {
     endpoint: String,
     /// One or more words. Each must appear in a name or a description. Case is ignored.
     query: String,
+}
+
+/// Arguments of `estimate_cost`.
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+struct EstimateArguments {
+    /// The endpoint name, as listed by `list_endpoints`.
+    endpoint: String,
+    /// One GraphQL query or mutation, with any fragments it uses.
+    operation: String,
+    /// The operation's variables, as a JSON object. They are used to resolve list sizes such as `first: $n`.
+    #[serde(default)]
+    variables: Variables,
 }
 
 /// Arguments of `introspect`.
@@ -120,6 +133,26 @@ impl Fieldtrip {
     async fn search_schema(&self, Parameters(arguments): Parameters<SearchArguments>) -> ToolResult {
         let schema = self.schema(&arguments.endpoint, false).await?;
         schema.search(&arguments.endpoint, &arguments.query)
+    }
+
+    #[tool(
+        description = "Check a query or mutation against the schema and estimate its cost, without sending it. Use \
+                       it while writing an operation: it reports validation errors with positions, or the estimated \
+                       cost, the depth, the cost of each top-level field, and the assumptions behind the estimate. \
+                       Pass exactly one operation. The estimate is a heuristic, not the server's own accounting."
+    )]
+    async fn estimate_cost(&self, Parameters(arguments): Parameters<EstimateArguments>) -> ToolResult {
+        let name = &arguments.endpoint;
+        let assumed_list_size = self.endpoint(name)?.assumed_list_size;
+        let schema = self.schema(name, false).await?;
+        let plan = Plan::new(
+            &schema,
+            name,
+            &arguments.operation,
+            &arguments.variables,
+            assumed_list_size,
+        )?;
+        Ok(format!("Valid {} for `{name}`.\n{}", plan.title(), plan.estimate()))
     }
 
     #[tool(

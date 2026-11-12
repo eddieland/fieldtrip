@@ -9,6 +9,8 @@ mod support;
 #[cfg(test)]
 mod describe;
 #[cfg(test)]
+mod estimate_cost;
+#[cfg(test)]
 mod introspect_file;
 #[cfg(test)]
 mod introspect_http;

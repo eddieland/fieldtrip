@@ -41,7 +41,7 @@ cargo test --workspace --all-features
   server. `describe` and `search_schema` give the same output as they do for the SDL file. A server that rejects
   the newer introspection fields still loads, through a fallback query.
   Done when: `cargo test introspect_http`
-- [ ] **6. `estimate_cost`.** An invalid operation returns the validation errors. A valid one returns the cost, the
+- [x] **6. `estimate_cost`.** An invalid operation returns the validation errors. A valid one returns the cost, the
   depth, a breakdown per top-level field and the assumptions. Covers the scalar, object, list and mutation rules,
   size arguments given through variables, fragments, `assumed_list_size`, and the rejection of subscriptions and of
   documents with more than one operation. The mock server receives nothing.

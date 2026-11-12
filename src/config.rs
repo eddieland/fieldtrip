@@ -59,7 +59,12 @@ pub(crate) struct Endpoint {
     pub(crate) schema: Option<PathBuf>,
     /// The names of the headers sent with every request to this endpoint, in name order.
     pub(crate) header_names: Vec<String>,
+    /// How many items to assume for a list whose size nothing bounds, when estimating cost.
+    pub(crate) assumed_list_size: u64,
 }
+
+/// The `assumed_list_size` of an endpoint that does not set one.
+const DEFAULT_ASSUMED_LIST_SIZE: u64 = 10;
 
 /// The file as written, before validation.
 #[derive(Deserialize)]
@@ -77,6 +82,7 @@ struct RawEndpoint {
     schema: Option<PathBuf>,
     #[serde(default)]
     headers: BTreeMap<String, toml::Value>,
+    assumed_list_size: Option<u64>,
 }
 
 impl Config {
@@ -133,6 +139,7 @@ impl Endpoint {
             url: raw.url,
             schema: raw.schema.map(|schema| base.join(schema)),
             header_names: raw.headers.into_keys().collect(),
+            assumed_list_size: raw.assumed_list_size.unwrap_or(DEFAULT_ASSUMED_LIST_SIZE),
         })
     }
 }
