@@ -11,7 +11,7 @@ use rmcp::{Peer, RoleServer, ServerHandler, schemars, tool, tool_handler, tool_r
 use serde::Deserialize;
 use tokio::sync::Mutex;
 
-use crate::approval::{self, Decision};
+use crate::approval;
 use crate::config::{Config, Endpoint};
 use crate::http::Client;
 use crate::plan::{Plan, Variables};
@@ -122,6 +122,7 @@ impl Fieldtrip {
                     let _ = writeln!(out, "  schema: introspection");
                 }
             }
+            let _ = writeln!(out, "  approval: {}", approval::policy(endpoint));
             if !endpoint.headers.is_empty() {
                 let names: Vec<&str> = endpoint.headers.iter().map(|header| header.name.as_str()).collect();
                 let _ = writeln!(out, "  headers: {}", names.join(", "));
@@ -191,39 +192,18 @@ impl Fieldtrip {
         )?;
         plan.check_variables(&schema, &arguments.variables)?;
 
-        let prompt = approval::prompt(name, &endpoint.url, &plan, &arguments.variables);
-        match approval::ask(&peer, prompt).await {
-            Decision::Approved => {}
-            Decision::Declined => {
-                return Err(format!(
-                    "The user declined. Nothing was sent to `{name}`. Do not send this operation again unless the \
-                     user asks for it."
-                ));
-            }
-            Decision::Cancelled => {
-                return Err(format!(
-                    "The user dismissed the approval prompt without answering. Nothing was sent to `{name}`. Ask the \
-                     user whether they want this operation to run."
-                ));
-            }
-            Decision::Unavailable => {
-                return Err(format!(
-                    "Nothing was sent to `{name}`. This MCP client cannot show approval prompts, because it does not \
-                     support elicitation, so `execute` has no way to ask the user. The user can either use a client \
-                     that supports elicitation, or set `approval = \"client\"` for this endpoint in the fieldtrip \
-                     config to rely on the client's own tool approval."
-                ));
-            }
-            Decision::Failed(reason) => {
-                return Err(format!(
-                    "Nothing was sent to `{name}`. The approval prompt failed: {reason}"
-                ));
-            }
-        }
+        // Nothing below this point runs unless the human accepted, or the user's config waives the prompt.
+        let unasked = if let Some(reason) = approval::waiver(endpoint, &plan) {
+            format!(" The user was not asked: {reason}.")
+        } else {
+            let prompt = approval::prompt(name, &endpoint.url, &plan, &arguments.variables);
+            approval::ask(&peer, prompt).await.into_result(name)?;
+            String::new()
+        };
 
         let reply = self.http.post(endpoint, &plan.payload(&arguments.variables)).await?;
         let summary = format!(
-            "Sent {} to `{name}`. HTTP {}. Estimated cost: {}.",
+            "Sent {} to `{name}`. HTTP {}. Estimated cost: {}.{unasked}",
             plan.title(),
             reply.status,
             plan.cost

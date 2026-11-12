@@ -62,6 +62,19 @@ pub(crate) struct Endpoint {
     pub(crate) headers: Vec<Header>,
     /// How many items to assume for a list whose size nothing bounds, when estimating cost.
     pub(crate) assumed_list_size: u64,
+    /// Who approves an operation before it is sent.
+    pub(crate) approval: Approval,
+    /// Queries with an estimated cost at or below this are sent without asking. Mutations always ask.
+    pub(crate) auto_approve_cost: Option<u64>,
+}
+
+/// Who approves an operation before it is sent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Approval {
+    /// fieldtrip asks the user through MCP elicitation.
+    Elicit,
+    /// The MCP client's own tool approval is relied on, and fieldtrip does not ask.
+    Client,
 }
 
 /// The `assumed_list_size` of an endpoint that does not set one.
@@ -84,6 +97,8 @@ struct RawEndpoint {
     #[serde(default)]
     headers: BTreeMap<String, toml::Value>,
     assumed_list_size: Option<u64>,
+    approval: Option<String>,
+    auto_approve_cost: Option<u64>,
 }
 
 impl Config {
@@ -141,7 +156,14 @@ impl Endpoint {
             .into_iter()
             .map(|(name, value)| Header::from_config(name, value, base))
             .collect::<Result<_, String>>()?;
+        let approval = match raw.approval.as_deref() {
+            None | Some("elicit") => Approval::Elicit,
+            Some("client") => Approval::Client,
+            Some(other) => return Err(format!("`approval` must be \"elicit\" or \"client\", got \"{other}\"")),
+        };
         Ok(Self {
+            approval,
+            auto_approve_cost: raw.auto_approve_cost,
             url: raw.url,
             schema: raw.schema.map(|schema| base.join(schema)),
             headers,

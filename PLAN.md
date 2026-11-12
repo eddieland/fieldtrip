@@ -63,7 +63,7 @@ cargo test --workspace --all-features
 - [x] **11. `execute`, not approved.** On decline, on cancel, and with a client that has no elicitation support, the
   mock server receives zero requests and the tool result says the operation was not sent.
   Done when: `cargo test execute_refused`
-- [ ] **12. Approval policy.** A mutation prompts even when a query of the same cost would not. A query at or below
+- [x] **12. Approval policy.** A mutation prompts even when a query of the same cost would not. A query at or below
   `auto_approve_cost` runs with no prompt. `approval = "client"` runs with no prompt.
   Done when: `cargo test approval_policy`
 - [ ] **13. No secrets in output.** With all three plugs configured, the header values appear in no tool result, no
