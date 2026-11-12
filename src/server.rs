@@ -7,10 +7,11 @@ use std::sync::Arc;
 
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{Implementation, ProtocolVersion, ServerCapabilities, ServerConfig};
-use rmcp::{ServerHandler, schemars, tool, tool_handler, tool_router};
+use rmcp::{Peer, RoleServer, ServerHandler, schemars, tool, tool_handler, tool_router};
 use serde::Deserialize;
 use tokio::sync::Mutex;
 
+use crate::approval::{self, Decision};
 use crate::config::{Config, Endpoint};
 use crate::http::Client;
 use crate::plan::{Plan, Variables};
@@ -62,6 +63,21 @@ struct EstimateArguments {
     #[serde(default)]
     variables: Variables,
 }
+
+/// Arguments of `execute`.
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+struct ExecuteArguments {
+    /// The endpoint name, as listed by `list_endpoints`.
+    endpoint: String,
+    /// One GraphQL query or mutation, with any fragments it uses.
+    operation: String,
+    /// The operation's variables, as a JSON object.
+    #[serde(default)]
+    variables: Variables,
+}
+
+/// How much of a response that is not JSON to quote in an error.
+const EXCERPT: usize = 300;
 
 /// Arguments of `introspect`.
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -154,6 +170,71 @@ impl Fieldtrip {
             assumed_list_size,
         )?;
         Ok(format!("Valid {} for `{name}`.\n{}", plan.title(), plan.estimate()))
+    }
+
+    #[tool(
+        description = "Send a query or mutation to the endpoint and return the GraphQL response. The user is shown \
+                       the exact operation, its variables and its estimated cost, and it is sent only if they \
+                       approve. Check the operation with `estimate_cost` first. If the user declines, do not send \
+                       the same operation again: ask them what they want. Pass exactly one operation."
+    )]
+    async fn execute(&self, peer: Peer<RoleServer>, Parameters(arguments): Parameters<ExecuteArguments>) -> ToolResult {
+        let name = &arguments.endpoint;
+        let endpoint = self.endpoint(name)?;
+        let schema = self.schema(name, false).await?;
+        let plan = Plan::new(
+            &schema,
+            name,
+            &arguments.operation,
+            &arguments.variables,
+            endpoint.assumed_list_size,
+        )?;
+        plan.check_variables(&schema, &arguments.variables)?;
+
+        let prompt = approval::prompt(name, &endpoint.url, &plan, &arguments.variables);
+        match approval::ask(&peer, prompt).await {
+            Decision::Approved => {}
+            Decision::Declined => {
+                return Err(format!(
+                    "The user declined. Nothing was sent to `{name}`. Do not send this operation again unless the \
+                     user asks for it."
+                ));
+            }
+            Decision::Cancelled => {
+                return Err(format!(
+                    "The user dismissed the approval prompt without answering. Nothing was sent to `{name}`. Ask the \
+                     user whether they want this operation to run."
+                ));
+            }
+            Decision::Unavailable => {
+                return Err(format!(
+                    "Nothing was sent to `{name}`. This MCP client cannot show approval prompts, because it does not \
+                     support elicitation, so `execute` has no way to ask the user. The user can either use a client \
+                     that supports elicitation, or set `approval = \"client\"` for this endpoint in the fieldtrip \
+                     config to rely on the client's own tool approval."
+                ));
+            }
+            Decision::Failed(reason) => {
+                return Err(format!(
+                    "Nothing was sent to `{name}`. The approval prompt failed: {reason}"
+                ));
+            }
+        }
+
+        let reply = self.http.post(endpoint, &plan.payload(&arguments.variables)).await?;
+        let summary = format!(
+            "Sent {} to `{name}`. HTTP {}. Estimated cost: {}.",
+            plan.title(),
+            reply.status,
+            plan.cost
+        );
+        let Ok(serde_json::Value::Object(response)) = serde_json::from_str::<serde_json::Value>(&reply.body) else {
+            let excerpt: String = reply.body.chars().take(EXCERPT).collect();
+            return Err(format!("{summary}\nThe response was not a GraphQL response: {excerpt}"));
+        };
+        let has_data = response.get("data").is_some_and(|data| !data.is_null());
+        let text = format!("{summary}\n{}", reply.body.trim());
+        if has_data { Ok(text) } else { Err(text) }
     }
 
     #[tool(

@@ -104,3 +104,8 @@ Settled. To change one, ask the user, then add a new dated line instead of editi
 - 2026-11-12: Cost: introspection fields such as `__typename` are free.
 - 2026-11-12: A header command runs in the config file's directory and has 30 seconds to finish.
 - 2026-11-12: Errors about a header command name the program but never its arguments, which can hold secrets.
+- 2026-11-12: The operation is sent in canonical form, printed from the parsed document, so comments are dropped.
+- 2026-11-12: The prompt shows that same canonical text. What the human reads is what the server receives.
+- 2026-11-12: Variables are checked against the operation before the human is asked.
+- 2026-11-12: `execute` returns the response body as the server wrote it. A response with no `data` is an error.
+- 2026-11-12: The prompt is a plain accept or decline, with no form fields. Any other answer counts as a refusal.

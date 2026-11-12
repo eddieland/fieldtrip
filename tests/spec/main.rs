@@ -11,6 +11,8 @@ mod describe;
 #[cfg(test)]
 mod estimate_cost;
 #[cfg(test)]
+mod execute_approved;
+#[cfg(test)]
 mod headers_command;
 #[cfg(test)]
 mod headers_refresh;

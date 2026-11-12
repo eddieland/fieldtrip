@@ -21,15 +21,16 @@ const REPLY_TIMEOUT: Duration = Duration::from_secs(20);
 
 /// How the test client answers an approval prompt.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[expect(dead_code, reason = "the answering variants are first used by the `execute` slices")]
 pub(crate) enum Human {
     /// The client does not declare elicitation support, so no prompt can be shown.
     Absent,
     /// The human accepts every prompt.
     Accepts,
     /// The human declines every prompt.
+    #[expect(dead_code, reason = "first used by the `execute_refused` slice")]
     Declines,
     /// The human dismisses every prompt.
+    #[expect(dead_code, reason = "first used by the `execute_refused` slice")]
     Cancels,
 }
 
@@ -80,7 +81,6 @@ impl Launch {
     }
 
     /// Makes the client answer approval prompts as `human` does.
-    #[expect(dead_code, reason = "first used by the `execute` slices")]
     pub(crate) fn human(mut self, human: Human) -> Self {
         self.human = human;
         self
@@ -264,7 +264,6 @@ impl Mcp {
     }
 
     /// The text of every approval prompt the server has shown so far.
-    #[expect(dead_code, reason = "first used by the `execute` slices")]
     pub(crate) fn prompts(&self) -> &[String] {
         &self.prompts
     }

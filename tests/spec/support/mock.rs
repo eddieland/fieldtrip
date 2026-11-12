@@ -74,6 +74,12 @@ impl MockServer {
         Self { port, requests }
     }
 
+    /// Starts a server that answers every request with status 200 and `body` as JSON.
+    pub(crate) fn answering(body: &serde_json::Value) -> Self {
+        let body = body.to_string();
+        Self::start(move |_| Response::new(200, body.clone()))
+    }
+
     /// Starts a server that fails every request. For tests where no request should arrive at all.
     pub(crate) fn unreachable() -> Self {
         Self::start(|_| Response::new(500, "this endpoint should not have been called"))

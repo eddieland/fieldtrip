@@ -51,6 +51,8 @@ pub(crate) struct Plan {
     pub(crate) kind: Kind,
     /// The operation's name, when it has one.
     pub(crate) name: Option<String>,
+    /// The document in canonical form, without comments. This is the text that is shown for approval and sent.
+    pub(crate) text: String,
     /// The estimated total cost.
     pub(crate) cost: u64,
     /// The deepest nesting of fields.
@@ -107,11 +109,37 @@ impl Plan {
         Ok(Self {
             kind,
             name: operation.name.as_ref().map(ToString::to_string),
+            text: document.to_string().trim().to_owned(),
             cost,
             depth,
             breakdown,
             assumptions: estimator.assumptions,
         })
+    }
+
+    /// Checks that `variables` has a usable value for every variable the operation declares.
+    ///
+    /// # Errors
+    ///
+    /// Returns a message naming the variable that is missing or has the wrong type.
+    pub(crate) fn check_variables(&self, loaded: &Loaded, variables: &Variables) -> Result<(), String> {
+        let document = ExecutableDocument::parse_and_validate(loaded.schema(), &self.text, "operation.graphql")
+            .map_err(|invalid| format!("The operation stopped being valid: {}", invalid.errors))?;
+        let operation = single_operation(&document)?;
+        let values = serde_json::from_value(serde_json::Value::Object(variables.clone()))
+            .map_err(|error| format!("The variables could not be read: {error}"))?;
+        apollo_compiler::request::coerce_variable_values(loaded.schema(), operation, &values)
+            .map(drop)
+            .map_err(|error| format!("The variables do not fit the operation: {}", error.message()))
+    }
+
+    /// The request body for this operation, as GraphQL over HTTP defines it.
+    pub(crate) fn payload(&self, variables: &Variables) -> serde_json::Value {
+        let mut payload = serde_json::json!({ "query": self.text, "variables": variables });
+        if let (Some(name), Some(object)) = (&self.name, payload.as_object_mut()) {
+            object.insert("operationName".to_owned(), serde_json::Value::String(name.clone()));
+        }
+        payload
     }
 
     /// The estimate as text: cost, depth, cost per top-level field, and the assumptions.

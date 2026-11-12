@@ -56,7 +56,7 @@ cargo test --workspace --all-features
 - [x] **9. Command cache and refresh.** The command runs once within `ttl`. A 401 runs it again and retries the
   request once.
   Done when: `cargo test headers_refresh`
-- [ ] **10. `execute`, approved.** With a client that accepts the prompt, the operation and variables reach the mock
+- [x] **10. `execute`, approved.** With a client that accepts the prompt, the operation and variables reach the mock
   server and the tool returns `data`, `errors` and `extensions` with the estimate. The prompt names the endpoint,
   the kind, the operation, the variables and the cost.
   Done when: `cargo test execute_approved`
