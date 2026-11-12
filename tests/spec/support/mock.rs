@@ -9,13 +9,11 @@ use std::sync::{Arc, Mutex};
 #[derive(Debug, Clone)]
 pub(crate) struct Recorded {
     /// The request method, such as `POST`.
-    #[expect(dead_code, reason = "first read by the limits slice")]
     pub(crate) method: String,
     /// Header names, lowercased, with their values.
     #[expect(dead_code, reason = "first read by the header slices")]
     pub(crate) headers: Vec<(String, String)>,
     /// The request body.
-    #[expect(dead_code, reason = "first read by the introspection slice")]
     pub(crate) body: String,
 }
 
@@ -70,6 +68,11 @@ impl MockServer {
     /// Starts a server that fails every request. For tests where no request should arrive at all.
     pub(crate) fn unreachable() -> Self {
         Self::start(|_| Response::new(500, "this endpoint should not have been called"))
+    }
+
+    /// Starts a server that answers as `api` does.
+    pub(crate) fn serving(api: super::FixtureApi) -> Self {
+        Self::start(move |request| api.respond(request))
     }
 
     /// The URL to put in a config file.

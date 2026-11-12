@@ -11,6 +11,8 @@ mod describe;
 #[cfg(test)]
 mod introspect_file;
 #[cfg(test)]
+mod introspect_http;
+#[cfg(test)]
 mod list_endpoints;
 #[cfg(test)]
 mod search_schema;

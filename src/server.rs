@@ -12,7 +12,8 @@ use serde::Deserialize;
 use tokio::sync::Mutex;
 
 use crate::config::{Config, Endpoint};
-use crate::schema::Loaded;
+use crate::http::Client;
+use crate::schema::{Loaded, introspection};
 use crate::suggest::backticked;
 
 /// What the server tells a client about itself and how to use it.
@@ -28,6 +29,7 @@ pub(crate) struct Fieldtrip {
     config: Arc<Config>,
     /// Schemas loaded so far, by endpoint name. The lock is held while loading, so each schema loads once.
     schemas: Arc<Mutex<HashMap<String, Arc<Loaded>>>>,
+    http: Client,
 }
 
 /// Arguments of `describe`.
@@ -60,11 +62,12 @@ struct IntrospectArguments {
 
 #[tool_router]
 impl Fieldtrip {
-    /// Creates a server for `config`.
-    pub(crate) fn new(config: Config) -> Self {
+    /// Creates a server for `config` that reaches endpoints through `http`.
+    pub(crate) fn new(config: Config, http: Client) -> Self {
         Self {
             config: Arc::new(config),
             schemas: Arc::default(),
+            http,
         }
     }
 
@@ -128,8 +131,9 @@ impl Fieldtrip {
     async fn introspect(&self, Parameters(arguments): Parameters<IntrospectArguments>) -> ToolResult {
         let name = &arguments.endpoint;
         let schema = self.schema(name, arguments.refresh).await?;
-        let source = self.endpoint(name)?.schema.as_ref().map_or_else(
-            || "loaded by introspection".to_owned(),
+        let endpoint = self.endpoint(name)?;
+        let source = endpoint.schema.as_ref().map_or_else(
+            || format!("loaded by introspection from {}", endpoint.url),
             |path| format!("read from the file {}", path.display()),
         );
         Ok(format!("Schema for `{name}`, {source}.\n{}", schema.overview()))
@@ -155,27 +159,26 @@ impl Fieldtrip {
         if let Some(loaded) = schemas.get(name).filter(|_| !refresh) {
             return Ok(Arc::clone(loaded));
         }
-        let loaded = Arc::new(load(name, endpoint)?);
+        let loaded = Arc::new(self.load(name, endpoint).await?);
         schemas.insert(name.to_owned(), Arc::clone(&loaded));
         drop(schemas);
         Ok(loaded)
     }
-}
 
-/// Loads the schema for `endpoint` from its configured source.
-fn load(name: &str, endpoint: &Endpoint) -> Result<Loaded, String> {
-    let Some(path) = &endpoint.schema else {
-        return Err(format!(
-            "Endpoint `{name}` has no schema file, and introspection is not available yet."
-        ));
-    };
-    let text = std::fs::read_to_string(path).map_err(|error| {
-        format!(
-            "Could not read the schema file {} for endpoint `{name}`: {error}",
-            path.display()
-        )
-    })?;
-    Loaded::from_sdl(&text, path)
+    /// Loads the schema for `endpoint` from its file, or by introspection when it has none.
+    async fn load(&self, name: &str, endpoint: &Endpoint) -> Result<Loaded, String> {
+        let Some(path) = &endpoint.schema else {
+            let sdl = introspection::fetch(&self.http, endpoint).await?;
+            return Loaded::from_sdl(&sdl, &format!("The introspection result from {}", endpoint.url));
+        };
+        let text = std::fs::read_to_string(path).map_err(|error| {
+            format!(
+                "Could not read the schema file {} for endpoint `{name}`: {error}",
+                path.display()
+            )
+        })?;
+        Loaded::from_sdl(&text, &format!("The schema file {}", path.display()))
+    }
 }
 
 #[expect(

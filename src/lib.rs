@@ -5,6 +5,7 @@
 
 mod cli;
 mod config;
+mod http;
 mod schema;
 mod server;
 mod suggest;
@@ -28,6 +29,9 @@ enum Error {
     /// The async runtime could not be created.
     #[error("could not start the async runtime: {0}")]
     Runtime(#[source] std::io::Error),
+    /// The HTTP client could not be set up.
+    #[error("{0}")]
+    Http(String),
     /// The MCP session failed.
     #[error("the MCP session failed: {0}")]
     Session(String),
@@ -78,7 +82,7 @@ fn start(args: &Args) -> Result<(), Error> {
 
 /// Serves MCP on stdio until the client disconnects.
 async fn serve(config: Config) -> Result<(), Error> {
-    let service = Fieldtrip::new(config)
+    let service = Fieldtrip::new(config, http::Client::new().map_err(Error::Http)?)
         .serve(rmcp::transport::stdio())
         .await
         .map_err(|error| Error::Session(error.to_string()))?;

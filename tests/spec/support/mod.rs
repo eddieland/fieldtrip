@@ -1,5 +1,6 @@
 //! The test harness: an MCP client that drives the `fieldtrip` binary over stdio, and a mock GraphQL endpoint.
 
+mod api;
 mod mock;
 
 use std::io::{BufRead as _, BufReader, Read as _, Write as _};
@@ -12,7 +13,8 @@ use std::time::Duration;
 use serde_json::{Value, json};
 use tempfile::TempDir;
 
-pub(crate) use self::mock::MockServer;
+pub(crate) use self::api::FixtureApi;
+pub(crate) use self::mock::{MockServer, Response};
 
 /// How long to wait for the server to answer before failing the test.
 const REPLY_TIMEOUT: Duration = Duration::from_secs(20);
@@ -78,6 +80,13 @@ impl Mcp {
         let mut child = Command::new(env!("CARGO_BIN_EXE_fieldtrip"))
             .args(args)
             .current_dir(dir.path())
+            // The server honors the system proxy settings. Tests talk to a local mock, so they must not see any.
+            .env_remove("HTTP_PROXY")
+            .env_remove("HTTPS_PROXY")
+            .env_remove("ALL_PROXY")
+            .env_remove("http_proxy")
+            .env_remove("https_proxy")
+            .env_remove("all_proxy")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())

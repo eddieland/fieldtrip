@@ -164,9 +164,11 @@ fn deprecation(directives: &DirectiveList) -> String {
     let Some(directive) = directives.get("deprecated") else {
         return String::new();
     };
+    // Introspection reports the default reason for a bare `@deprecated`, so it is treated as no reason at all.
     directive
         .specified_argument_by_name("reason")
         .and_then(|reason| reason.as_str())
+        .filter(|reason| *reason != "No longer supported")
         .map_or_else(
             || " @deprecated".to_owned(),
             |reason| format!(" @deprecated(reason: {})", quoted(reason)),

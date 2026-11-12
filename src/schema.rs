@@ -1,11 +1,10 @@
 //! The in-memory schema that every tool reads, whichever source it was loaded from.
 
 mod describe;
+pub(crate) mod introspection;
 mod overview;
 mod render;
 mod search;
-
-use std::path::Path;
 
 use apollo_compiler::collections::HashMap;
 use apollo_compiler::schema::Implementers;
@@ -23,24 +22,21 @@ pub(crate) struct Loaded {
 }
 
 impl Loaded {
-    /// Builds a schema from SDL text. `origin` is the file it came from, used in error messages.
+    /// Builds a schema from SDL text. `origin` says where the text came from, for error messages, as in
+    /// `the schema file /path/schema.graphql`.
     ///
     /// # Errors
     ///
     /// Returns the parser's and validator's diagnostics when the text is not a valid schema.
-    pub(crate) fn from_sdl(text: &str, origin: &Path) -> Result<Self, String> {
-        let schema = Schema::parse_and_validate(text, origin).map_err(|invalid| {
+    pub(crate) fn from_sdl(text: &str, origin: &str) -> Result<Self, String> {
+        let schema = Schema::parse_and_validate(text, "schema.graphql").map_err(|invalid| {
             let report = invalid.errors.to_string();
             let mut lines: Vec<&str> = report.lines().take(MAX_DIAGNOSTIC_LINES + 1).collect();
             if lines.len() > MAX_DIAGNOSTIC_LINES {
                 lines.truncate(MAX_DIAGNOSTIC_LINES);
                 lines.push("(more diagnostics left out)");
             }
-            format!(
-                "the schema file {} is not a valid GraphQL schema:\n{}",
-                origin.display(),
-                lines.join("\n")
-            )
+            format!("{origin} is not a valid GraphQL schema:\n{}", lines.join("\n"))
         })?;
         let implementers = schema.implementers_map();
         Ok(Self { schema, implementers })
