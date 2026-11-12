@@ -25,6 +25,7 @@ type Query {
   products: [Product!]!
   "Full-text search across products and users."
   search(text: String!, limit: Int): [SearchResult!]!
+  catalog(pageSize: Int): ProductPage!
   node(id: ID!): Node
 }
 
@@ -79,6 +80,12 @@ type Product implements Node {
   priceCents: Int!
   tags: [String!]!
   reviews(limit: Int): [Review!]!
+  related(take: Int = 4): [Product!]!
+}
+
+type ProductPage {
+  items: [Product!]!
+  total: Int!
 }
 
 type Review {

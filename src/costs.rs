@@ -31,7 +31,16 @@ pub(crate) struct CostMap {
 struct Rule {
     pattern: Pattern,
     cost: Option<u64>,
-    multiplier: Option<u64>,
+    multiplier: Option<Multiplier>,
+}
+
+/// Where the size of a list comes from, when a rule says.
+#[derive(Debug)]
+pub(crate) enum Multiplier {
+    /// This many items, whatever the operation asks for.
+    Fixed(u64),
+    /// The value of the argument with this name.
+    Argument(String),
 }
 
 /// A type followed by field names: `User.orders`, `Query.viewer.orders`, `*.orders`.
@@ -87,7 +96,7 @@ impl Part {
 #[serde(deny_unknown_fields)]
 struct RawRule {
     cost: Option<u64>,
-    multiplier: Option<u64>,
+    multiplier: Option<toml::Value>,
 }
 
 impl CostMap {
@@ -134,12 +143,16 @@ impl CostMap {
     }
 
     /// The multiplier a rule sets for the field at the end of `path`, with that rule's pattern as written.
-    pub(crate) fn multiplier(&self, path: &[Step<'_>]) -> Option<(u64, &str)> {
-        self.setting(path, |rule| rule.multiplier)
+    pub(crate) fn multiplier(&self, path: &[Step<'_>]) -> Option<(&Multiplier, &str)> {
+        self.setting(path, |rule| rule.multiplier.as_ref())
     }
 
     /// Finds one setting among the rules that match `path` and set it. The most specific pattern wins.
-    fn setting<T>(&self, path: &[Step<'_>], get: impl Fn(&Rule) -> Option<T>) -> Option<(T, &str)> {
+    fn setting<'map, T>(
+        &'map self,
+        path: &[Step<'_>],
+        get: impl Fn(&'map Rule) -> Option<T>,
+    ) -> Option<(T, &'map str)> {
         self.rules
             .iter()
             .filter(|rule| rule.pattern.matches(path))
@@ -155,10 +168,25 @@ impl Rule {
         if raw.cost.is_none() && raw.multiplier.is_none() {
             return Err(format!("the rule `{pattern}` sets neither `cost` nor `multiplier`"));
         }
+        let multiplier = match &raw.multiplier {
+            None => None,
+            Some(toml::Value::Integer(size)) => {
+                Some(Multiplier::Fixed(u64::try_from(*size).map_err(|_error| {
+                    format!("the `multiplier` of the rule `{pattern}` cannot be negative")
+                })?))
+            }
+            Some(toml::Value::String(argument)) if is_name(argument) => Some(Multiplier::Argument(argument.clone())),
+            Some(_) => {
+                return Err(format!(
+                    "the `multiplier` of the rule `{pattern}` must be a whole number, or the name of the argument \
+                     that carries the size"
+                ));
+            }
+        };
         Ok(Self {
             pattern: Pattern::parse(pattern)?,
             cost: raw.cost,
-            multiplier: raw.multiplier,
+            multiplier,
         })
     }
 }

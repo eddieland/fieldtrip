@@ -11,7 +11,7 @@ use apollo_compiler::validation::Valid;
 use serde_json::Map;
 
 use crate::config::Endpoint;
-use crate::costs::{CostMap, Step};
+use crate::costs::{CostMap, Multiplier, Step};
 use crate::schema::Loaded;
 use crate::suggest::{backticked, nearest};
 
@@ -354,11 +354,21 @@ impl<'doc> Estimator<'doc> {
         }
 
         // The size the field carries: the cost map's word, or what its arguments say.
-        let own_size = if let Some((multiplier, rule)) = costs.multiplier(&self.path) {
-            self.used(&format!("multiplier {multiplier}"), rule);
-            Size::Known(multiplier)
-        } else {
-            self.size_argument(field)
+        let mut takes_a_size = SIZE_ARGUMENTS
+            .iter()
+            .any(|name| field.definition.argument_by_name(name).is_some());
+        let own_size = match costs.multiplier(&self.path) {
+            Some((Multiplier::Fixed(multiplier), rule)) => {
+                self.used(&format!("multiplier {multiplier}"), rule);
+                Size::Known(*multiplier)
+            }
+            // A pattern can reach fields that have no such argument. Those keep the built-in ones.
+            Some((Multiplier::Argument(argument), rule)) if field.definition.argument_by_name(argument).is_some() => {
+                self.used(&format!("multiplier from `{argument}`"), rule);
+                takes_a_size = true;
+                self.size_argument(field, &[argument.as_str()])
+            }
+            _ => self.size_argument(field, &SIZE_ARGUMENTS),
         };
         if !is_list {
             let children = self.selection_set(&field.selection_set, &own_size, level + 1, depth);
@@ -371,7 +381,7 @@ impl<'doc> Estimator<'doc> {
         } else {
             own_size
         };
-        let size = self.settled(field, size);
+        let size = self.settled(size, takes_a_size);
         let children = self.selection_set(&field.selection_set, &Size::Absent, level + 1, depth);
         if is_mutation {
             // The mutation is charged once, and each item it returns is an object like any other.
@@ -381,7 +391,10 @@ impl<'doc> Estimator<'doc> {
     }
 
     /// Turns what is known about a list's size into a number, assuming one when nothing is known.
-    fn settled(&mut self, field: &Field, size: Size) -> u64 {
+    ///
+    /// `takes_a_size` says whether the field has an argument that could have given the size, which decides how
+    /// the assumption is worded.
+    fn settled(&mut self, size: Size, takes_a_size: bool) -> u64 {
         let path = self.coordinate();
         match size {
             Size::Known(size) => size,
@@ -393,10 +406,7 @@ impl<'doc> Estimator<'doc> {
                 self.assumed_list_size
             }
             Size::Absent => {
-                let takes_one = SIZE_ARGUMENTS
-                    .iter()
-                    .any(|name| field.definition.argument_by_name(name).is_some());
-                let why = if takes_one {
+                let why = if takes_a_size {
                     "was given no size argument"
                 } else {
                     "takes no size argument"
@@ -432,18 +442,19 @@ impl<'doc> Estimator<'doc> {
         }
     }
 
-    /// Reads the field's size arguments: from the operation, else from the defaults the schema declares.
-    fn size_argument(&self, field: &Field) -> Size {
+    /// Reads the size the arguments called `names` give the field: from the operation, else from the defaults
+    /// the schema declares.
+    fn size_argument(&self, field: &Field, names: &[&str]) -> Size {
         let mut known: Option<u64> = None;
         let mut unresolved: Option<String> = None;
-        for name in SIZE_ARGUMENTS {
+        for name in names {
             let Some(definition) = field.definition.argument_by_name(name) else {
                 continue;
             };
             let given = field
                 .arguments
                 .iter()
-                .find(|argument| argument.name == name)
+                .find(|argument| argument.name == *name)
                 .map(|argument| &*argument.value);
             let value = match given {
                 Some(Value::Variable(variable)) => {

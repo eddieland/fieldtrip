@@ -86,7 +86,7 @@ cargo test --workspace --all-features
 - [x] **18. Cost map patterns.** `*` stands for any one type or field name. When several rules match, `cost` and
   `multiplier` each come from the most specific rule that sets them.
   Done when: `cargo test cost_patterns`
-- [ ] **19. Multiplier from an argument.** `multiplier = "take"` sizes the list by that argument, given as a
+- [x] **19. Multiplier from an argument.** `multiplier = "take"` sizes the list by that argument, given as a
   literal, through a variable, or by its default in the schema. With no value, the assumed size is used and the
   estimate says so.
   Done when: `cargo test cost_argument`
