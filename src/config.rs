@@ -7,6 +7,7 @@ use std::time::Duration;
 use serde::Deserialize;
 
 use crate::cli::Args;
+use crate::costs::CostMap;
 use crate::headers::Header;
 
 /// Why the configuration could not be loaded.
@@ -75,6 +76,8 @@ pub(crate) struct Endpoint {
     pub(crate) headers: Vec<Header>,
     /// How many items to assume for a list whose size nothing bounds, when estimating cost.
     pub(crate) assumed_list_size: u64,
+    /// The rules that replace the built-in costs for this endpoint. Empty when it has no cost map.
+    pub(crate) costs: CostMap,
     /// How long a request to this endpoint may take.
     pub(crate) timeout: Duration,
     /// Who approves an operation before it is sent.
@@ -118,6 +121,7 @@ struct RawEndpoint {
     #[serde(default)]
     headers: BTreeMap<String, toml::Value>,
     assumed_list_size: Option<u64>,
+    costs: Option<PathBuf>,
     approval: Option<String>,
     auto_approve_cost: Option<u64>,
     timeout: Option<u64>,
@@ -210,7 +214,12 @@ impl Endpoint {
         if raw.timeout == Some(0) {
             return Err("`timeout` is in seconds and must be at least 1".to_owned());
         }
+        let costs = match &raw.costs {
+            Some(path) => CostMap::load(&base.join(path))?,
+            None => CostMap::default(),
+        };
         Ok(Self {
+            costs,
             timeout: raw.timeout.map_or(DEFAULT_TIMEOUT, Duration::from_secs),
             approval,
             auto_approve_cost: raw.auto_approve_cost,

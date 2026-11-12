@@ -66,6 +66,7 @@ pub(crate) struct Launch {
     how: How,
     human: Human,
     env: Vec<(String, String)>,
+    files: Vec<(String, String)>,
 }
 
 /// How the server is told where its configuration is.
@@ -87,6 +88,7 @@ impl Launch {
             how: How::ConfigFlag,
             human: Human::Absent,
             env: Vec::new(),
+            files: Vec::new(),
         }
     }
 
@@ -98,12 +100,19 @@ impl Launch {
             how: How::Flags(flags),
             human: Human::Absent,
             env: Vec::new(),
+            files: Vec::new(),
         }
     }
 
     /// Puts the config file where the server looks when it is given no flags, and gives it no flags.
     pub(crate) fn at_the_default_location(mut self) -> Self {
         self.how = How::DefaultLocation;
+        self
+    }
+
+    /// Writes a file called `name` with `contents` next to the config file, as a cost map for instance.
+    pub(crate) fn file(mut self, name: &str, contents: &str) -> Self {
+        self.files.push((name.to_owned(), contents.to_owned()));
         self
     }
 
@@ -154,6 +163,9 @@ impl Launch {
     pub(super) fn prepare(&self) -> (TempDir, Vec<std::ffi::OsString>, Vec<(String, String)>) {
         let dir = tempfile::tempdir().expect("create a temp dir");
         copy_fixtures(dir.path());
+        for (name, contents) in &self.files {
+            std::fs::write(dir.path().join(name), contents).expect("write an extra file");
+        }
         let config_home = dir.path().join("config-home");
         let mut env = vec![("XDG_CONFIG_HOME".to_owned(), config_home.display().to_string())];
         env.extend(self.env.iter().cloned());

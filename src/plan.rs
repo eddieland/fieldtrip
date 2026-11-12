@@ -10,6 +10,8 @@ use apollo_compiler::executable::{Field, Operation, Selection, SelectionSet};
 use apollo_compiler::validation::Valid;
 use serde_json::Map;
 
+use crate::config::Endpoint;
+use crate::costs::{CostMap, Step};
 use crate::schema::Loaded;
 use crate::suggest::{backticked, nearest};
 
@@ -61,25 +63,28 @@ pub(crate) struct Plan {
     pub(crate) breakdown: Vec<(String, u64)>,
     /// Every guess the estimate rests on.
     pub(crate) assumptions: Vec<String>,
+    /// Every cost map rule the estimate used, and what it set.
+    pub(crate) overrides: Vec<String>,
 }
 
 impl Plan {
     /// Parses and validates `operation` against `loaded`, then estimates its cost.
     ///
-    /// `assumed_list_size` is used for a list whose size nothing in the operation or the schema bounds.
+    /// `name` is the endpoint's name, for messages. `endpoint` supplies the cost map and the size to assume for a
+    /// list that nothing bounds.
     ///
     /// # Errors
     ///
     /// Returns a message listing what is wrong when the text is not exactly one valid query or mutation.
     pub(crate) fn new(
         loaded: &Loaded,
-        endpoint: &str,
+        name: &str,
+        endpoint: &Endpoint,
         operation: &str,
         variables: &Variables,
-        assumed_list_size: u64,
     ) -> Result<Self, String> {
         let document = ExecutableDocument::parse_and_validate(loaded.schema(), operation, "operation.graphql")
-            .map_err(|invalid| invalid_operation(loaded, endpoint, &invalid.errors))?;
+            .map_err(|invalid| invalid_operation(loaded, name, &invalid.errors))?;
         let operation = single_operation(&document)?;
         let kind = match operation.operation_type {
             OperationType::Query => Kind::Query,
@@ -97,12 +102,15 @@ impl Plan {
             document: &document,
             operation,
             variables,
-            assumed_list_size,
+            assumed_list_size: endpoint.assumed_list_size,
+            costs: &endpoint.costs,
+            path: Vec::new(),
             assumptions: Vec::new(),
+            overrides: Vec::new(),
         };
         let mut breakdown = Vec::new();
         let mut depth = 0;
-        estimator.root_fields(&operation.selection_set, kind, &mut breakdown, &mut depth);
+        estimator.top_level(&operation.selection_set, kind, &mut breakdown, &mut depth);
         let cost = breakdown
             .iter()
             .fold(0_u64, |total, (_, cost)| total.saturating_add(*cost));
@@ -114,6 +122,7 @@ impl Plan {
             depth,
             breakdown,
             assumptions: estimator.assumptions,
+            overrides: estimator.overrides,
         })
     }
 
@@ -150,6 +159,12 @@ impl Plan {
         );
         for (key, cost) in &self.breakdown {
             let _ = writeln!(out, "  {key}: {cost}");
+        }
+        if !self.overrides.is_empty() {
+            out.push_str("From the cost map:\n");
+            for used in &self.overrides {
+                let _ = writeln!(out, "  - {used}");
+            }
         }
         if !self.assumptions.is_empty() {
             out.push_str("Assumptions:\n");
@@ -234,13 +249,17 @@ struct Estimator<'doc> {
     operation: &'doc Operation,
     variables: &'doc Variables,
     assumed_list_size: u64,
+    costs: &'doc CostMap,
+    /// The fields from the root down to the one being costed. Cost map rules are matched against it.
+    path: Vec<Step<'doc>>,
     assumptions: Vec<String>,
+    overrides: Vec<String>,
 }
 
 /// What an operation says about the size of a list.
 #[derive(Clone)]
 enum Size {
-    /// A size argument with a known value.
+    /// A size argument with a known value, or a multiplier from the cost map.
     Known(u64),
     /// A size argument was given, but as a variable with no value.
     Unresolved(String),
@@ -248,24 +267,20 @@ enum Size {
     Absent,
 }
 
-impl Estimator<'_> {
+impl<'doc> Estimator<'doc> {
     /// Costs each top-level field, following fragments, and records the deepest nesting seen.
-    fn root_fields(&mut self, set: &SelectionSet, kind: Kind, breakdown: &mut Vec<(String, u64)>, depth: &mut u32) {
+    fn top_level(&mut self, set: &'doc SelectionSet, kind: Kind, breakdown: &mut Vec<(String, u64)>, depth: &mut u32) {
+        let document = self.document;
         for selection in &set.selections {
             match selection {
                 Selection::Field(field) => {
-                    let mut cost = self.field(set, field, &Size::Absent, 1, depth);
-                    if kind == Kind::Mutation {
-                        let is_single_object = !field.selection_set.selections.is_empty() && !field.ty().is_list();
-                        let replaced = if is_single_object { OBJECT_COST } else { 0 };
-                        cost = cost.saturating_sub(replaced).saturating_add(MUTATION_COST);
-                    }
+                    let cost = self.field(set, field, &Size::Absent, 1, depth, kind == Kind::Mutation);
                     breakdown.push((field.response_key().to_string(), cost));
                 }
-                Selection::InlineFragment(inline) => self.root_fields(&inline.selection_set, kind, breakdown, depth),
+                Selection::InlineFragment(inline) => self.top_level(&inline.selection_set, kind, breakdown, depth),
                 Selection::FragmentSpread(spread) => {
-                    if let Some(fragment) = spread.fragment_def(self.document) {
-                        self.root_fields(&fragment.selection_set, kind, breakdown, depth);
+                    if let Some(fragment) = spread.fragment_def(document) {
+                        self.top_level(&fragment.selection_set, kind, breakdown, depth);
                     }
                 }
             }
@@ -274,15 +289,16 @@ impl Estimator<'_> {
 
     /// The cost of everything selected in `set`.
     ///
-    /// `inherited` is a size argument given on the field that owns this set, when that field is not a list
-    /// itself. It bounds the lists directly inside, which is how connection types page.
-    fn selection_set(&mut self, set: &SelectionSet, inherited: &Size, level: u32, depth: &mut u32) -> u64 {
+    /// `inherited` is the size given on the field that owns this set, when that field is not a list itself. It
+    /// bounds the lists directly inside, which is how connection types page.
+    fn selection_set(&mut self, set: &'doc SelectionSet, inherited: &Size, level: u32, depth: &mut u32) -> u64 {
+        let document = self.document;
         let mut total = 0_u64;
         for selection in &set.selections {
             let cost = match selection {
-                Selection::Field(field) => self.field(set, field, inherited, level, depth),
+                Selection::Field(field) => self.field(set, field, inherited, level, depth, false),
                 Selection::InlineFragment(inline) => self.selection_set(&inline.selection_set, inherited, level, depth),
-                Selection::FragmentSpread(spread) => spread.fragment_def(self.document).map_or(0, |fragment| {
+                Selection::FragmentSpread(spread) => spread.fragment_def(document).map_or(0, |fragment| {
                     self.selection_set(&fragment.selection_set, inherited, level, depth)
                 }),
             };
@@ -291,27 +307,83 @@ impl Estimator<'_> {
         total
     }
 
-    /// The cost of one field and everything under it.
-    fn field(&mut self, parent: &SelectionSet, field: &Field, inherited: &Size, level: u32, depth: &mut u32) -> u64 {
+    /// The cost of one field and everything under it. `is_mutation` marks a top-level field of a mutation.
+    fn field(
+        &mut self,
+        parent: &'doc SelectionSet,
+        field: &'doc Field,
+        inherited: &Size,
+        level: u32,
+        depth: &mut u32,
+        is_mutation: bool,
+    ) -> u64 {
         *depth = (*depth).max(level);
-        // Scalars and enums are free, and so are the introspection fields, which servers answer from memory.
-        if field.selection_set.selections.is_empty() || field.name.starts_with("__") {
+        // The introspection fields are answered from memory, and no rule can name them.
+        if field.name.starts_with("__") {
             return 0;
         }
-        let own_size = self.size_argument(field);
-        if !field.ty().is_list() {
-            let children = self.selection_set(&field.selection_set, &own_size, level + 1, depth);
-            return OBJECT_COST.saturating_add(children);
+        self.path.push(Step {
+            parent: parent.ty.as_str(),
+            field: field.name.as_str(),
+        });
+        let cost = self.costed(field, inherited, level, depth, is_mutation);
+        self.path.pop();
+        cost
+    }
+
+    /// The cost of the field at the end of the path: what it costs itself, times its size, plus what is under it.
+    fn costed(&mut self, field: &'doc Field, inherited: &Size, level: u32, depth: &mut u32, is_mutation: bool) -> u64 {
+        let costs = self.costs;
+        let is_leaf = field.selection_set.selections.is_empty();
+        let is_list = field.ty().is_list();
+
+        // What the field itself costs: the cost map's word, or the built-in guess.
+        let own = if let Some((cost, rule)) = costs.cost(&self.path) {
+            self.used(&format!("cost {cost}"), rule);
+            cost
+        } else if is_mutation {
+            MUTATION_COST
+        } else if is_leaf {
+            0
+        } else {
+            OBJECT_COST
+        };
+        // A scalar that costs nothing needs no size, and working one out would only add noise to the assumptions.
+        if is_leaf && (own == 0 || !is_list || is_mutation) {
+            return own;
         }
-        // A list's own size argument wins. Without one, the list takes the size given on the field above it.
+
+        // The size the field carries: the cost map's word, or what its arguments say.
+        let own_size = if let Some((multiplier, rule)) = costs.multiplier(&self.path) {
+            self.used(&format!("multiplier {multiplier}"), rule);
+            Size::Known(multiplier)
+        } else {
+            self.size_argument(field)
+        };
+        if !is_list {
+            let children = self.selection_set(&field.selection_set, &own_size, level + 1, depth);
+            return own.saturating_add(children);
+        }
+
+        // A list's own size wins. Without one, the list takes the size given on the field above it.
         let size = if matches!(own_size, Size::Absent) {
             inherited.clone()
         } else {
             own_size
         };
+        let size = self.settled(field, size);
+        let children = self.selection_set(&field.selection_set, &Size::Absent, level + 1, depth);
+        if is_mutation {
+            // The mutation is charged once, and each item it returns is an object like any other.
+            return own.saturating_add(size.saturating_mul(OBJECT_COST.saturating_add(children)));
+        }
+        size.saturating_mul(own.saturating_add(children))
+    }
 
-        let path = format!("`{}.{}`", parent.ty, field.name);
-        let size = match size {
+    /// Turns what is known about a list's size into a number, assuming one when nothing is known.
+    fn settled(&mut self, field: &Field, size: Size) -> u64 {
+        let path = self.coordinate();
+        match size {
             Size::Known(size) => size,
             Size::Unresolved(variable) => {
                 self.assume(format!(
@@ -335,9 +407,22 @@ impl Estimator<'_> {
                 ));
                 self.assumed_list_size
             }
-        };
-        let children = self.selection_set(&field.selection_set, &Size::Absent, level + 1, depth);
-        size.saturating_mul(OBJECT_COST.saturating_add(children))
+        }
+    }
+
+    /// `` `Type.field` `` for the field at the end of the path.
+    fn coordinate(&self) -> String {
+        self.path
+            .last()
+            .map_or_else(String::new, |step| format!("`{}.{}`", step.parent, step.field))
+    }
+
+    /// Records, once, that the cost map rule `rule` set `what` for the field at the end of the path.
+    fn used(&mut self, what: &str, rule: &str) {
+        let used = format!("{}: {what} (rule `{rule}`)", self.coordinate());
+        if !self.overrides.contains(&used) {
+            self.overrides.push(used);
+        }
     }
 
     /// Records an assumption once.

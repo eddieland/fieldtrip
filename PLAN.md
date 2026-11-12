@@ -78,7 +78,7 @@ cargo test --workspace --all-features
   it, `execute` asks for approval by returning an input-required result, and runs only when the client retries with
   an accepted response for the same operation.
   Done when: `cargo test protocol_2026`
-- [ ] **17. Cost map, exact paths.** An endpoint's `costs` file sets a `cost` or a `multiplier` for the field at a
+- [x] **17. Cost map, exact paths.** An endpoint's `costs` file sets a `cost` or a `multiplier` for the field at a
   path such as `Query.viewer.orders` or `User.orders`. The estimate uses the rules and lists each one it used. A
   longer path wins over a shorter one. `list_endpoints` shows the map. A query made cheap by the map can pass
   `auto_approve_cost`.

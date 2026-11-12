@@ -149,6 +149,11 @@ impl Fieldtrip {
                 }
             }
             let _ = writeln!(out, "  approval: {}", approval::policy(endpoint));
+            if let Some(source) = &endpoint.costs.source {
+                let rules = endpoint.costs.len();
+                let plural = if rules == 1 { "" } else { "s" };
+                let _ = writeln!(out, "  cost map: {} ({rules} rule{plural})", source.display());
+            }
             if !endpoint.headers.is_empty() {
                 let names: Vec<&str> = endpoint.headers.iter().map(|header| header.name.as_str()).collect();
                 let _ = writeln!(out, "  headers: {}", names.join(", "));
@@ -191,15 +196,9 @@ impl Fieldtrip {
     )]
     async fn estimate_cost(&self, Parameters(arguments): Parameters<EstimateArguments>) -> ToolResult {
         let name = &arguments.endpoint;
-        let assumed_list_size = self.endpoint(name)?.assumed_list_size;
+        let endpoint = self.endpoint(name)?;
         let schema = self.schema(name, false).await?;
-        let plan = Plan::new(
-            &schema,
-            name,
-            &arguments.operation,
-            &arguments.variables,
-            assumed_list_size,
-        )?;
+        let plan = Plan::new(&schema, name, endpoint, &arguments.operation, &arguments.variables)?;
         Ok(format!("Valid {} for `{name}`.\n{}", plan.title(), plan.estimate()))
     }
 
@@ -219,13 +218,7 @@ impl Fieldtrip {
         let name = &arguments.endpoint;
         let endpoint = self.endpoint(name)?;
         let schema = self.schema(name, false).await?;
-        let plan = Plan::new(
-            &schema,
-            name,
-            &arguments.operation,
-            &arguments.variables,
-            endpoint.assumed_list_size,
-        )?;
+        let plan = Plan::new(&schema, name, endpoint, &arguments.operation, &arguments.variables)?;
         plan.check_variables(&schema, &arguments.variables)?;
 
         // Nothing below this point runs unless the human accepted, or the user's config waives the prompt.

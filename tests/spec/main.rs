@@ -11,6 +11,8 @@ mod approval_policy;
 #[cfg(test)]
 mod cli_flags;
 #[cfg(test)]
+mod cost_map;
+#[cfg(test)]
 mod describe;
 #[cfg(test)]
 mod estimate_cost;

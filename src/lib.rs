@@ -6,6 +6,7 @@
 mod approval;
 mod cli;
 mod config;
+mod costs;
 mod headers;
 mod http;
 mod plan;
