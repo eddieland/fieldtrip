@@ -27,11 +27,11 @@ pub(crate) enum Human {
     /// The human accepts every prompt.
     Accepts,
     /// The human declines every prompt.
-    #[expect(dead_code, reason = "first used by the `execute_refused` slice")]
     Declines,
     /// The human dismisses every prompt.
-    #[expect(dead_code, reason = "first used by the `execute_refused` slice")]
     Cancels,
+    /// The client says it can show prompts, but answers each one with an error.
+    Broken,
 }
 
 /// The text and error flag of a tool result.
@@ -315,13 +315,19 @@ impl Mcp {
                     .and_then(Value::as_str)
                     .unwrap_or_default();
                 self.prompts.push(prompt.to_owned());
-                let result = match self.human {
-                    Human::Accepts => json!({ "action": "accept", "content": {} }),
-                    Human::Declines => json!({ "action": "decline" }),
-                    Human::Cancels => json!({ "action": "cancel" }),
+                match self.human {
+                    Human::Accepts => {
+                        json!({ "jsonrpc": "2.0", "id": id, "result": { "action": "accept", "content": {} } })
+                    }
+                    Human::Declines => json!({ "jsonrpc": "2.0", "id": id, "result": { "action": "decline" } }),
+                    Human::Cancels => json!({ "jsonrpc": "2.0", "id": id, "result": { "action": "cancel" } }),
+                    Human::Broken => json!({
+                        "jsonrpc": "2.0",
+                        "id": id,
+                        "error": { "code": -32603, "message": "the prompt could not be shown" },
+                    }),
                     Human::Absent => panic!("the server sent a prompt to a client with no elicitation support"),
-                };
-                json!({ "jsonrpc": "2.0", "id": id, "result": result })
+                }
             }
             "ping" => json!({ "jsonrpc": "2.0", "id": id, "result": {} }),
             other => json!({

@@ -60,7 +60,7 @@ cargo test --workspace --all-features
   server and the tool returns `data`, `errors` and `extensions` with the estimate. The prompt names the endpoint,
   the kind, the operation, the variables and the cost.
   Done when: `cargo test execute_approved`
-- [ ] **11. `execute`, not approved.** On decline, on cancel, and with a client that has no elicitation support, the
+- [x] **11. `execute`, not approved.** On decline, on cancel, and with a client that has no elicitation support, the
   mock server receives zero requests and the tool result says the operation was not sent.
   Done when: `cargo test execute_refused`
 - [ ] **12. Approval policy.** A mutation prompts even when a query of the same cost would not. A query at or below
