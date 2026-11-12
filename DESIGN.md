@@ -116,3 +116,4 @@ Settled. To change one, ask the user, then add a new dated line instead of editi
 - 2026-11-12: A request has `timeout` seconds to complete, 30 unless the endpoint sets it.
 - 2026-11-12: A tool result carries at most 40,000 characters, and at most 1 MiB of a response body is read.
 - 2026-11-12: A redirect is reported as an error that names its target. It is never followed.
+- 2026-11-12: `--url` defines one endpoint called `default`. A relative `--schema` is relative to the working directory.

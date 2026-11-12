@@ -15,6 +15,18 @@ pub(crate) enum ConfigError {
     /// Neither `--config` nor a home directory to find the default file in.
     #[error("no --config given and no home directory to look for the default config file in")]
     NoDefaultPath,
+    /// No flags, and no config file at the default location.
+    #[error(
+        "there is no config file at {path}. Create one, pass --config <path>, or pass --url <url> to serve a single \
+         endpoint without a config file"
+    )]
+    NothingConfigured {
+        /// The default location that was looked at.
+        path: PathBuf,
+    },
+    /// `--url` or `--schema` has a value the server cannot use.
+    #[error("the command line is not usable: {0}")]
+    Flags(String),
     /// The file could not be read.
     #[error("could not read the config file {path}: {source}")]
     Read {
@@ -80,6 +92,9 @@ pub(crate) enum Approval {
     Client,
 }
 
+/// The name of the endpoint that `--url` defines.
+const FLAG_ENDPOINT: &str = "default";
+
 /// The `timeout` of an endpoint that does not set one.
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -95,7 +110,7 @@ struct RawConfig {
 }
 
 /// One `[endpoints.NAME]` table as written.
-#[derive(Deserialize)]
+#[derive(Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawEndpoint {
     url: String,
@@ -109,21 +124,45 @@ struct RawEndpoint {
 }
 
 impl Config {
-    /// Loads the config file named by `--config`, or the default one.
+    /// Loads the config file named by `--config` or the default one, or builds a configuration from `--url`.
     ///
     /// # Errors
     ///
     /// Returns a [`ConfigError`] when the file is missing, is not valid TOML, or describes an unusable endpoint.
     pub(crate) fn load(args: &Args) -> Result<Self, ConfigError> {
-        let path = match &args.config {
-            Some(path) => path.clone(),
-            None => default_path().ok_or(ConfigError::NoDefaultPath)?,
+        if let Some(url) = &args.url {
+            return Self::from_flags(url, args.schema.as_ref());
+        }
+        let (path, is_default) = match &args.config {
+            Some(path) => (path.clone(), false),
+            None => (default_path().ok_or(ConfigError::NoDefaultPath)?, true),
         };
-        let text = std::fs::read_to_string(&path).map_err(|source| ConfigError::Read {
-            path: path.clone(),
-            source,
+        let text = std::fs::read_to_string(&path).map_err(|source| {
+            if is_default && source.kind() == std::io::ErrorKind::NotFound {
+                ConfigError::NothingConfigured { path: path.clone() }
+            } else {
+                ConfigError::Read {
+                    path: path.clone(),
+                    source,
+                }
+            }
         })?;
         Self::parse(&text, &path)
+    }
+
+    /// Builds the configuration for `--url`, with an optional `--schema`: one endpoint called `default`.
+    fn from_flags(url: &str, schema: Option<&PathBuf>) -> Result<Self, ConfigError> {
+        let raw = RawEndpoint {
+            url: url.to_owned(),
+            schema: schema.cloned(),
+            ..RawEndpoint::default()
+        };
+        // A relative `--schema` is relative to where the server was started, as any command-line path is.
+        let base = std::env::current_dir().unwrap_or_else(|_error| PathBuf::from("."));
+        let endpoint = Endpoint::from_raw(raw, &base).map_err(ConfigError::Flags)?;
+        Ok(Self {
+            endpoints: BTreeMap::from([(FLAG_ENDPOINT.to_owned(), endpoint)]),
+        })
     }
 
     /// Parses and validates the text of the config file at `path`.

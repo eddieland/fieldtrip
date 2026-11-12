@@ -61,8 +61,20 @@ pub(crate) struct Mcp {
 #[derive(Debug)]
 pub(crate) struct Launch {
     config: String,
+    how: How,
     human: Human,
     env: Vec<(String, String)>,
+}
+
+/// How the server is told where its configuration is.
+#[derive(Debug)]
+enum How {
+    /// With `--config <file>`.
+    ConfigFlag,
+    /// With no flags, and the config file at its default location.
+    DefaultLocation,
+    /// With these flags, and no config file anywhere.
+    Flags(Vec<String>),
 }
 
 impl Launch {
@@ -70,9 +82,27 @@ impl Launch {
     pub(crate) fn new(config: &str) -> Self {
         Self {
             config: config.to_owned(),
+            how: How::ConfigFlag,
             human: Human::Absent,
             env: Vec::new(),
         }
+    }
+
+    /// A launch with `flags` on the command line and no config file.
+    pub(crate) fn flags(flags: &[&str]) -> Self {
+        let flags = flags.iter().map(|flag| (*flag).to_owned()).collect();
+        Self {
+            config: String::new(),
+            how: How::Flags(flags),
+            human: Human::Absent,
+            env: Vec::new(),
+        }
+    }
+
+    /// Puts the config file where the server looks when it is given no flags, and gives it no flags.
+    pub(crate) fn at_the_default_location(mut self) -> Self {
+        self.how = How::DefaultLocation;
+        self
     }
 
     /// Sets an environment variable for the server process.
@@ -89,21 +119,18 @@ impl Launch {
 
     /// Starts the server and completes the MCP handshake.
     pub(crate) fn start(self) -> Mcp {
-        let (dir, config_path) = prepare(&self.config);
-        let mut mcp = Mcp::spawn(
-            &["--config".as_ref(), config_path.as_os_str()],
-            &self.env,
-            self.human,
-            dir,
-        );
+        let (dir, arguments, env) = self.prepare();
+        let arguments: Vec<&std::ffi::OsStr> = arguments.iter().map(AsRef::as_ref).collect();
+        let mut mcp = Mcp::spawn(&arguments, &env, self.human, dir);
         mcp.initialize();
         mcp
     }
 
-    /// Starts the server expecting it to refuse the config, and returns what it wrote to stderr.
+    /// Starts the server expecting it to refuse to start, and returns what it wrote to stderr.
     pub(crate) fn fails_to_start(self) -> String {
-        let (dir, config_path) = prepare(&self.config);
-        let output = server_command(&["--config".as_ref(), config_path.as_os_str()], &self.env, dir.path())
+        let (dir, arguments, env) = self.prepare();
+        let arguments: Vec<&std::ffi::OsStr> = arguments.iter().map(AsRef::as_ref).collect();
+        let output = server_command(&arguments, &env, dir.path())
             .stdin(Stdio::null())
             .output()
             .expect("run the fieldtrip binary");
@@ -118,15 +145,33 @@ impl Launch {
         );
         stderr
     }
-}
 
-/// Writes `config` into a fresh directory, next to a copy of everything in `tests/fixtures/`.
-fn prepare(config: &str) -> (TempDir, std::path::PathBuf) {
-    let dir = tempfile::tempdir().expect("create a temp dir");
-    copy_fixtures(dir.path());
-    let config_path = dir.path().join("fieldtrip.toml");
-    std::fs::write(&config_path, config).expect("write the config file");
-    (dir, config_path)
+    /// Creates the working directory with the fixtures in it, and works out the command line and environment.
+    ///
+    /// The config home always points into that directory, so a test never reads the developer's own config.
+    fn prepare(&self) -> (TempDir, Vec<std::ffi::OsString>, Vec<(String, String)>) {
+        let dir = tempfile::tempdir().expect("create a temp dir");
+        copy_fixtures(dir.path());
+        let config_home = dir.path().join("config-home");
+        let mut env = vec![("XDG_CONFIG_HOME".to_owned(), config_home.display().to_string())];
+        env.extend(self.env.iter().cloned());
+
+        let arguments = match &self.how {
+            How::ConfigFlag => {
+                let path = dir.path().join("fieldtrip.toml");
+                std::fs::write(&path, &self.config).expect("write the config file");
+                vec!["--config".into(), path.into_os_string()]
+            }
+            How::DefaultLocation => {
+                let folder = config_home.join("fieldtrip");
+                std::fs::create_dir_all(&folder).expect("create the config folder");
+                std::fs::write(folder.join("config.toml"), &self.config).expect("write the config file");
+                Vec::new()
+            }
+            How::Flags(flags) => flags.iter().map(Into::into).collect(),
+        };
+        (dir, arguments, env)
+    }
 }
 
 /// The command that runs the server in `dir` with `args` and `env`.

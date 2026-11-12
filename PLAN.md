@@ -72,7 +72,7 @@ cargo test --workspace --all-features
 - [x] **14. Limits.** A redirect from the endpoint is refused and its target receives no request. An oversized
   response is truncated with a note. An endpoint that doesn't answer times out with an error.
   Done when: `cargo test limits`
-- [ ] **15. `--url` and `--schema`.** The server starts with no config file and serves one endpoint from the flags.
+- [x] **15. `--url` and `--schema`.** The server starts with no config file and serves one endpoint from the flags.
   Done when: `cargo test cli_flags`
 - [ ] **16. Protocol 2026-07-28.** The server also speaks the MCP revision that has no `initialize` handshake. On
   it, `execute` asks for approval by returning an input-required result, and runs only when the client retries with
