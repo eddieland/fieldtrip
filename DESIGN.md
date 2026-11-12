@@ -109,3 +109,6 @@ Settled. To change one, ask the user, then add a new dated line instead of editi
 - 2026-11-12: Variables are checked against the operation before the human is asked.
 - 2026-11-12: `execute` returns the response body as the server wrote it. A response with no `data` is an error.
 - 2026-11-12: The prompt is a plain accept or decline, with no form fields. Any other answer counts as a refusal.
+- 2026-11-12: A value from an `env` or `command` plug is removed from response bodies, in case the server echoes it.
+- 2026-11-12: Literals and values shorter than 8 characters are not removed, because that would damage responses.
+- 2026-11-12: `FIELDTRIP_LOG` sets the log level for fieldtrip and the MCP SDK. Other crates stay at warnings.

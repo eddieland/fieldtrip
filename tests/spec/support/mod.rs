@@ -50,6 +50,7 @@ pub(crate) struct Mcp {
     stdin: Option<ChildStdin>,
     incoming: Receiver<Value>,
     stderr: Arc<Mutex<String>>,
+    stderr_reader: Option<std::thread::JoinHandle<()>>,
     next_id: u64,
     human: Human,
     prompts: Vec<String>,
@@ -181,7 +182,7 @@ impl Mcp {
 
         let stderr = Arc::new(Mutex::new(String::new()));
         let stderr_sink = Arc::clone(&stderr);
-        std::thread::spawn(move || {
+        let stderr_reader = std::thread::spawn(move || {
             let mut chunk = [0_u8; 4096];
             while let Ok(read) = child_stderr.read(&mut chunk) {
                 if read == 0 {
@@ -197,6 +198,7 @@ impl Mcp {
             stdin: Some(stdin),
             incoming,
             stderr,
+            stderr_reader: Some(stderr_reader),
             next_id: 0,
             human,
             prompts: Vec::new(),
@@ -266,6 +268,24 @@ impl Mcp {
     /// The text of every approval prompt the server has shown so far.
     pub(crate) fn prompts(&self) -> &[String] {
         &self.prompts
+    }
+
+    /// Ends the session, waits for the server to exit, and returns everything it wrote to stderr.
+    pub(crate) fn finish(mut self) -> String {
+        drop(self.stdin.take());
+        for _ in 0..100 {
+            if self.child.try_wait().expect("poll the server process").is_some() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        // A server that ignored the end of its input is killed, which also ends the stderr stream.
+        let _ignored = self.child.kill();
+        let _ignored = self.child.wait();
+        if let Some(reader) = self.stderr_reader.take() {
+            reader.join().expect("the stderr reader");
+        }
+        self.stderr()
     }
 
     /// Everything the server has written to stderr so far.

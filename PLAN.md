@@ -66,7 +66,7 @@ cargo test --workspace --all-features
 - [x] **12. Approval policy.** A mutation prompts even when a query of the same cost would not. A query at or below
   `auto_approve_cost` runs with no prompt. `approval = "client"` runs with no prompt.
   Done when: `cargo test approval_policy`
-- [ ] **13. No secrets in output.** With all three plugs configured, the header values appear in no tool result, no
+- [x] **13. No secrets in output.** With all three plugs configured, the header values appear in no tool result, no
   approval prompt, no error and nothing written to stderr, across every tool.
   Done when: `cargo test redaction`
 - [ ] **14. Limits.** A redirect from the endpoint is refused and its target receives no request. An oversized

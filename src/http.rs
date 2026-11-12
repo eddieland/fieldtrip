@@ -78,8 +78,10 @@ impl Client {
             .post(&endpoint.url)
             .header("content-type", "application/json")
             .header("accept", "application/graphql-response+json, application/json");
-        for (name, value) in headers {
-            request = request.header(name, value);
+        let mut secrets = Vec::new();
+        for header in headers {
+            request = request.header(header.name, header.value);
+            secrets.extend(header.secret);
         }
         let response = request
             .body(payload.to_string())
@@ -94,6 +96,10 @@ impl Client {
                 explain(&error)
             )
         })?;
+        // A server can echo a credential back, in an error message for instance. It must not reach the caller.
+        let body = secrets
+            .iter()
+            .fold(body, |body, secret| secret.scrub(&body).unwrap_or(body));
         Ok(Reply { status, body })
     }
 }

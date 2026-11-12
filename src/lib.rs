@@ -59,10 +59,7 @@ pub fn run(args: impl IntoIterator<Item = OsString>) -> ExitCode {
         }
     };
 
-    tracing_subscriber::fmt()
-        .with_writer(std::io::stderr)
-        .with_ansi(false)
-        .init();
+    init_logging();
 
     match start(&args) {
         Ok(()) => ExitCode::SUCCESS,
@@ -71,6 +68,32 @@ pub fn run(args: impl IntoIterator<Item = OsString>) -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+/// Sends logs to stderr. `FIELDTRIP_LOG` sets the level for fieldtrip and the MCP SDK, and defaults to `warn`.
+///
+/// Every other crate stays at warnings whatever the setting, so the HTTP stack never gets to log a request, and
+/// the headers on it, at a verbose level.
+fn init_logging() {
+    use tracing::Level;
+    use tracing_subscriber::Layer as _;
+    use tracing_subscriber::filter::Targets;
+    use tracing_subscriber::layer::SubscriberExt as _;
+    use tracing_subscriber::util::SubscriberInitExt as _;
+
+    let level = std::env::var("FIELDTRIP_LOG")
+        .ok()
+        .and_then(|level| level.parse::<Level>().ok())
+        .unwrap_or(Level::WARN);
+    let targets = Targets::new()
+        .with_default(level.min(Level::WARN))
+        .with_target(env!("CARGO_CRATE_NAME"), level)
+        .with_target("rmcp", level);
+    let stderr = tracing_subscriber::fmt::layer()
+        .with_writer(std::io::stderr)
+        .with_ansi(false)
+        .with_filter(targets);
+    tracing_subscriber::registry().with(stderr).init();
 }
 
 /// Loads the configuration and blocks on the MCP session.

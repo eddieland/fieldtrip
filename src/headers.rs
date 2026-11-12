@@ -31,6 +31,32 @@ pub(crate) struct Header {
     source: Source,
 }
 
+/// A header that is ready to send.
+#[derive(Debug)]
+pub(crate) struct Resolved {
+    /// The header name.
+    pub(crate) name: HeaderName,
+    /// The header value, marked sensitive so the HTTP client does not print it.
+    pub(crate) value: HeaderValue,
+    /// The value an `env` or `command` plug produced, before any `format`. A server may echo it back, so it is
+    /// removed from responses. A literal is not treated this way: it is usually not a secret, and removing a
+    /// word like `en` from a response would only damage it.
+    pub(crate) secret: Option<Secret>,
+}
+
+impl Secret {
+    /// Replaces every occurrence of this secret in `text`. Short values are left alone: they are not much of a
+    /// secret, and removing a few common characters would damage the text.
+    pub(crate) fn scrub(&self, text: &str) -> Option<String> {
+        (self.0.chars().count() >= MIN_SCRUBBED && text.contains(&self.0)).then(|| text.replace(&self.0, REDACTED))
+    }
+}
+
+/// What a scrubbed secret is replaced with.
+const REDACTED: &str = "<redacted>";
+/// The shortest secret that is scrubbed from responses.
+const MIN_SCRUBBED: usize = 8;
+
 /// Where a header's value comes from.
 #[derive(Debug)]
 enum Source {
@@ -98,11 +124,11 @@ impl Header {
     /// # Errors
     ///
     /// Returns a message that names the header and what it is waiting for, never a value.
-    pub(crate) async fn resolve(&self, fresh: bool) -> Result<(HeaderName, HeaderValue), String> {
+    pub(crate) async fn resolve(&self, fresh: bool) -> Result<Resolved, String> {
         let name = &self.name;
-        let value =
+        let (value, secret) =
             match &self.source {
-                Source::Literal(Secret(literal)) => literal.clone(),
+                Source::Literal(Secret(literal)) => (literal.clone(), None),
                 Source::Env { variable, format } => {
                     let value = std::env::var(variable).ok().filter(|value| !value.is_empty()).ok_or_else(|| {
                     format!(
@@ -110,7 +136,7 @@ impl Header {
                          The user has to set it in the environment fieldtrip starts in."
                     )
                 })?;
-                    apply(format.as_ref(), &value)
+                    (apply(format.as_ref(), &value), Some(Secret(value)))
                 }
                 Source::Command {
                     argv,
@@ -129,14 +155,18 @@ impl Header {
                         output
                     };
                     drop(cached);
-                    apply(format.as_ref(), &output)
+                    (apply(format.as_ref(), &output), Some(Secret(output)))
                 }
             };
         let mut value = HeaderValue::from_str(&value).map_err(|_error| {
             format!("The value of the header `{name}` has characters an HTTP header cannot carry.")
         })?;
         value.set_sensitive(true);
-        Ok((self.wire_name.clone(), value))
+        Ok(Resolved {
+            name: self.wire_name.clone(),
+            value,
+            secret,
+        })
     }
 }
 

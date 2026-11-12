@@ -29,4 +29,6 @@ mod introspect_http;
 #[cfg(test)]
 mod list_endpoints;
 #[cfg(test)]
+mod redaction;
+#[cfg(test)]
 mod search_schema;
