@@ -78,3 +78,19 @@ cargo test --workspace --all-features
   it, `execute` asks for approval by returning an input-required result, and runs only when the client retries with
   an accepted response for the same operation.
   Done when: `cargo test protocol_2026`
+- [ ] **17. Cost map, exact paths.** An endpoint's `costs` file sets a `cost` or a `multiplier` for the field at a
+  path such as `Query.viewer.orders` or `User.orders`. The estimate uses the rules and lists each one it used. A
+  longer path wins over a shorter one. `list_endpoints` shows the map. A query made cheap by the map can pass
+  `auto_approve_cost`.
+  Done when: `cargo test cost_map`
+- [ ] **18. Cost map patterns.** `*` stands for any one type or field name. When several rules match, `cost` and
+  `multiplier` each come from the most specific rule that sets them.
+  Done when: `cargo test cost_patterns`
+- [ ] **19. Multiplier from an argument.** `multiplier = "take"` sizes the list by that argument, given as a
+  literal, through a variable, or by its default in the schema. With no value, the assumed size is used and the
+  estimate says so.
+  Done when: `cargo test cost_argument`
+- [ ] **20. Cost map checks.** A map that does not parse, or has a rule that is not valid, stops the server at
+  startup with a message that names the file and the rule. `introspect` reports the rules that match nothing in
+  the schema.
+  Done when: `cargo test cost_checks`

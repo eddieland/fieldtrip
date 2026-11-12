@@ -13,7 +13,8 @@ in the user's config, out of the agent's sight and out of its control.
 
 - Subscriptions, persisted queries and file uploads.
 - Transports other than stdio.
-- Matching a server's own cost accounting, or reading `@cost` and `@listSize` directives.
+- Reading `@cost` and `@listSize` directives.
+- Learning costs from real queries. It is wanted later. Until then a cost map is written by hand or by an agent.
 - Loading plugins at runtime. The plugs are a closed set.
 - Letting the agent choose a URL, a header or a command.
 
@@ -38,6 +39,7 @@ auto_approve_cost = 50                       # optional, queries only
 assumed_list_size = 20                       # optional, default 10
 approval          = "elicit"                 # or "client"
 timeout           = 30                       # optional, seconds, default 30
+costs             = "acme.costs.toml"        # optional cost map, relative to this file
 
 [endpoints.acme.headers]
 X-Client      = "fieldtrip"
@@ -58,6 +60,21 @@ by the value.
 | Literal | `"fieldtrip"` | The string as written |
 | Environment | `{ env = "NAME" }` | The variable, read when the request is made |
 | Command | `{ command = ["python", "-m", "acme_auth", "token"] }` | The command's stdout, trimmed |
+
+## Cost map
+
+The built-in costs are guesses. An endpoint's `costs` file replaces them wherever its owner knows better. Each rule
+is a pattern over the fields of an operation, and sets a `cost`, a `multiplier`, or both.
+
+```toml
+"Query.products"  = { multiplier = 500 }      # an exact path from the root
+"User.orders"     = { multiplier = "take" }   # sized by the `take` argument
+"*.reviews"       = { multiplier = 3 }        # `reviews` on any type
+"Mutation.refund" = { cost = 100 }
+```
+
+A pattern is a type followed by one or more field names, and it matches a field reached through that chain. `*`
+stands for any one name. `cost` replaces what the field itself costs. `multiplier` replaces the size of a list.
 
 ## Approval model
 
@@ -121,3 +138,14 @@ Settled. To change one, ask the user, then add a new dated line instead of editi
 - 2026-11-12: The server speaks every MCP revision the SDK knows. This lifts the 2025-11-25 ceiling set above.
 - 2026-11-12: On revision 2026-07-28 the prompt is an input-required result and the answer comes with the retry.
 - 2026-11-12: Each such prompt carries a single-use ticket tied to the operation. An accept without it sends nothing.
+- 2026-11-12: Costs can be overridden per endpoint by a cost map: a TOML file of rules, named by `costs`.
+- 2026-11-12: A rule's pattern is a type and a chain of field names, matched against the fields of the operation.
+- 2026-11-12: A pattern that starts at a root type is an exact path. One that starts elsewhere matches wherever it fits.
+- 2026-11-12: `*` in a pattern stands for any one type or field name.
+- 2026-11-12: `cost` replaces the field's own cost: 0 for a scalar, 1 for an object, 10 for a top-level mutation field.
+- 2026-11-12: `multiplier` replaces the size of a list, even a size the operation gives through an argument.
+- 2026-11-12: A `multiplier` on a field that is not a list bounds the lists directly inside it, as a size argument does.
+- 2026-11-12: A `multiplier` that is a string names the argument that carries the size.
+- 2026-11-12: When several rules match a field, each setting comes from the most specific: most names, then fewest `*`.
+- 2026-11-12: The cost map is config. No tool can change it, and it is read once, at startup.
+- 2026-11-12: The estimate lists every rule it used.
