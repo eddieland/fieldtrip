@@ -1,0 +1,14 @@
+# The MSRV is read from `rust-version` in Cargo.toml; don't duplicate it here.
+
+# This is a new crate with no downstream users yet, so let clippy suggest API-changing fixes.
+avoid-breaking-exported-api = false
+
+# Keep restriction lints that are enabled in Cargo.toml from firing in tests.
+allow-dbg-in-tests = true
+allow-expect-in-tests = true
+allow-panic-in-tests = true
+allow-print-in-tests = true
+allow-unwrap-in-tests = true
+
+# Words that `clippy::doc_markdown` should not demand backticks around. `..` keeps the defaults.
+doc-valid-idents = ["GraphQL", ".."]

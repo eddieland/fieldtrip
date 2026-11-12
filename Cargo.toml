@@ -1,0 +1,121 @@
+[package]
+name = "fieldtrip"
+version = "0.1.0"
+description = "GraphQL introspection and execution over MCP."
+readme = "README.md"
+keywords = ["graphql", "mcp", "introspection", "agents"]
+categories = ["command-line-utilities", "development-tools"]
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[workspace]
+resolver = "3"
+members = ["."]
+
+[workspace.package]
+edition = "2024"
+# MSRV tracks the latest stable release; keep in sync with rust-toolchain.toml.
+rust-version = "1.100"
+license = "MIT"
+repository = "https://github.com/eddieland/fieldtrip"
+
+# Lints are `warn` so local iteration isn't blocked; CI promotes every warning to an error
+# (`-D warnings`), so nothing merges with a warning. Prefer `#[expect(lint, reason = "...")]`
+# over `#[allow]` for local exceptions.
+[workspace.lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+missing_debug_implementations = "warn"
+rust_2018_idioms = { level = "warn", priority = -1 }
+let_underscore_drop = "warn"
+meta_variable_misuse = "warn"
+non_ascii_idents = "warn"
+redundant_lifetimes = "warn"
+trivial_casts = "warn"
+trivial_numeric_casts = "warn"
+unit_bindings = "warn"
+unnameable_types = "warn"
+unreachable_pub = "warn"
+unused_import_braces = "warn"
+unused_lifetimes = "warn"
+unused_macro_rules = "warn"
+unused_qualifications = "warn"
+
+[workspace.lints.rustdoc]
+broken_intra_doc_links = "warn"
+private_intra_doc_links = "warn"
+missing_crate_level_docs = "warn"
+invalid_codeblock_attributes = "warn"
+invalid_html_tags = "warn"
+invalid_rust_codeblocks = "warn"
+bare_urls = "warn"
+redundant_explicit_links = "warn"
+unescaped_backticks = "warn"
+
+[workspace.lints.clippy]
+# Groups. `priority = -1` lets the individual entries below override them.
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+nursery = { level = "warn", priority = -1 }
+cargo = { level = "warn", priority = -1 }
+
+# Group members turned back off.
+module_name_repetitions = "allow" # Idiomatic names like `schema::SchemaError` are fine.
+must_use_candidate = "allow"      # Fires on nearly every getter; apply `#[must_use]` deliberately.
+redundant_pub_crate = "allow"     # Conflicts with rustc's `unreachable_pub`.
+multiple_crate_versions = "allow" # Duplicate transitive deps are usually outside our control.
+
+# Documentation quality beyond `missing_docs`.
+missing_errors_doc = "warn"
+missing_panics_doc = "warn"
+missing_safety_doc = "warn"
+doc_markdown = "warn"
+doc_link_with_quotes = "warn"
+too_long_first_doc_paragraph = "warn"
+empty_docs = "warn"
+unnecessary_safety_doc = "warn"
+
+# Hand-picked `restriction` lints.
+allow_attributes = "warn"                 # Use `#[expect]`, which errors once the lint stops firing.
+allow_attributes_without_reason = "warn"
+clone_on_ref_ptr = "warn"
+dbg_macro = "warn"
+empty_enum_variants_with_brackets = "warn"
+empty_structs_with_brackets = "warn"
+exit = "warn"
+float_cmp_const = "warn"
+fn_to_numeric_cast_any = "warn"
+format_push_string = "warn"
+get_unwrap = "warn"
+if_then_some_else_none = "warn"
+infinite_loop = "warn"
+lossy_float_literal = "warn"
+mem_forget = "warn"
+missing_assert_message = "warn"
+needless_raw_strings = "warn"
+panic_in_result_fn = "warn"
+print_stderr = "warn"                     # Use `tracing`/logging instead.
+print_stdout = "warn"                     # stdout carries the MCP stdio transport; stray prints corrupt it.
+rc_buffer = "warn"
+redundant_type_annotations = "warn"
+renamed_function_params = "warn"
+rest_pat_in_fully_bound_structs = "warn"
+str_to_string = "warn"
+string_lit_chars_any = "warn"
+string_slice = "warn"                     # Byte-index slicing of `str` panics on non-char boundaries.
+tests_outside_test_module = "warn"
+todo = "warn"
+try_err = "warn"
+undocumented_unsafe_blocks = "warn"
+unimplemented = "warn"
+unnecessary_safety_comment = "warn"
+unnecessary_self_imports = "warn"
+unneeded_field_pattern = "warn"
+unseparated_literal_suffix = "warn"
+unwrap_used = "warn"
+verbose_file_reads = "warn"
