@@ -4,6 +4,9 @@
 //! a request is made and never shown to the calling agent, the approval prompt or the log.
 
 use std::fmt;
+use std::path::{Path, PathBuf};
+use std::process::Stdio;
+use std::time::Duration;
 
 use reqwest::header::{HeaderName, HeaderValue};
 
@@ -41,21 +44,33 @@ enum Source {
         format: Option<Secret>,
     },
     /// The output of a command.
-    Command,
+    Command {
+        /// The program and its arguments. There is no shell in between.
+        argv: Vec<Secret>,
+        /// The directory the command runs in: the config file's.
+        directory: PathBuf,
+        /// The format the output is placed into, when one is configured.
+        format: Option<Secret>,
+    },
 }
 
+/// How long a header command may run.
+const COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
+/// How much of a failed command's stderr to pass on.
+const MAX_STDERR: usize = 600;
+
 impl Header {
-    /// Reads one entry of an endpoint's `headers` table.
+    /// Reads one entry of an endpoint's `headers` table. `directory` is the config file's, where commands run.
     ///
     /// # Errors
     ///
     /// Returns a message when the entry is not one of the three plugs. The message never quotes a value.
-    pub(crate) fn from_config(name: String, value: toml::Value) -> Result<Self, String> {
+    pub(crate) fn from_config(name: String, value: toml::Value, directory: &Path) -> Result<Self, String> {
         let wire_name = HeaderName::from_bytes(name.as_bytes())
             .map_err(|_error| format!("`{name}` is not a valid HTTP header name"))?;
         let source = match value {
             toml::Value::String(literal) => Source::Literal(Secret(literal)),
-            toml::Value::Table(table) => source_from_table(&name, table)?,
+            toml::Value::Table(table) => source_from_table(&name, table, directory)?,
             _ => return Err(expected_a_plug(&name)),
         };
         Ok(Self {
@@ -70,7 +85,7 @@ impl Header {
     /// # Errors
     ///
     /// Returns a message that names the header and what it is waiting for, never a value.
-    pub(crate) fn resolve(&self) -> Result<(HeaderName, HeaderValue), String> {
+    pub(crate) async fn resolve(&self) -> Result<(HeaderName, HeaderValue), String> {
         let name = &self.name;
         let value =
             match &self.source {
@@ -84,11 +99,11 @@ impl Header {
                 })?;
                     apply(format.as_ref(), &value)
                 }
-                Source::Command => {
-                    return Err(format!(
-                        "The header `{name}` uses a command, which is not available yet."
-                    ));
-                }
+                Source::Command {
+                    argv,
+                    directory,
+                    format,
+                } => apply(format.as_ref(), &run(name, argv, directory).await?),
             };
         let mut value = HeaderValue::from_str(&value).map_err(|_error| {
             format!("The value of the header `{name}` has characters an HTTP header cannot carry.")
@@ -99,7 +114,7 @@ impl Header {
 }
 
 /// Reads the table form of a header: `{ env = "NAME" }` or `{ command = [...] }`, with an optional `format`.
-fn source_from_table(name: &str, mut table: toml::Table) -> Result<Source, String> {
+fn source_from_table(name: &str, mut table: toml::Table, directory: &Path) -> Result<Source, String> {
     let format = match table.remove("format") {
         None => None,
         Some(toml::Value::String(format)) if format.contains("{}") => Some(Secret(format)),
@@ -117,12 +132,99 @@ fn source_from_table(name: &str, mut table: toml::Table) -> Result<Source, Strin
     }
     match (env, command) {
         (Some(toml::Value::String(variable)), None) => Ok(Source::Env { variable, format }),
-        (None, Some(toml::Value::Array(_))) => Ok(Source::Command),
+        (None, Some(command)) => {
+            let argv = argv(name, command)?;
+            Ok(Source::Command {
+                argv,
+                directory: directory.to_path_buf(),
+                format,
+            })
+        }
         (Some(_), Some(_)) => Err(format!(
             "header `{name}` sets both `env` and `command`. Use one of them."
         )),
         _ => Err(expected_a_plug(name)),
     }
+}
+
+/// Reads `command`: a non-empty list of strings.
+fn argv(name: &str, command: toml::Value) -> Result<Vec<Secret>, String> {
+    let needs_a_list = || {
+        format!(
+            "the `command` of header `{name}` must be a list of strings, the program first and then its arguments. \
+             It is run directly, not through a shell."
+        )
+    };
+    let toml::Value::Array(items) = command else {
+        return Err(needs_a_list());
+    };
+    let argv: Vec<Secret> = items
+        .into_iter()
+        .map(|item| {
+            if let toml::Value::String(item) = item {
+                Ok(Secret(item))
+            } else {
+                Err(needs_a_list())
+            }
+        })
+        .collect::<Result<_, String>>()?;
+    if argv.is_empty() { Err(needs_a_list()) } else { Ok(argv) }
+}
+
+/// Runs a header command and returns its trimmed stdout.
+///
+/// Errors name the header, the program, the exit status and stderr. They never include stdout or the arguments,
+/// either of which can hold a secret.
+async fn run(name: &str, argv: &[Secret], directory: &Path) -> Result<String, String> {
+    let Some((Secret(program), arguments)) = argv.split_first() else {
+        return Err(format!("The header `{name}` has an empty command."));
+    };
+    let child = tokio::process::Command::new(program)
+        .args(arguments.iter().map(|Secret(argument)| argument))
+        .current_dir(directory)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .map_err(|error| format!("The command for the header `{name}` could not be started: `{program}`: {error}"))?;
+    let output = tokio::time::timeout(COMMAND_TIMEOUT, child.wait_with_output())
+        .await
+        .map_err(|_elapsed| {
+            format!(
+                "The command for the header `{name}` (`{program}`) did not finish within {} seconds.",
+                COMMAND_TIMEOUT.as_secs()
+            )
+        })?
+        .map_err(|error| {
+            format!("The command for the header `{name}` (`{program}`) could not be waited for: {error}")
+        })?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stderr: String = stderr.trim().chars().take(MAX_STDERR).collect();
+        let detail = if stderr.is_empty() {
+            "It wrote nothing to stderr.".to_owned()
+        } else {
+            format!("Its stderr: {stderr}")
+        };
+        return Err(format!(
+            "The command for the header `{name}` (`{program}`) failed with {}. {detail}\nThe user has to fix this. \
+             It usually means signing in again.",
+            output.status
+        ));
+    }
+    let stdout = String::from_utf8(output.stdout).map_err(|_error| {
+        format!("The command for the header `{name}` (`{program}`) printed something that is not text.")
+    })?;
+    let value = stdout.trim();
+    if value.is_empty() {
+        return Err(format!(
+            "The command for the header `{name}` (`{program}`) succeeded but printed nothing. It has to print the \
+             header's value on stdout."
+        ));
+    }
+    Ok(value.to_owned())
 }
 
 /// The error for a header that is not one of the plugs.

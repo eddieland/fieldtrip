@@ -102,3 +102,5 @@ Settled. To change one, ask the user, then add a new dated line instead of editi
 - 2026-11-12: Cost: a size argument left out takes the default the schema declares for it, when there is one.
 - 2026-11-12: Cost: every fragment on an abstract type is counted, which is the worst case.
 - 2026-11-12: Cost: introspection fields such as `__typename` are free.
+- 2026-11-12: A header command runs in the config file's directory and has 30 seconds to finish.
+- 2026-11-12: Errors about a header command name the program but never its arguments, which can hold secrets.

@@ -139,7 +139,7 @@ impl Endpoint {
         let headers = raw
             .headers
             .into_iter()
-            .map(|(name, value)| Header::from_config(name, value))
+            .map(|(name, value)| Header::from_config(name, value, base))
             .collect::<Result<_, String>>()?;
         Ok(Self {
             url: raw.url,

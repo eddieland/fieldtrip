@@ -49,7 +49,7 @@ cargo test --workspace --all-features
 - [x] **7. Literal and `env` plugs.** The introspection request carries the configured literal and `env` headers,
   with `format` applied. A missing variable is an error that names the header.
   Done when: `cargo test headers_static`
-- [ ] **8. Command plug.** A command's trimmed stdout, passed through `format`, arrives as the header. The command
+- [x] **8. Command plug.** A command's trimmed stdout, passed through `format`, arrives as the header. The command
   runs with no shell. A non-zero exit or empty output is an error that gives the header name, exit status and
   stderr, and not the stdout.
   Done when: `cargo test headers_command`
