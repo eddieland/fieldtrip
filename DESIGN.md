@@ -21,7 +21,7 @@ in the user's config, out of the agent's sight and out of its control.
 
 | Tool | Input | Returns |
 | --- | --- | --- |
-| `list_endpoints` | none | Each endpoint's name, URL and schema source |
+| `list_endpoints` | none | Each endpoint's name, URL, schema source and header names |
 | `introspect` | `endpoint`, `refresh?` | Overview: root types, counts, query and mutation names |
 | `search_schema` | `endpoint`, `query` | Ranked matches as one-line signatures |
 | `describe` | `endpoint`, `name` (`Type` or `Type.field`) | That definition as compact SDL |
@@ -96,3 +96,5 @@ Settled. To change one, ask the user, then add a new dated line instead of editi
 - 2026-11-12: stdout carries the protocol. Logs go to stderr.
 - 2026-11-12: Stack: `rmcp`, `apollo-compiler` 1.x, `reqwest` with rustls, `tokio`.
 - 2026-11-12: Every slice in PLAN.md is checked by an integration test that drives the binary over MCP.
+- 2026-11-12: The server speaks MCP up to revision 2025-11-25 until PLAN slice 16 adds 2026-07-28.
+- 2026-11-12: `list_endpoints` shows header names, so the agent can tell whether auth is configured.

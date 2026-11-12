@@ -61,7 +61,10 @@ The lint set in `Cargo.toml` is strict, and CI turns every warning into an error
 
 ## Tests
 
-- Tests live in `tests/`, one file per slice, named as PLAN.md says. Shared helpers are in `tests/common/`.
+- Tests live in `tests/spec/`, which builds as one test binary. Each slice is a module named as PLAN.md says, and
+  `cargo test <module>` runs it. The harness is `tests/spec/support/`.
+- Declare each slice module in `tests/spec/main.rs` with `#[cfg(test)]`, which is what keeps the
+  `tests_outside_test_module` lint quiet.
 - Each test starts the real `fieldtrip` binary and talks to it as an MCP client over stdio. Don't test by calling
   internal functions. The tests are the spec for what a calling agent sees, so they go through the same door.
 - The fixture schema is `tests/fixtures/schema.graphql`. Extend it when a slice needs a new shape, instead of adding

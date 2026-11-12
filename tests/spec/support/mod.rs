@@ -1,0 +1,281 @@
+//! The test harness: an MCP client that drives the `fieldtrip` binary over stdio.
+
+use std::io::{BufRead as _, BufReader, Read as _, Write as _};
+use std::path::Path;
+use std::process::{Child, ChildStdin, Command, Stdio};
+use std::sync::mpsc::{Receiver, RecvTimeoutError, channel};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+
+use serde_json::{Value, json};
+use tempfile::TempDir;
+
+/// How long to wait for the server to answer before failing the test.
+const REPLY_TIMEOUT: Duration = Duration::from_secs(20);
+
+/// How the test client answers an approval prompt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[expect(dead_code, reason = "the answering variants are first used by the `execute` slices")]
+pub(crate) enum Human {
+    /// The client does not declare elicitation support, so no prompt can be shown.
+    Absent,
+    /// The human accepts every prompt.
+    Accepts,
+    /// The human declines every prompt.
+    Declines,
+    /// The human dismisses every prompt.
+    Cancels,
+}
+
+/// The text and error flag of a tool result.
+#[derive(Debug)]
+pub(crate) struct Reply {
+    /// The text content of the result, joined with newlines.
+    pub(crate) text: String,
+    /// Whether the tool reported an error.
+    pub(crate) is_error: bool,
+}
+
+/// A running `fieldtrip` process with an initialized MCP session.
+#[derive(Debug)]
+pub(crate) struct Mcp {
+    child: Child,
+    stdin: Option<ChildStdin>,
+    incoming: Receiver<Value>,
+    stderr: Arc<Mutex<String>>,
+    next_id: u64,
+    human: Human,
+    prompts: Vec<String>,
+    dir: TempDir,
+}
+
+impl Mcp {
+    /// Starts the server with `config` as its config file, and a client that cannot show prompts.
+    ///
+    /// The config is written into a fresh directory next to a copy of everything in `tests/fixtures/`, so a config
+    /// can name a fixture by its relative path.
+    pub(crate) fn start(config: &str) -> Self {
+        Self::start_with(config, Human::Absent)
+    }
+
+    /// Starts the server with `config`, and a client that answers approval prompts as `human` does.
+    pub(crate) fn start_with(config: &str, human: Human) -> Self {
+        let dir = tempfile::tempdir().expect("create a temp dir");
+        copy_fixtures(dir.path());
+        let config_path = dir.path().join("fieldtrip.toml");
+        std::fs::write(&config_path, config).expect("write the config file");
+        let mut mcp = Self::spawn(&["--config".as_ref(), config_path.as_os_str()], human, dir);
+        mcp.initialize();
+        mcp
+    }
+
+    /// Spawns the binary with `args` and wires up its three streams.
+    fn spawn(args: &[&std::ffi::OsStr], human: Human, dir: TempDir) -> Self {
+        let mut child = Command::new(env!("CARGO_BIN_EXE_fieldtrip"))
+            .args(args)
+            .current_dir(dir.path())
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn the fieldtrip binary");
+        let stdin = child.stdin.take().expect("child stdin");
+        let stdout = child.stdout.take().expect("child stdout");
+        let mut child_stderr = child.stderr.take().expect("child stderr");
+
+        let (sender, incoming) = channel();
+        std::thread::spawn(move || {
+            for line in BufReader::new(stdout).lines() {
+                let Ok(line) = line else { break };
+                // Anything on stdout that is not JSON is a protocol violation, so hand it over as a string and
+                // let the test fail on it.
+                let message = serde_json::from_str(&line).unwrap_or(Value::String(line));
+                if sender.send(message).is_err() {
+                    break;
+                }
+            }
+        });
+
+        let stderr = Arc::new(Mutex::new(String::new()));
+        let stderr_sink = Arc::clone(&stderr);
+        std::thread::spawn(move || {
+            let mut chunk = [0_u8; 4096];
+            while let Ok(read) = child_stderr.read(&mut chunk) {
+                if read == 0 {
+                    break;
+                }
+                let text = String::from_utf8_lossy(chunk.get(..read).unwrap_or_default()).into_owned();
+                stderr_sink.lock().expect("stderr buffer").push_str(&text);
+            }
+        });
+
+        Self {
+            child,
+            stdin: Some(stdin),
+            incoming,
+            stderr,
+            next_id: 0,
+            human,
+            prompts: Vec::new(),
+            dir,
+        }
+    }
+
+    /// Performs the MCP handshake.
+    fn initialize(&mut self) {
+        let capabilities = if self.human == Human::Absent {
+            json!({})
+        } else {
+            json!({ "elicitation": {} })
+        };
+        let result = self.request(
+            "initialize",
+            &json!({
+                "protocolVersion": "2025-11-25",
+                "capabilities": capabilities,
+                "clientInfo": { "name": "fieldtrip-spec", "version": "0" },
+            }),
+        );
+        assert!(
+            result.get("serverInfo").is_some(),
+            "initialize should return serverInfo, got {result}"
+        );
+        self.send(&json!({ "jsonrpc": "2.0", "method": "notifications/initialized" }));
+    }
+
+    /// The directory holding the config file and the fixture copies.
+    pub(crate) fn dir(&self) -> &Path {
+        self.dir.path()
+    }
+
+    /// The names of the tools the server offers.
+    pub(crate) fn tools(&mut self) -> Vec<String> {
+        let result = self.request("tools/list", &json!({}));
+        let tools = result
+            .get("tools")
+            .and_then(Value::as_array)
+            .expect("tools/list returns a tools array");
+        tools
+            .iter()
+            .filter_map(|tool| tool.get("name").and_then(Value::as_str))
+            .map(str::to_owned)
+            .collect()
+    }
+
+    /// Calls `tool` with `arguments` and returns its result.
+    pub(crate) fn call(&mut self, tool: &str, arguments: &Value) -> Reply {
+        let result = self.request("tools/call", &json!({ "name": tool, "arguments": arguments }));
+        let content = result
+            .get("content")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        let text: Vec<&str> = content
+            .iter()
+            .filter_map(|block| block.get("text").and_then(Value::as_str))
+            .collect();
+        Reply {
+            text: text.join("\n"),
+            is_error: result.get("isError").and_then(Value::as_bool).unwrap_or(false),
+        }
+    }
+
+    /// The text of every approval prompt the server has shown so far.
+    #[expect(dead_code, reason = "first used by the `execute` slices")]
+    pub(crate) fn prompts(&self) -> &[String] {
+        &self.prompts
+    }
+
+    /// Everything the server has written to stderr so far.
+    pub(crate) fn stderr(&self) -> String {
+        self.stderr.lock().expect("stderr buffer").clone()
+    }
+
+    /// Sends a request and returns its `result`, answering any requests the server makes in the meantime.
+    fn request(&mut self, method: &str, params: &Value) -> Value {
+        self.next_id += 1;
+        let id = self.next_id;
+        self.send(&json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params }));
+        loop {
+            let message = match self.incoming.recv_timeout(REPLY_TIMEOUT) {
+                Ok(message) => message,
+                Err(RecvTimeoutError::Timeout) => panic!("no reply to `{method}` in time. stderr:\n{}", self.stderr()),
+                Err(RecvTimeoutError::Disconnected) => {
+                    panic!(
+                        "the server exited before replying to `{method}`. stderr:\n{}",
+                        self.stderr()
+                    )
+                }
+            };
+            assert!(
+                message.is_object(),
+                "the server wrote something that is not JSON-RPC to stdout: {message}"
+            );
+            if message.get("method").is_some() {
+                self.answer_server(&message);
+            } else if message.get("id").and_then(Value::as_u64) == Some(id) {
+                if let Some(error) = message.get("error") {
+                    panic!("`{method}` failed at the protocol level: {error}");
+                }
+                return message.get("result").cloned().unwrap_or(Value::Null);
+            }
+        }
+    }
+
+    /// Answers a request the server sent to the client. Notifications are ignored.
+    fn answer_server(&mut self, message: &Value) {
+        let Some(id) = message.get("id") else { return };
+        let method = message.get("method").and_then(Value::as_str).unwrap_or_default();
+        let reply = match method {
+            "elicitation/create" => {
+                let prompt = message
+                    .pointer("/params/message")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                self.prompts.push(prompt.to_owned());
+                let result = match self.human {
+                    Human::Accepts => json!({ "action": "accept", "content": {} }),
+                    Human::Declines => json!({ "action": "decline" }),
+                    Human::Cancels => json!({ "action": "cancel" }),
+                    Human::Absent => panic!("the server sent a prompt to a client with no elicitation support"),
+                };
+                json!({ "jsonrpc": "2.0", "id": id, "result": result })
+            }
+            "ping" => json!({ "jsonrpc": "2.0", "id": id, "result": {} }),
+            other => json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "error": { "code": -32601, "message": format!("the test client does not handle `{other}`") },
+            }),
+        };
+        self.send(&reply);
+    }
+
+    /// Writes one JSON-RPC message to the server's stdin.
+    fn send(&mut self, message: &Value) {
+        let stdin = self.stdin.as_mut().expect("the session is open");
+        writeln!(stdin, "{message}").expect("write to the server's stdin");
+        stdin.flush().expect("flush the server's stdin");
+    }
+}
+
+impl Drop for Mcp {
+    fn drop(&mut self) {
+        // Closing stdin ends the session. The kill covers a server that does not notice.
+        drop(self.stdin.take());
+        let _ignored = self.child.kill();
+        let _ignored = self.child.wait();
+    }
+}
+
+/// Copies every file in `tests/fixtures/` into `dir`.
+fn copy_fixtures(dir: &Path) {
+    let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests").join("fixtures");
+    let Ok(entries) = std::fs::read_dir(&fixtures) else {
+        return;
+    };
+    for entry in entries {
+        let entry = entry.expect("read a fixture entry");
+        std::fs::copy(entry.path(), dir.join(entry.file_name())).expect("copy a fixture");
+    }
+}
