@@ -3,6 +3,7 @@
 mod describe;
 mod overview;
 mod render;
+mod search;
 
 use std::path::Path;
 
@@ -52,6 +53,15 @@ impl Loaded {
     /// Returns a message naming the nearest matches when nothing in the schema is called `name`.
     pub(crate) fn describe(&self, name: &str) -> Result<String, String> {
         describe::describe(self, name)
+    }
+
+    /// Searches names and descriptions for `query` and returns the best matches as one-line signatures.
+    ///
+    /// # Errors
+    ///
+    /// Returns a message when `query` has no words in it.
+    pub(crate) fn search(&self, endpoint: &str, query: &str) -> Result<String, String> {
+        search::search(self, endpoint, query)
     }
 
     /// Returns the schema's description, its type counts and the names of its root fields.

@@ -39,6 +39,15 @@ struct DescribeArguments {
     name: String,
 }
 
+/// Arguments of `search_schema`.
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+struct SearchArguments {
+    /// The endpoint name, as listed by `list_endpoints`.
+    endpoint: String,
+    /// One or more words. Each must appear in a name or a description. Case is ignored.
+    query: String,
+}
+
 /// Arguments of `introspect`.
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 struct IntrospectArguments {
@@ -97,6 +106,17 @@ impl Fieldtrip {
     async fn describe(&self, Parameters(arguments): Parameters<DescribeArguments>) -> ToolResult {
         let schema = self.schema(&arguments.endpoint, false).await?;
         schema.describe(&arguments.name)
+    }
+
+    #[tool(
+        description = "Search an endpoint's schema for queries, mutations, types, fields, arguments and enum values. \
+                       Matches names and descriptions, ignoring case, and returns the best matches as one-line \
+                       signatures. Use it to find the real name of something before you `describe` it. Use short \
+                       queries: one word, or a type name and a field name."
+    )]
+    async fn search_schema(&self, Parameters(arguments): Parameters<SearchArguments>) -> ToolResult {
+        let schema = self.schema(&arguments.endpoint, false).await?;
+        schema.search(&arguments.endpoint, &arguments.query)
     }
 
     #[tool(

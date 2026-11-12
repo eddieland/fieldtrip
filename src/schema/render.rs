@@ -97,6 +97,44 @@ pub(super) fn field_line(out: &mut String, field: &FieldDefinition, expand_argum
     let _ = writeln!(out, ": {}{}", field.ty, deprecation(&field.directives));
 }
 
+/// The first line of a type's definition, without its members: `type User implements Node`, `enum Role`.
+pub(super) fn type_heading(ty: &ExtendedType) -> String {
+    match ty {
+        ExtendedType::Scalar(scalar) => format!("scalar {}", scalar.name),
+        ExtendedType::Object(object) => {
+            format!(
+                "type {}{}",
+                object.name,
+                implements(object.implements_interfaces.iter())
+            )
+        }
+        ExtendedType::Interface(interface) => {
+            format!(
+                "interface {}{}",
+                interface.name,
+                implements(interface.implements_interfaces.iter())
+            )
+        }
+        ExtendedType::Union(union) => {
+            let members: Vec<&str> = union.members.iter().map(|member| member.name.as_str()).collect();
+            format!("union {} = {}", union.name, members.join(" | "))
+        }
+        ExtendedType::Enum(enumeration) => format!("enum {}", enumeration.name),
+        ExtendedType::InputObject(input) => format!("input {}", input.name),
+    }
+}
+
+/// `name(arguments): Type` on one line.
+pub(super) fn field_signature(field: &FieldDefinition) -> String {
+    let mut out = field.name.to_string();
+    if !field.arguments.is_empty() {
+        let arguments: Vec<String> = field.arguments.iter().map(|argument| input_value(argument)).collect();
+        let _ = write!(out, "({})", arguments.join(", "));
+    }
+    let _ = write!(out, ": {}", field.ty);
+    out
+}
+
 /// Writes one input field of an input object, indented as a member of its type.
 pub(super) fn input_field_line(out: &mut String, field: &InputValueDefinition) {
     description(out, "  ", field.description.as_deref());
@@ -104,7 +142,7 @@ pub(super) fn input_field_line(out: &mut String, field: &InputValueDefinition) {
 }
 
 /// `name: Type`, with ` = default` when there is one.
-fn input_value(value: &InputValueDefinition) -> String {
+pub(super) fn input_value(value: &InputValueDefinition) -> String {
     value.default_value.as_ref().map_or_else(
         || format!("{}: {}", value.name, value.ty),
         |default| format!("{}: {} = {default}", value.name, value.ty),

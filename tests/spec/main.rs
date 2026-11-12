@@ -12,3 +12,5 @@ mod describe;
 mod introspect_file;
 #[cfg(test)]
 mod list_endpoints;
+#[cfg(test)]
+mod search_schema;

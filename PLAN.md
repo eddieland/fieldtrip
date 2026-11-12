@@ -34,7 +34,7 @@ cargo test --workspace --all-features
 - [x] **3. `introspect` from a file.** `introspect` returns the overview for the fixture: root types, counts, and
   the query and mutation names. No HTTP request is made.
   Done when: `cargo test introspect_file`
-- [ ] **4. `search_schema`.** A search finds queries, mutations, types, fields, arguments and enum values by name
+- [x] **4. `search_schema`.** A search finds queries, mutations, types, fields, arguments and enum values by name
   and by description, best match first. A broad search is cut off with a note saying how many were left out.
   Done when: `cargo test search_schema`
 - [ ] **5. `introspect` over HTTP.** With no `schema` file, the schema comes from an introspection query to a mock
