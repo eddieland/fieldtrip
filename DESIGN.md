@@ -42,7 +42,7 @@ timeout           = 30                       # optional, seconds, default 30
 [endpoints.acme.headers]
 X-Client      = "fieldtrip"
 X-Api-Key     = { env = "ACME_API_KEY" }
-Authorization = { command = ["python", "-m", "acme_auth", "token"], format = "Bearer {}" }  # ttl = 300
+Authorization = { command = ["python", "-m", "acme_auth", "token"], format = "Bearer {}", ttl = 300 }
 ```
 
 The config path comes from `--config`, defaulting to `~/.config/fieldtrip/config.toml`. `--url`, with an optional
