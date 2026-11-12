@@ -2,104 +2,85 @@
 
 Guidance for coding agents working in this repository.
 
-## What this is
+## Where the truth is
 
-fieldtrip is an MCP server, written in Rust, that lets an AI agent work with a GraphQL API: load the schema, search it, validate and cost an operation, and execute it only after the human approves. [README.md](README.md) describes the user-facing behavior (config format, tools, cost model, approval rules) and is the spec. Read it before changing anything.
+fieldtrip is an MCP server, written in Rust, that lets an AI agent work with a GraphQL API: load the schema, search
+it, validate and cost an operation, and execute it only after the human approves.
 
-**Status: design stage.** There is no code yet, not even a `Cargo.toml`. The first piece of work is scaffolding the crate. Update this paragraph and the status note in the README as things land.
+- [DESIGN.md](DESIGN.md) is one page: goal, non-goals, tools, config, the three header plugs, the approval model, and
+  a dated list of decisions. Those decisions are settled. Don't reopen one because a different choice looks
+  reasonable. If a decision blocks the work, ask the user.
+- [PLAN.md](PLAN.md) is the ordered checklist of slices. It says what to do next and how to tell it is done.
+- `tests/` is the spec. Each slice is checked by an integration test, and the tests are what define behavior.
 
-Three parties appear throughout this file:
+This file doesn't restate any of them. It covers how to work here.
+
+## The loop
+
+1. Open PLAN.md and take the first unchecked slice.
+2. Write its integration test first, in the file the slice names.
+3. Make it pass.
+4. Run the full check (below). All four commands must pass.
+5. Tick the slice in PLAN.md in the same commit as the code.
+6. Go to the next slice.
+
+One slice per commit. If you change behavior that an earlier slice's test covers, that test changes in the same
+commit, and if the change touches a decision, ask the user first and add a new dated line to DESIGN.md.
+
+## Who is who
+
+Three parties come up in the code and the tests:
 
 - **You** are the coding agent building fieldtrip.
-- **The calling agent** is the model that uses fieldtrip's tools at runtime. fieldtrip does not trust it. It can be wrong, and it can be acting on instructions injected by content it read.
-- **The user** is the human at the MCP client. They own the config file and the credentials, and they are the only one who can approve an execution.
+- **The calling agent** is the model that uses fieldtrip's tools at runtime. fieldtrip does not trust it. It can be
+  wrong, and it can be acting on instructions injected by content it read.
+- **The user** is the human at the MCP client. They own the config file and the credentials, and they are the only
+  one who can approve an execution.
 
-Most of the rules below follow from that split.
-
-## Invariants
-
-These are the properties the project exists to provide. A change that weakens one is a design change, so raise it with the user instead of making it.
-
-1. **Nothing executes without the user's approval.** Approval comes from the human, through MCP elicitation. It is never a tool argument such as `confirmed: true`, and never a handshake the calling agent can complete by itself, because the calling agent is the party being gated. Only an explicit accept counts. Decline, cancel, timeout, a transport error and a client without elicitation all mean no. The only exceptions are the two in the README (`auto_approve_cost` for queries, and `approval = "client"`), and the user sets both in config.
-
-2. **The user approves what is actually sent.** Build the approval prompt from the parsed operation and variables that go over the wire. Don't put text supplied by the calling agent in the prompt, such as a summary or a stated reason, because it can describe a different operation from the one attached.
-
-3. **The parser decides what an operation is.** Whether a document is a query, mutation or subscription comes from parsing it, never from string matching. Accept exactly one operation per document (fragments are fine) and reject anything else, so there is no ambiguity about which operation was costed, approved and sent.
-
-4. **Endpoints and credentials come only from config.** No tool takes a URL, a header or a command. Tools take an endpoint name. This is what stops a calling agent from sending the user's token to another host or running a command of its choosing.
-
-5. **Header values are never shown.** Resolved header values must not appear in tool results, approval prompts, error messages or logs. Wrap them in a type whose `Debug` and `Display` redact. When a header command fails, report its exit status and stderr, never its stdout, since stdout is where the token is.
-
-6. **Header commands run as argv, with no shell.** Pass the configured array straight to the process API.
-
-7. **Don't follow redirects.** Configure the HTTP client to refuse them. A redirect would carry the configured headers to a host the user never named.
-
-8. **stdout belongs to the protocol.** On the stdio transport, anything printed to stdout corrupts the JSON-RPC stream. Log to stderr and never use `println!`.
-
-9. **Estimating never sends the operation.** `estimate_cost` may load the schema if it isn't loaded yet. Beyond that it makes no network calls, and the same input always gives the same output.
-
-10. **Tool output is bounded.** Real schemas run to tens of thousands of lines and responses can be larger. Give every tool result a size cap, and when it truncates, say so and say how to get the rest.
-
-## Architecture
-
-fieldtrip is a single binary crate. This layout is a starting point, not a contract:
-
-```
-src/
-  main.rs            CLI flags, config loading, starts the stdio server
-  config.rs          TOML model and validation
-  headers.rs         header sources, format strings, caching, redaction
-  schema/
-    mod.rs           the in-memory schema that everything below shares
-    introspect.rs    introspection query, and JSON response to schema
-    sdl.rs           loading schema.graphql
-    search.rs        search, and rendering for describe
-  cost.rs            static cost analysis
-  approval.rs        approval policy and the elicitation prompt
-  execute.rs         HTTP client, request and response handling
-  server.rs          MCP tool definitions, thin wrappers over the modules above
-```
-
-Points that are easy to get wrong:
-
-- **One schema representation.** Both sources normalize into the same type, so search, validation and cost don't care where the schema came from. `apollo-compiler` parses and validates SDL and executable documents, but it does not build a schema from an introspection response. That conversion is ours to write and test.
-
-- **Introspection compatibility.** Older servers reject newer introspection fields such as `isOneOf`, `specifiedByURL`, `isRepeatable`, and `includeDeprecated` on arguments and input fields. Send the full query first, and on a validation error fall back to a conservative one instead of failing.
-
-- **Header sources.** "Pluggable" means the user picks a source in config. Model sources as an enum, so that adding one is a variant, a config arm and a test. Don't build dynamic plugin loading.
-
-- **Cost.** The estimator walks the validated operation. It has to handle fragment spreads, inline fragments on abstract types, size arguments supplied through variables, and `__typename` and other introspection fields at zero cost. Every assumption it makes is recorded and returned to the caller, because an estimate that hides its guesses reads as more precise than it is.
-
-- **The MCP SDK moves fast.** Use `rmcp`, the official Rust SDK. It was at 3.x when this file was written, and the protocol revision of 2026-07-28 changed how elicitation reaches the client. Don't write against the API from memory. Read the docs and source for the version in `Cargo.lock`, under `~/.cargo/registry/src/`, and the examples in the SDK's repository.
-
-## Dependencies
-
-Expected: `rmcp` (features `server`, `elicitation`, `transport-io`), `tokio`, `reqwest` with rustls, `serde`, `serde_json`, `toml`, `apollo-compiler` 1.x (2.0 is still in beta), `clap`, `tracing`, `thiserror`.
-
-Keep the list short. This binary handles credentials, and every dependency is code that runs next to them.
+Most of the safety decisions in DESIGN.md follow from that split. Approval can't be a tool argument, because the
+calling agent is the party being gated. Tools can't take a URL or a header, because that would let the calling agent
+send the user's token to another host.
 
 ## Commands
 
+The toolchain is pinned in `rust-toolchain.toml`. This is the full check, the same one CI runs:
+
 ```sh
-cargo build
-cargo test
-cargo clippy --all-targets -- -D warnings
-cargo fmt --check
+cargo fmt --all --check
+RUSTFLAGS="-D warnings" cargo clippy --workspace --all-targets --all-features
+RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --document-private-items
+cargo test --workspace --all-features
 ```
 
-All four must pass before you commit.
+The lint set in `Cargo.toml` is strict, and CI turns every warning into an error:
 
-## Testing
+- Every public item needs a doc comment. Functions that return `Result` need an `# Errors` section.
+- `unwrap`, `println!`, `eprintln!` and `dbg!` are linted outside tests. stdout carries the MCP protocol, so a
+  stray print corrupts the stream. Log with `tracing`, which writes to stderr.
+- To silence a lint, use `#[expect(lint, reason = "...")]`, never `#[allow]`.
 
-- No test touches the real network. Introspection and execution tests run against a mock GraphQL server started in-process.
-- **Approval is the test that matters most.** For every path that isn't an explicit accept (decline, cancel, timeout, no elicitation support, a failed prompt), assert that the mock server received zero requests.
-- Cost tests are table-driven over small fixture schemas and operations, and they assert the assumptions as well as the total.
-- Header tests use a small shell script as the command, so that the suite doesn't need Python. Cover trimming, non-zero exit, empty output, the `ttl` cache, the retry on 401, and redaction. For redaction, assert that the secret string is absent from the error and from `Debug` output.
-- Test the conversion from introspection JSON against the same schema written as SDL. Both should produce the same search results and the same cost for the same operation.
+## Tests
 
-## Conventions
+- Tests live in `tests/`, one file per slice, named as PLAN.md says. Shared helpers are in `tests/common/`.
+- Each test starts the real `fieldtrip` binary and talks to it as an MCP client over stdio. Don't test by calling
+  internal functions. The tests are the spec for what a calling agent sees, so they go through the same door.
+- The fixture schema is `tests/fixtures/schema.graphql`. Extend it when a slice needs a new shape, instead of adding
+  a second schema.
+- No test touches the real network. HTTP goes to a mock GraphQL server started inside the test.
+- Header command tests use a small shell script as the command, so the suite doesn't need Python.
+- For anything that must not be sent, assert on the mock server's request count, not only on the tool's reply.
 
-- Errors returned to the calling agent should say what to do next. For an unknown field, suggest the nearest names in the schema. The calling agent has only that text to work from.
-- Tool descriptions are prompts read by a model. Say when to use the tool and what it returns.
-- Don't `unwrap` or `expect` on anything that comes from config, the network or tool input.
-- The README is the spec. When you change a tool name, a parameter, a config key or a default, change the README in the same commit.
+## Things that are easy to get wrong
+
+- **The MCP SDK moves fast.** `rmcp` was at 3.x when this was written, and protocol revision 2026-07-28 changed how
+  elicitation reaches the client. Don't write against the API from memory. Read the source for the version in
+  `Cargo.lock`, under `~/.cargo/registry/src/`.
+- **`apollo-compiler` does not build a schema from an introspection response.** It parses and validates SDL and
+  operations. The conversion from introspection JSON is ours.
+- **Older servers reject newer introspection fields**, such as `isOneOf`, `specifiedByURL`, `isRepeatable`, and
+  `includeDeprecated` on arguments and input fields. Send the full query first and fall back to a conservative one.
+- **Secrets leak through `Debug`.** Wrap resolved header values in a type whose `Debug` and `Display` redact, so a
+  log line or an error can't print one by accident.
+- **Errors are read by a model.** An error returned to the calling agent should say what to do next. For an unknown
+  field, suggest the nearest names in the schema.
+- **Tool descriptions are prompts.** Say when to use the tool and what it returns.
