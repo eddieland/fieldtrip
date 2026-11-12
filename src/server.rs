@@ -106,8 +106,9 @@ impl Fieldtrip {
                     let _ = writeln!(out, "  schema: introspection");
                 }
             }
-            if !endpoint.header_names.is_empty() {
-                let _ = writeln!(out, "  headers: {}", endpoint.header_names.join(", "));
+            if !endpoint.headers.is_empty() {
+                let names: Vec<&str> = endpoint.headers.iter().map(|header| header.name.as_str()).collect();
+                let _ = writeln!(out, "  headers: {}", names.join(", "));
             }
         }
         out

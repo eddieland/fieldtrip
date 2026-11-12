@@ -55,38 +55,108 @@ pub(crate) struct Mcp {
     dir: TempDir,
 }
 
+/// How to start the server for a test.
+#[derive(Debug)]
+pub(crate) struct Launch {
+    config: String,
+    human: Human,
+    env: Vec<(String, String)>,
+}
+
+impl Launch {
+    /// A launch with `config` as the config file, no extra environment, and a client that cannot show prompts.
+    pub(crate) fn new(config: &str) -> Self {
+        Self {
+            config: config.to_owned(),
+            human: Human::Absent,
+            env: Vec::new(),
+        }
+    }
+
+    /// Sets an environment variable for the server process.
+    pub(crate) fn env(mut self, name: &str, value: &str) -> Self {
+        self.env.push((name.to_owned(), value.to_owned()));
+        self
+    }
+
+    /// Makes the client answer approval prompts as `human` does.
+    #[expect(dead_code, reason = "first used by the `execute` slices")]
+    pub(crate) fn human(mut self, human: Human) -> Self {
+        self.human = human;
+        self
+    }
+
+    /// Starts the server and completes the MCP handshake.
+    pub(crate) fn start(self) -> Mcp {
+        let (dir, config_path) = prepare(&self.config);
+        let mut mcp = Mcp::spawn(
+            &["--config".as_ref(), config_path.as_os_str()],
+            &self.env,
+            self.human,
+            dir,
+        );
+        mcp.initialize();
+        mcp
+    }
+
+    /// Starts the server expecting it to refuse the config, and returns what it wrote to stderr.
+    pub(crate) fn fails_to_start(self) -> String {
+        let (dir, config_path) = prepare(&self.config);
+        let output = server_command(&["--config".as_ref(), config_path.as_os_str()], &self.env, dir.path())
+            .stdin(Stdio::null())
+            .output()
+            .expect("run the fieldtrip binary");
+        let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+        assert!(
+            !output.status.success(),
+            "the server should have refused to start. stderr:\n{stderr}"
+        );
+        assert!(
+            output.stdout.is_empty(),
+            "nothing may be written to stdout on a failed start"
+        );
+        stderr
+    }
+}
+
+/// Writes `config` into a fresh directory, next to a copy of everything in `tests/fixtures/`.
+fn prepare(config: &str) -> (TempDir, std::path::PathBuf) {
+    let dir = tempfile::tempdir().expect("create a temp dir");
+    copy_fixtures(dir.path());
+    let config_path = dir.path().join("fieldtrip.toml");
+    std::fs::write(&config_path, config).expect("write the config file");
+    (dir, config_path)
+}
+
+/// The command that runs the server in `dir` with `args` and `env`.
+fn server_command(args: &[&std::ffi::OsStr], env: &[(String, String)], dir: &Path) -> Command {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_fieldtrip"));
+    command
+        .args(args)
+        .current_dir(dir)
+        // The server honors the system proxy settings. Tests talk to a local mock, so they must not see any.
+        .env_remove("HTTP_PROXY")
+        .env_remove("HTTPS_PROXY")
+        .env_remove("ALL_PROXY")
+        .env_remove("http_proxy")
+        .env_remove("https_proxy")
+        .env_remove("all_proxy")
+        .envs(env.iter().map(|(name, value)| (name, value)));
+    command
+}
+
 impl Mcp {
     /// Starts the server with `config` as its config file, and a client that cannot show prompts.
     ///
     /// The config is written into a fresh directory next to a copy of everything in `tests/fixtures/`, so a config
     /// can name a fixture by its relative path.
     pub(crate) fn start(config: &str) -> Self {
-        Self::start_with(config, Human::Absent)
+        Launch::new(config).start()
     }
 
-    /// Starts the server with `config`, and a client that answers approval prompts as `human` does.
-    pub(crate) fn start_with(config: &str, human: Human) -> Self {
-        let dir = tempfile::tempdir().expect("create a temp dir");
-        copy_fixtures(dir.path());
-        let config_path = dir.path().join("fieldtrip.toml");
-        std::fs::write(&config_path, config).expect("write the config file");
-        let mut mcp = Self::spawn(&["--config".as_ref(), config_path.as_os_str()], human, dir);
-        mcp.initialize();
-        mcp
-    }
-
-    /// Spawns the binary with `args` and wires up its three streams.
-    fn spawn(args: &[&std::ffi::OsStr], human: Human, dir: TempDir) -> Self {
-        let mut child = Command::new(env!("CARGO_BIN_EXE_fieldtrip"))
-            .args(args)
-            .current_dir(dir.path())
-            // The server honors the system proxy settings. Tests talk to a local mock, so they must not see any.
-            .env_remove("HTTP_PROXY")
-            .env_remove("HTTPS_PROXY")
-            .env_remove("ALL_PROXY")
-            .env_remove("http_proxy")
-            .env_remove("https_proxy")
-            .env_remove("all_proxy")
+    /// Spawns the binary with `args` and `env`, and wires up its three streams.
+    fn spawn(args: &[&std::ffi::OsStr], env: &[(String, String)], human: Human, dir: TempDir) -> Self {
+        let mut child = server_command(args, env, dir.path())
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())

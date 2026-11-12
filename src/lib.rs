@@ -5,6 +5,7 @@
 
 mod cli;
 mod config;
+mod headers;
 mod http;
 mod plan;
 mod schema;

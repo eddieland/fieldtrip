@@ -46,7 +46,7 @@ cargo test --workspace --all-features
   size arguments given through variables, fragments, `assumed_list_size`, and the rejection of subscriptions and of
   documents with more than one operation. The mock server receives nothing.
   Done when: `cargo test estimate_cost`
-- [ ] **7. Literal and `env` plugs.** The introspection request carries the configured literal and `env` headers,
+- [x] **7. Literal and `env` plugs.** The introspection request carries the configured literal and `env` headers,
   with `format` applied. A missing variable is an error that names the header.
   Done when: `cargo test headers_static`
 - [ ] **8. Command plug.** A command's trimmed stdout, passed through `format`, arrives as the header. The command

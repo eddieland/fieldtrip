@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use serde::Deserialize;
 
 use crate::cli::Args;
+use crate::headers::Header;
 
 /// Why the configuration could not be loaded.
 #[derive(Debug, thiserror::Error)]
@@ -57,8 +58,8 @@ pub(crate) struct Endpoint {
     pub(crate) url: String,
     /// The SDL file to read the schema from, as an absolute path. `None` means introspection.
     pub(crate) schema: Option<PathBuf>,
-    /// The names of the headers sent with every request to this endpoint, in name order.
-    pub(crate) header_names: Vec<String>,
+    /// The headers sent with every request to this endpoint, in name order.
+    pub(crate) headers: Vec<Header>,
     /// How many items to assume for a list whose size nothing bounds, when estimating cost.
     pub(crate) assumed_list_size: u64,
 }
@@ -135,10 +136,15 @@ impl Endpoint {
         if !(raw.url.starts_with("http://") || raw.url.starts_with("https://")) {
             return Err(format!("`url` must start with http:// or https://, got `{}`", raw.url));
         }
+        let headers = raw
+            .headers
+            .into_iter()
+            .map(|(name, value)| Header::from_config(name, value))
+            .collect::<Result<_, String>>()?;
         Ok(Self {
             url: raw.url,
             schema: raw.schema.map(|schema| base.join(schema)),
-            header_names: raw.headers.into_keys().collect(),
+            headers,
             assumed_list_size: raw.assumed_list_size.unwrap_or(DEFAULT_ASSUMED_LIST_SIZE),
         })
     }

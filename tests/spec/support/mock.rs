@@ -11,10 +11,19 @@ pub(crate) struct Recorded {
     /// The request method, such as `POST`.
     pub(crate) method: String,
     /// Header names, lowercased, with their values.
-    #[expect(dead_code, reason = "first read by the header slices")]
     pub(crate) headers: Vec<(String, String)>,
     /// The request body.
     pub(crate) body: String,
+}
+
+impl Recorded {
+    /// The value of the header called `name`, which is given in lowercase.
+    pub(crate) fn header(&self, name: &str) -> Option<&str> {
+        self.headers
+            .iter()
+            .find(|(header, _)| header == name)
+            .map(|(_, value)| value.as_str())
+    }
 }
 
 /// What the mock answers with.

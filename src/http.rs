@@ -3,6 +3,7 @@
 use std::error::Error as _;
 
 use crate::config::Endpoint;
+use crate::headers::Header;
 
 /// The `User-Agent` sent with every request.
 const USER_AGENT: &str = concat!(env!("CARGO_PKG_NAME"), "/", env!("CARGO_PKG_VERSION"));
@@ -43,14 +44,25 @@ impl Client {
     ///
     /// # Errors
     ///
-    /// Returns a message when no response arrives. An HTTP error status is not an error here: GraphQL servers put
+    /// Returns a message when a header cannot be resolved or no response arrives. An HTTP error status is not an error here: GraphQL servers put
     /// useful detail in the body, so the caller decides what the status means.
     pub(crate) async fn post(&self, endpoint: &Endpoint, payload: &serde_json::Value) -> Result<Reply, String> {
-        let response = self
+        // Resolve every header before anything is sent, so a missing value never produces a half-authenticated
+        // request.
+        let headers = endpoint
+            .headers
+            .iter()
+            .map(Header::resolve)
+            .collect::<Result<Vec<_>, String>>()?;
+        let mut request = self
             .http
             .post(&endpoint.url)
             .header("content-type", "application/json")
-            .header("accept", "application/graphql-response+json, application/json")
+            .header("accept", "application/graphql-response+json, application/json");
+        for (name, value) in headers {
+            request = request.header(name, value);
+        }
+        let response = request
             .body(payload.to_string())
             .send()
             .await
