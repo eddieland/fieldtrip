@@ -31,7 +31,7 @@ cargo test --workspace --all-features
 - [x] **2. `describe`.** For an endpoint whose `schema` is the fixture SDL, `describe` returns compact SDL for a
   type (`User`) and for a field (`Query.user`). An unknown name is an error that suggests the nearest names.
   Done when: `cargo test describe`
-- [ ] **3. `introspect` from a file.** `introspect` returns the overview for the fixture: root types, counts, and
+- [x] **3. `introspect` from a file.** `introspect` returns the overview for the fixture: root types, counts, and
   the query and mutation names. No HTTP request is made.
   Done when: `cargo test introspect_file`
 - [ ] **4. `search_schema`.** A search finds queries, mutations, types, fields, arguments and enum values by name

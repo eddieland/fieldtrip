@@ -39,6 +39,16 @@ struct DescribeArguments {
     name: String,
 }
 
+/// Arguments of `introspect`.
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+struct IntrospectArguments {
+    /// The endpoint name, as listed by `list_endpoints`.
+    endpoint: String,
+    /// Load the schema again from its source, instead of using the copy already loaded.
+    #[serde(default)]
+    refresh: bool,
+}
+
 #[tool_router]
 impl Fieldtrip {
     /// Creates a server for `config`.
@@ -85,8 +95,24 @@ impl Fieldtrip {
                        includes its argument types and its return type."
     )]
     async fn describe(&self, Parameters(arguments): Parameters<DescribeArguments>) -> ToolResult {
-        let schema = self.schema(&arguments.endpoint).await?;
+        let schema = self.schema(&arguments.endpoint, false).await?;
         schema.describe(&arguments.name)
+    }
+
+    #[tool(
+        description = "Load an endpoint's schema and get an overview of it: how many types it has and the names of \
+                       its queries and mutations. Use it once per endpoint to see what the API offers, then \
+                       `describe` the fields you need. The schema stays loaded. Pass `refresh` only when the API has \
+                       changed."
+    )]
+    async fn introspect(&self, Parameters(arguments): Parameters<IntrospectArguments>) -> ToolResult {
+        let name = &arguments.endpoint;
+        let schema = self.schema(name, arguments.refresh).await?;
+        let source = self.endpoint(name)?.schema.as_ref().map_or_else(
+            || "loaded by introspection".to_owned(),
+            |path| format!("read from the file {}", path.display()),
+        );
+        Ok(format!("Schema for `{name}`, {source}.\n{}", schema.overview()))
     }
 }
 
@@ -102,11 +128,11 @@ impl Fieldtrip {
         })
     }
 
-    /// Returns the schema for the endpoint called `name`, loading it on first use.
-    async fn schema(&self, name: &str) -> Result<Arc<Loaded>, String> {
+    /// Returns the schema for the endpoint called `name`, loading it on first use or when `refresh` is set.
+    async fn schema(&self, name: &str, refresh: bool) -> Result<Arc<Loaded>, String> {
         let endpoint = self.endpoint(name)?;
         let mut schemas = self.schemas.lock().await;
-        if let Some(loaded) = schemas.get(name) {
+        if let Some(loaded) = schemas.get(name).filter(|_| !refresh) {
             return Ok(Arc::clone(loaded));
         }
         let loaded = Arc::new(load(name, endpoint)?);

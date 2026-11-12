@@ -143,7 +143,7 @@ fn description(out: &mut String, indent: &str, text: Option<&str>) {
 }
 
 /// `text` as a one-line GraphQL string: whitespace runs become single spaces, quotes and backslashes are escaped.
-fn quoted(text: &str) -> String {
+pub(super) fn quoted(text: &str) -> String {
     let mut out = String::with_capacity(text.len() + 2);
     out.push('"');
     for (index, word) in text.split_whitespace().enumerate() {

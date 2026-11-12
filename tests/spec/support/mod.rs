@@ -1,4 +1,6 @@
-//! The test harness: an MCP client that drives the `fieldtrip` binary over stdio.
+//! The test harness: an MCP client that drives the `fieldtrip` binary over stdio, and a mock GraphQL endpoint.
+
+mod mock;
 
 use std::io::{BufRead as _, BufReader, Read as _, Write as _};
 use std::path::Path;
@@ -9,6 +11,8 @@ use std::time::Duration;
 
 use serde_json::{Value, json};
 use tempfile::TempDir;
+
+pub(crate) use self::mock::MockServer;
 
 /// How long to wait for the server to answer before failing the test.
 const REPLY_TIMEOUT: Duration = Duration::from_secs(20);

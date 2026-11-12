@@ -9,4 +9,6 @@ mod support;
 #[cfg(test)]
 mod describe;
 #[cfg(test)]
+mod introspect_file;
+#[cfg(test)]
 mod list_endpoints;

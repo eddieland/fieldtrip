@@ -1,6 +1,7 @@
 //! The in-memory schema that every tool reads, whichever source it was loaded from.
 
 mod describe;
+mod overview;
 mod render;
 
 use std::path::Path;
@@ -51,5 +52,10 @@ impl Loaded {
     /// Returns a message naming the nearest matches when nothing in the schema is called `name`.
     pub(crate) fn describe(&self, name: &str) -> Result<String, String> {
         describe::describe(self, name)
+    }
+
+    /// Returns the schema's description, its type counts and the names of its root fields.
+    pub(crate) fn overview(&self) -> String {
+        overview::overview(self)
     }
 }
