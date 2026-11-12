@@ -1,17 +1,18 @@
 //! The MCP server. Each tool is a thin wrapper over the rest of the crate.
 
-use std::borrow::Cow;
 use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::sync::Arc;
 
+use rmcp::handler::server::tool::{InputResponses, RequestState};
 use rmcp::handler::server::wrapper::Parameters;
-use rmcp::model::{Implementation, ProtocolVersion, ServerCapabilities, ServerConfig};
-use rmcp::{Peer, RoleServer, ServerHandler, schemars, tool, tool_handler, tool_router};
+use rmcp::model::{CallToolResponse, CallToolResult, ContentBlock, Implementation, ServerCapabilities, ServerConfig};
+use rmcp::service::RequestContext;
+use rmcp::{RoleServer, ServerHandler, schemars, tool, tool_handler, tool_router};
 use serde::Deserialize;
 use tokio::sync::Mutex;
 
-use crate::approval;
+use crate::approval::{self, Operation, Outstanding, Round};
 use crate::config::{Config, Endpoint};
 use crate::http::Client;
 use crate::plan::{Plan, Variables};
@@ -32,6 +33,8 @@ pub(crate) struct Fieldtrip {
     /// Schemas loaded so far, by endpoint name. The lock is held while loading, so each schema loads once.
     schemas: Arc<Mutex<HashMap<String, Arc<Loaded>>>>,
     http: Client,
+    /// Approval prompts that are waiting for an answer, on protocol revisions that ask by round trip.
+    outstanding: Arc<Outstanding>,
 }
 
 /// Arguments of `describe`.
@@ -93,6 +96,11 @@ fn capped(text: String, advice: &str) -> String {
     kept
 }
 
+/// A finished tool call with `text` as its result.
+fn finished(text: String) -> CallToolResponse {
+    CallToolResult::success(vec![ContentBlock::text(text)]).into()
+}
+
 /// How much of a response that is not JSON to quote in an error.
 const EXCERPT: usize = 300;
 
@@ -114,6 +122,7 @@ impl Fieldtrip {
             config: Arc::new(config),
             schemas: Arc::default(),
             http,
+            outstanding: Arc::default(),
         }
     }
 
@@ -200,7 +209,13 @@ impl Fieldtrip {
                        approve. Check the operation with `estimate_cost` first. If the user declines, do not send \
                        the same operation again: ask them what they want. Pass exactly one operation."
     )]
-    async fn execute(&self, peer: Peer<RoleServer>, Parameters(arguments): Parameters<ExecuteArguments>) -> ToolResult {
+    async fn execute(
+        &self,
+        context: RequestContext<RoleServer>,
+        RequestState(state): RequestState,
+        InputResponses(responses): InputResponses,
+        Parameters(arguments): Parameters<ExecuteArguments>,
+    ) -> Result<CallToolResponse, String> {
         let name = &arguments.endpoint;
         let endpoint = self.endpoint(name)?;
         let schema = self.schema(name, false).await?;
@@ -218,7 +233,23 @@ impl Fieldtrip {
             format!(" The user was not asked: {reason}.")
         } else {
             let prompt = approval::prompt(name, &endpoint.url, &plan, &arguments.variables);
-            approval::ask(&peer, prompt).await.into_result(name)?;
+            let decision = if approval::asks_by_round_trip(&context) {
+                let operation = Operation {
+                    endpoint: name,
+                    text: &plan.text,
+                    variables: &arguments.variables,
+                };
+                match self
+                    .outstanding
+                    .round(&context, &operation, prompt, state.as_deref(), responses.as_ref())
+                {
+                    Round::Ask(question) => return Ok(question.into()),
+                    Round::Decided(decision) => decision,
+                }
+            } else {
+                approval::ask(&context.peer, prompt).await
+            };
+            decision.into_result(name)?;
             String::new()
         };
 
@@ -235,14 +266,18 @@ impl Fieldtrip {
         );
         if reply.cut_short {
             // Too long to read in full, so it cannot be parsed. The status says whether it is a result.
-            return if reply.status < 400 { Ok(text) } else { Err(text) };
+            return if reply.status < 400 {
+                Ok(finished(text))
+            } else {
+                Err(text)
+            };
         }
         let Ok(serde_json::Value::Object(response)) = serde_json::from_str::<serde_json::Value>(&reply.body) else {
             let excerpt: String = reply.body.chars().take(EXCERPT).collect();
             return Err(format!("{summary}\nThe response was not a GraphQL response: {excerpt}"));
         };
         let has_data = response.get("data").is_some_and(|data| !data.is_null());
-        if has_data { Ok(text) } else { Err(text) }
+        if has_data { Ok(finished(text)) } else { Err(text) }
     }
 
     #[tool(
@@ -314,10 +349,5 @@ impl ServerHandler for Fieldtrip {
         ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(Implementation::new(env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION")))
             .with_instructions(INSTRUCTIONS)
-    }
-
-    fn supported_protocol_versions(&self) -> Cow<'static, [ProtocolVersion]> {
-        // Later revisions deliver elicitation differently, so they wait for their own slice.
-        Cow::Borrowed(ProtocolVersion::known_up_to(&ProtocolVersion::V_2025_11_25))
     }
 }

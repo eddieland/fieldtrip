@@ -67,10 +67,16 @@ The lint set in `Cargo.toml` is strict, and CI turns every warning into an error
   `tests_outside_test_module` lint quiet.
 - Each test starts the real `fieldtrip` binary and talks to it as an MCP client over stdio. Don't test by calling
   internal functions. The tests are the spec for what a calling agent sees, so they go through the same door.
+- There are two test clients. `Mcp` is hand-written JSON-RPC and speaks the `initialize` handshake. `SdkClient`
+  uses the MCP SDK's client and speaks revision 2026-07-28. Approval travels differently on each, so a change to
+  approval needs a test on both.
+- `Launch` says how the server starts: with a config file, with flags, with environment variables, and how the
+  human at the client answers a prompt (`Human`).
 - The fixture schema is `tests/fixtures/schema.graphql`. Extend it when a slice needs a new shape, instead of adding
-  a second schema.
-- No test touches the real network. HTTP goes to a mock GraphQL server started inside the test.
-- Header command tests use a small shell script as the command, so the suite doesn't need Python.
+  a second schema. Every file in `tests/fixtures/` is copied next to the config file of each test.
+- No test touches the real network. `MockServer` is a local HTTP endpoint that records every request, and
+  `FixtureApi` makes it answer introspection for real, from the fixture schema.
+- Header command tests use `tests/fixtures/token.sh` as the command, so the suite doesn't need Python.
 - For anything that must not be sent, assert on the mock server's request count, not only on the tool's reply.
 
 ## Things that are easy to get wrong
@@ -78,6 +84,10 @@ The lint set in `Cargo.toml` is strict, and CI turns every warning into an error
 - **The MCP SDK moves fast.** `rmcp` was at 3.x when this was written, and protocol revision 2026-07-28 changed how
   elicitation reaches the client. Don't write against the API from memory. Read the source for the version in
   `Cargo.lock`, under `~/.cargo/registry/src/`.
+- **Clippy is strict here, and a few habits avoid most of its findings.** Put variables inside format strings
+  (`"{name}"`). Append with `write!`, not `push_str(&format!(..))`. Pass method paths (`Name::as_str`) instead of
+  closures that only call a method. Make a function `const` when it can be. Drop a lock guard as soon as it is no
+  longer needed. rustfmt does not wrap comments, so keep them within 120 columns by hand.
 - **`apollo-compiler` does not build a schema from an introspection response.** It parses and validates SDL and
   operations. The conversion from introspection JSON is ours.
 - **Older servers reject newer introspection fields**, such as `isOneOf`, `specifiedByURL`, `isRepeatable`, and

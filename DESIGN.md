@@ -33,7 +33,7 @@ in the user's config, out of the agent's sight and out of its control.
 ```toml
 [endpoints.acme]
 url               = "https://api.acme.example/graphql"
-schema            = "schemas/acme.graphql"   # optional SDL file, relative to this config file
+schema            = "schemas/acme.graphql"   # optional SDL file, relative to this file
 auto_approve_cost = 50                       # optional, queries only
 assumed_list_size = 20                       # optional, default 10
 approval          = "elicit"                 # or "client"
@@ -42,7 +42,7 @@ timeout           = 30                       # optional, seconds, default 30
 [endpoints.acme.headers]
 X-Client      = "fieldtrip"
 X-Api-Key     = { env = "ACME_API_KEY" }
-Authorization = { command = ["python", "-m", "acme_auth", "token"], format = "Bearer {}", ttl = 300 }
+Authorization = { command = ["python", "-m", "acme_auth", "token"], format = "Bearer {}" }  # ttl = 300
 ```
 
 The config path comes from `--config`, defaulting to `~/.config/fieldtrip/config.toml`. `--url`, with an optional
@@ -63,7 +63,8 @@ by the value.
 
 `execute` validates and costs the operation, then asks the human through MCP elicitation. The prompt is built from
 the operation that will be sent and shows the endpoint, the kind (query or mutation), the operation text, the
-variables and the estimated cost. The request is sent only on an explicit accept.
+variables and the estimated cost. The request is sent only on an explicit accept. Up to MCP revision 2025-11-25 the
+prompt is a request from the server. From 2026-07-28 it is an "input required" result, answered on a retry.
 
 | Situation | Outcome |
 | --- | --- |
@@ -117,3 +118,6 @@ Settled. To change one, ask the user, then add a new dated line instead of editi
 - 2026-11-12: A tool result carries at most 40,000 characters, and at most 1 MiB of a response body is read.
 - 2026-11-12: A redirect is reported as an error that names its target. It is never followed.
 - 2026-11-12: `--url` defines one endpoint called `default`. A relative `--schema` is relative to the working directory.
+- 2026-11-12: The server speaks every MCP revision the SDK knows. This lifts the 2025-11-25 ceiling set above.
+- 2026-11-12: On revision 2026-07-28 the prompt is an input-required result and the answer comes with the retry.
+- 2026-11-12: Each such prompt carries a single-use ticket tied to the operation. An accept without it sends nothing.

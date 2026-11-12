@@ -2,6 +2,7 @@
 
 mod api;
 mod mock;
+mod sdk;
 
 use std::io::{BufRead as _, BufReader, Read as _, Write as _};
 use std::path::Path;
@@ -15,6 +16,7 @@ use tempfile::TempDir;
 
 pub(crate) use self::api::FixtureApi;
 pub(crate) use self::mock::{MockServer, Response};
+pub(crate) use self::sdk::{Retry, SdkClient, reply as sdk_reply};
 
 /// How long to wait for the server to answer before failing the test.
 const REPLY_TIMEOUT: Duration = Duration::from_secs(20);
@@ -149,7 +151,7 @@ impl Launch {
     /// Creates the working directory with the fixtures in it, and works out the command line and environment.
     ///
     /// The config home always points into that directory, so a test never reads the developer's own config.
-    fn prepare(&self) -> (TempDir, Vec<std::ffi::OsString>, Vec<(String, String)>) {
+    pub(super) fn prepare(&self) -> (TempDir, Vec<std::ffi::OsString>, Vec<(String, String)>) {
         let dir = tempfile::tempdir().expect("create a temp dir");
         copy_fixtures(dir.path());
         let config_home = dir.path().join("config-home");
@@ -175,7 +177,7 @@ impl Launch {
 }
 
 /// The command that runs the server in `dir` with `args` and `env`.
-fn server_command(args: &[&std::ffi::OsStr], env: &[(String, String)], dir: &Path) -> Command {
+pub(super) fn server_command(args: &[&std::ffi::OsStr], env: &[(String, String)], dir: &Path) -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_fieldtrip"));
     command
         .args(args)

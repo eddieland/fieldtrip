@@ -3,7 +3,9 @@
 GraphQL introspection and execution over MCP. Agents find real operations, plan and cost them, and run them with your
 approval.
 
-> **Status: in development.** [PLAN.md](PLAN.md) lists the slices in order, and the ticked ones work today.
+> **Status: every slice in [PLAN.md](PLAN.md) is implemented and passes its tests.** Those tests drive the real
+> binary, but against a mock endpoint and test clients. It has not yet been used from a real MCP client or against
+> a real GraphQL API, and there is no release.
 
 ## What it does
 

@@ -74,7 +74,7 @@ cargo test --workspace --all-features
   Done when: `cargo test limits`
 - [x] **15. `--url` and `--schema`.** The server starts with no config file and serves one endpoint from the flags.
   Done when: `cargo test cli_flags`
-- [ ] **16. Protocol 2026-07-28.** The server also speaks the MCP revision that has no `initialize` handshake. On
+- [x] **16. Protocol 2026-07-28.** The server also speaks the MCP revision that has no `initialize` handshake. On
   it, `execute` asks for approval by returning an input-required result, and runs only when the client retries with
   an accepted response for the same operation.
   Done when: `cargo test protocol_2026`

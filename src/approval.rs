@@ -3,11 +3,16 @@
 //! Approval comes from the person at the MCP client, through elicitation. The calling agent is the party being
 //! gated, so nothing it can put in a tool call counts as approval.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::fmt::Write as _;
+use std::hash::{BuildHasher as _, RandomState};
+use std::sync::Mutex;
 
-use rmcp::model::{ElicitRequestParams, ElicitationAction, ElicitationSchema};
-use rmcp::service::ElicitationMode;
+use rmcp::model::{
+    ElicitRequest, ElicitRequestParams, ElicitationAction, ElicitationSchema, InputRequest, InputRequiredResult,
+    InputResponses, ProtocolVersion,
+};
+use rmcp::service::{ElicitationMode, RequestContext};
 use rmcp::{Peer, RoleServer};
 
 use crate::config::{Approval, Endpoint};
@@ -131,4 +136,139 @@ pub(crate) async fn ask(peer: &Peer<RoleServer>, prompt: String) -> Decision {
         },
         Err(error) => Decision::Failed(error.to_string()),
     }
+}
+
+/// The key the approval request and its answer travel under in an "input required" round trip.
+const APPROVAL_KEY: &str = "approval";
+/// The most prompts that can be waiting for an answer. Past it, the oldest ones are forgotten and must be asked
+/// again.
+const MAX_OUTSTANDING: usize = 1024;
+
+/// Whether the request came in on a protocol revision where the server cannot send a request to the client.
+///
+/// From revision 2026-07-28 on, a server asks for input by answering the tool call with an "input required"
+/// result. The client fulfils it and calls again.
+pub(crate) fn asks_by_round_trip(context: &RequestContext<RoleServer>) -> bool {
+    context
+        .protocol_version()
+        .is_some_and(|version| version >= ProtocolVersion::V_2026_07_28)
+}
+
+/// What one call of `execute` does about approval on a round-trip revision.
+#[derive(Debug)]
+pub(crate) enum Round {
+    /// The human has not been asked yet. This result asks them, and the call ends here.
+    Ask(InputRequiredResult),
+    /// The call came back with an answer.
+    Decided(Decision),
+}
+
+/// The prompts that have been sent out and not answered yet.
+///
+/// A prompt and its answer arrive in two separate calls, so the answer has to be tied to the operation the human
+/// was shown. Each prompt gets a ticket: a number used once, and a keyed fingerprint of that number with the
+/// operation. The ticket goes out as the request state and must come back with the answer. An accept counts only
+/// when its ticket is outstanding and its fingerprint matches the operation in the call that carries it.
+#[derive(Debug, Default)]
+pub(crate) struct Outstanding {
+    /// Keys the fingerprints. It is random per process, so a ticket means nothing to another server.
+    key: RandomState,
+    /// The numbers of the prompts that are waiting for an answer.
+    numbers: Mutex<HashSet<u64>>,
+}
+
+impl Outstanding {
+    /// Handles one call of `execute` on a round-trip revision.
+    ///
+    /// With no `responses` this is the first call, and the result asks the human. With `responses` it is the
+    /// retry, and the decision is whatever the human answered, provided `state` is the ticket for this operation.
+    pub(crate) fn round(
+        &self,
+        context: &RequestContext<RoleServer>,
+        operation: &Operation<'_>,
+        prompt: String,
+        state: Option<&str>,
+        responses: Option<&InputResponses>,
+    ) -> Round {
+        let can_prompt = context
+            .client_capabilities()
+            .and_then(|capabilities| capabilities.elicitation)
+            .is_some_and(|elicitation| elicitation.form.is_some() || elicitation.url.is_none());
+        if !can_prompt {
+            return Round::Decided(Decision::Unavailable);
+        }
+        let Some(responses) = responses else {
+            return Round::Ask(self.ask(operation, prompt));
+        };
+        if !self.redeem(state, operation) {
+            return Round::Decided(Decision::Failed(
+                "the approval that came back was not given for this operation, or was already used".to_owned(),
+            ));
+        }
+        let action = responses.get(APPROVAL_KEY).and_then(|response| response.get("action"));
+        Round::Decided(match action.and_then(|action| action.as_str()) {
+            Some("accept") => Decision::Approved,
+            Some("decline") => Decision::Declined,
+            Some("cancel") => Decision::Cancelled,
+            _ => Decision::Failed("the client did not answer the approval prompt".to_owned()),
+        })
+    }
+
+    /// Issues a ticket for `operation` and builds the result that asks the human.
+    fn ask(&self, operation: &Operation<'_>, prompt: String) -> InputRequiredResult {
+        // A fresh `RandomState` is keyed differently every time, which makes this a number nobody can predict.
+        let number = RandomState::new().hash_one(0_u8);
+        {
+            let mut numbers = self.numbers.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            if numbers.len() >= MAX_OUTSTANDING {
+                numbers.clear();
+            }
+            numbers.insert(number);
+        }
+        let ticket = format!("{number:016x}{:016x}", self.fingerprint(number, operation));
+        let request = ElicitRequest::new(ElicitRequestParams::FormElicitationParams {
+            meta: None,
+            message: prompt,
+            requested_schema: ElicitationSchema::new(BTreeMap::new()),
+        });
+        let requests = BTreeMap::from([(APPROVAL_KEY.to_owned(), InputRequest::Elicitation(request))]);
+        InputRequiredResult::new(Some(requests), Some(ticket))
+    }
+
+    /// Checks that `ticket` was issued for `operation` and has not been used, and uses it up.
+    fn redeem(&self, ticket: Option<&str>, operation: &Operation<'_>) -> bool {
+        let Some(ticket) = ticket.filter(|ticket| ticket.len() == 32 && ticket.is_ascii()) else {
+            return false;
+        };
+        let (number, fingerprint) = ticket.split_at(16);
+        let (Ok(number), Ok(fingerprint)) = (u64::from_str_radix(number, 16), u64::from_str_radix(fingerprint, 16))
+        else {
+            return false;
+        };
+        if fingerprint != self.fingerprint(number, operation) {
+            return false;
+        }
+        self.numbers
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&number)
+    }
+
+    /// A keyed hash of a ticket number and everything that makes up the operation.
+    fn fingerprint(&self, number: u64, operation: &Operation<'_>) -> u64 {
+        let variables = serde_json::Value::Object(operation.variables.clone()).to_string();
+        self.key
+            .hash_one((number, operation.endpoint, operation.text, variables))
+    }
+}
+
+/// What an approval covers: where the operation goes, its canonical text, and its variables.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Operation<'call> {
+    /// The endpoint's name.
+    pub(crate) endpoint: &'call str,
+    /// The operation in canonical form, as it is shown and sent.
+    pub(crate) text: &'call str,
+    /// The variables that are sent with it.
+    pub(crate) variables: &'call Variables,
 }
