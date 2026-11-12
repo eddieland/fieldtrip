@@ -25,8 +25,8 @@ in the user's config, out of the agent's sight and out of its control.
 | `introspect` | `endpoint`, `refresh?` | Overview: root types, counts, query and mutation names |
 | `search_schema` | `endpoint`, `query` | Ranked matches as one-line signatures |
 | `describe` | `endpoint`, `name` (`Type` or `Type.field`) | That definition as compact SDL |
-| `estimate_cost` | `endpoint`, `operation`, `variables?` | Validation errors, or cost, depth, breakdown and assumptions |
-| `execute` | `endpoint`, `operation`, `variables?` | The response `data`, `errors` and `extensions`, plus the estimate |
+| `estimate_cost` | `endpoint`, `operation`, `variables?` | Validation errors, or cost, depth, breakdown, assumptions |
+| `execute` | `endpoint`, `operation`, `variables?` | The response body, after a line with the status and estimate |
 
 ## Config shape
 
