@@ -7,4 +7,6 @@ mod support;
 
 // Integration tests are always built with `cfg(test)`. Saying so keeps `clippy::tests_outside_test_module` satisfied.
 #[cfg(test)]
+mod describe;
+#[cfg(test)]
 mod list_endpoints;

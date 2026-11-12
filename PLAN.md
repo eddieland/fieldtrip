@@ -28,7 +28,7 @@ cargo test --workspace --all-features
 - [x] **1. `list_endpoints`.** The server starts on stdio with `--config` and lists each endpoint's name, URL,
   schema source and header names. A config with a header in it shows no header value.
   Done when: `cargo test list_endpoints`
-- [ ] **2. `describe`.** For an endpoint whose `schema` is the fixture SDL, `describe` returns compact SDL for a
+- [x] **2. `describe`.** For an endpoint whose `schema` is the fixture SDL, `describe` returns compact SDL for a
   type (`User`) and for a field (`Query.user`). An unknown name is an error that suggests the nearest names.
   Done when: `cargo test describe`
 - [ ] **3. `introspect` from a file.** `introspect` returns the overview for the fixture: root types, counts, and

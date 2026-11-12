@@ -5,7 +5,9 @@
 
 mod cli;
 mod config;
+mod schema;
 mod server;
+mod suggest;
 
 use std::ffi::OsString;
 use std::process::ExitCode;

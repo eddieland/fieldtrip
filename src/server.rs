@@ -1,22 +1,42 @@
 //! The MCP server. Each tool is a thin wrapper over the rest of the crate.
 
 use std::borrow::Cow;
+use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::sync::Arc;
 
+use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{Implementation, ProtocolVersion, ServerCapabilities, ServerConfig};
-use rmcp::{ServerHandler, tool, tool_handler, tool_router};
+use rmcp::{ServerHandler, schemars, tool, tool_handler, tool_router};
+use serde::Deserialize;
+use tokio::sync::Mutex;
 
-use crate::config::Config;
+use crate::config::{Config, Endpoint};
+use crate::schema::Loaded;
+use crate::suggest::backticked;
 
 /// What the server tells a client about itself and how to use it.
 const INSTRUCTIONS: &str = "fieldtrip lets you work with GraphQL APIs the user has configured. Start with \
      `list_endpoints`. Every other tool takes one of those endpoint names.";
 
+/// What a tool hands back: text for the calling agent, or an error message that says what to do next.
+type ToolResult = Result<String, String>;
+
 /// The fieldtrip MCP server.
 #[derive(Debug, Clone)]
 pub(crate) struct Fieldtrip {
     config: Arc<Config>,
+    /// Schemas loaded so far, by endpoint name. The lock is held while loading, so each schema loads once.
+    schemas: Arc<Mutex<HashMap<String, Arc<Loaded>>>>,
+}
+
+/// Arguments of `describe`.
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+struct DescribeArguments {
+    /// The endpoint name, as listed by `list_endpoints`.
+    endpoint: String,
+    /// A type name such as `User`, or a field written as `Type.field`, such as `Query.user`.
+    name: String,
 }
 
 #[tool_router]
@@ -25,6 +45,7 @@ impl Fieldtrip {
     pub(crate) fn new(config: Config) -> Self {
         Self {
             config: Arc::new(config),
+            schemas: Arc::default(),
         }
     }
 
@@ -56,6 +77,59 @@ impl Fieldtrip {
         }
         out
     }
+
+    #[tool(
+        description = "Show the exact definition of one type or one field, as compact GraphQL SDL. Use it before \
+                       writing an operation, to get field names, argument names and types right. `name` is a type \
+                       (`User`) or a field (`Query.user`, `Mutation.createOrder`). For a field, the result also \
+                       includes its argument types and its return type."
+    )]
+    async fn describe(&self, Parameters(arguments): Parameters<DescribeArguments>) -> ToolResult {
+        let schema = self.schema(&arguments.endpoint).await?;
+        schema.describe(&arguments.name)
+    }
+}
+
+impl Fieldtrip {
+    /// Looks up an endpoint by name.
+    fn endpoint(&self, name: &str) -> Result<&Endpoint, String> {
+        self.config.endpoints.get(name).ok_or_else(|| {
+            let names = self.config.endpoints.keys().map(String::as_str);
+            format!(
+                "There is no endpoint named `{name}`. Configured endpoints: {}.",
+                backticked(names)
+            )
+        })
+    }
+
+    /// Returns the schema for the endpoint called `name`, loading it on first use.
+    async fn schema(&self, name: &str) -> Result<Arc<Loaded>, String> {
+        let endpoint = self.endpoint(name)?;
+        let mut schemas = self.schemas.lock().await;
+        if let Some(loaded) = schemas.get(name) {
+            return Ok(Arc::clone(loaded));
+        }
+        let loaded = Arc::new(load(name, endpoint)?);
+        schemas.insert(name.to_owned(), Arc::clone(&loaded));
+        drop(schemas);
+        Ok(loaded)
+    }
+}
+
+/// Loads the schema for `endpoint` from its configured source.
+fn load(name: &str, endpoint: &Endpoint) -> Result<Loaded, String> {
+    let Some(path) = &endpoint.schema else {
+        return Err(format!(
+            "Endpoint `{name}` has no schema file, and introspection is not available yet."
+        ));
+    };
+    let text = std::fs::read_to_string(path).map_err(|error| {
+        format!(
+            "Could not read the schema file {} for endpoint `{name}`: {error}",
+            path.display()
+        )
+    })?;
+    Loaded::from_sdl(&text, path)
 }
 
 #[expect(
