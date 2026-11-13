@@ -126,3 +126,10 @@ cargo test --workspace --all-features
   `response_headers` from its template unless it sets them. When the data is cut to fit, the errors are not. A
   connection error or a timeout says how long fieldtrip waited.
   Done when: `cargo test response_metadata`
+- [x] **29. Mutations denied.** `mutations = "deny"` on an endpoint, or on its template, makes `execute` refuse
+  every mutation before it is validated, with no prompt on either protocol revision and no request to the mock,
+  even with `approval = "client"`. Queries run as before. `estimate_cost` still costs a mutation and says `execute`
+  will refuse it, `introspect` marks the mutations unavailable, and `list_endpoints` and `fieldtrip check` show
+  `mutations: denied`. An endpoint that sets `"prompt"` under a template that denies, or any other value, stops the
+  server at startup.
+  Done when: `cargo test mutations_denied`

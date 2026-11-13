@@ -8,7 +8,7 @@ use std::fmt::Write as _;
 use std::path::Path;
 
 use crate::approval;
-use crate::config::{Config, Endpoint};
+use crate::config::{Config, Endpoint, Mutations};
 use crate::schema::Loaded;
 
 /// What the check found.
@@ -97,6 +97,9 @@ async fn endpoint_report(out: &mut Out, name: &str, endpoint: &Endpoint) {
     }
     out.line("url", &endpoint.shown_url);
     out.line("approval", approval::policy(endpoint));
+    if endpoint.mutations == Mutations::Deny {
+        out.line("mutations", "denied");
+    }
     out.line("timeout", format!("{}s", endpoint.timeout.as_secs()));
     out.line("assumed list size", endpoint.assumed_list_size);
     if !endpoint.response_headers.is_empty() {

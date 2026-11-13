@@ -85,8 +85,9 @@ impl Loaded {
         lint::findings(self, costs)
     }
 
-    /// Returns the schema's description, its type counts and the names of its root fields.
-    pub(crate) fn overview(&self) -> String {
-        overview::overview(self)
+    /// Returns the schema's description, its type counts and the names of its root fields. With
+    /// [`Mutations::Deny`](crate::config::Mutations::Deny) the mutation fields are marked as unavailable.
+    pub(crate) fn overview(&self, mutations: crate::config::Mutations) -> String {
+        overview::overview(self, mutations)
     }
 }

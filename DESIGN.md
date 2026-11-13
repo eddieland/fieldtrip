@@ -49,6 +49,7 @@ description       = "Production. Real customers."   # optional, shown to the age
 schema            = "schemas/acme.graphql"   # optional SDL file, relative to this file
 approval          = "elicit"                 # or "client"
 auto_approve_cost = 50                       # optional, queries only
+mutations         = "deny"                   # optional, default "prompt". A template may set it too
 
 [endpoints.acme-prod.headers]
 X-Api-Key = { env = "ACME_API_KEY" }
@@ -56,7 +57,8 @@ X-Api-Key = { env = "ACME_API_KEY" }
 
 An endpoint takes `schema`, `headers`, `costs`, `assumed_list_size`, `timeout` and `response_headers` from its
 template unless it sets them. Headers merge by name, ignoring case, and the endpoint's win. `url`, `description`, `approval` and
-`auto_approve_cost` are only ever set on the endpoint. A path may start with `~/`.
+`auto_approve_cost` are only ever set on the endpoint. `mutations` comes from the template too, but an endpoint can
+only make it stricter. A path may start with `~/`.
 
 The config path comes from `--config`, defaulting to `$XDG_CONFIG_HOME/fieldtrip/config.toml` or
 `~/.config/fieldtrip/config.toml`. `--url`, with an optional `--schema`, defines a single endpoint with no headers and
@@ -102,6 +104,7 @@ prompt is a request from the server. From 2026-07-28 it is an "input required" r
 | Client has no elicitation support | Not sent |
 | Query with cost at or below `auto_approve_cost` | Sent without a prompt |
 | Endpoint sets `approval = "client"` | Sent without a prompt, mutations included |
+| Mutation, and the endpoint or its template sets `mutations = "deny"` | Not sent, and no prompt is shown |
 
 ## Decisions
 
@@ -183,3 +186,8 @@ Settled. To change one, ask the user, then add a new dated line instead of editi
 - 2026-11-13: Response headers are shown only when `response_headers` names them. The agent cannot choose them.
 - 2026-11-13: A shown response header has secrets removed as a body does, and is cut at 200 characters.
 - 2026-11-13: A request that fails or times out says how many milliseconds fieldtrip waited.
+- 2026-11-13: `mutations = "deny"` makes `execute` refuse every mutation, before validating it or asking anyone.
+- 2026-11-13: The deny check runs on the parsed text, so a mutation is refused even if it isn't valid.
+- 2026-11-13: `mutations` can come from a template, and an endpoint can only make it stricter.
+- 2026-11-13: An endpoint that sets `mutations = "prompt"` under a template that denies them stops the server.
+- 2026-11-13: With mutations denied, `estimate_cost` still costs them and `introspect` lists them as unavailable.

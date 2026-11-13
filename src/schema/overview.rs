@@ -5,12 +5,14 @@ use std::fmt::Write as _;
 use apollo_compiler::schema::{ComponentName, ExtendedType};
 
 use super::Loaded;
+use crate::config::Mutations;
 
 /// How many root field names to list per operation type before cutting off.
 const MAX_ROOT_FIELDS: usize = 300;
 
-/// Returns the schema's description, type counts and root field names.
-pub(super) fn overview(loaded: &Loaded) -> String {
+/// Returns the schema's description, type counts and root field names, marking mutations unavailable when the
+/// endpoint denies them.
+pub(super) fn overview(loaded: &Loaded, mutations: Mutations) -> String {
     let schema = &loaded.schema;
     let mut out = String::new();
     if let Some(description) = schema
@@ -48,7 +50,12 @@ pub(super) fn overview(loaded: &Loaded) -> String {
 
     let definition = &schema.schema_definition;
     root(&mut out, loaded, "Query", definition.query.as_ref());
-    root(&mut out, loaded, "Mutation", definition.mutation.as_ref());
+    if root(&mut out, loaded, "Mutation", definition.mutation.as_ref()) && mutations == Mutations::Deny {
+        out.push_str(
+            "Mutations are denied on this endpoint by `mutations = \"deny\"`: they can be described and estimated, \
+             but `execute` refuses them.\n",
+        );
+    }
     if definition.subscription.is_some() {
         root(&mut out, loaded, "Subscription", definition.subscription.as_ref());
         out.push_str("Subscriptions can be described but not executed.\n");
@@ -56,10 +63,11 @@ pub(super) fn overview(loaded: &Loaded) -> String {
     out
 }
 
-/// Writes one line naming the fields of a root operation type, when the schema has that type.
-fn root(out: &mut String, loaded: &Loaded, label: &str, root: Option<&ComponentName>) {
+/// Writes one line naming the fields of a root operation type, when the schema has that type. Returns whether it
+/// did.
+fn root(out: &mut String, loaded: &Loaded, label: &str, root: Option<&ComponentName>) -> bool {
     let Some(object) = root.and_then(|root| loaded.schema.get_object(root.name.as_str())) else {
-        return;
+        return false;
     };
     let count = object.fields.len();
     let names: Vec<String> = object
@@ -83,6 +91,7 @@ fn root(out: &mut String, loaded: &Loaded, label: &str, root: Option<&ComponentN
         );
     }
     out.push('\n');
+    true
 }
 
 /// `"s"` unless `count` is one.

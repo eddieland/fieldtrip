@@ -49,6 +49,11 @@ cost map and other settings they share. A template can't hold `approval`, so wri
 endpoint even when it uses a template. An endpoint that leaves it out falls back to fieldtrip's own prompt, which
 OpenCode accepts unseen. The [README](../README.md#several-instances-of-one-service) shows a template.
 
+For an endpoint the agent should only read, such as production, also set `mutations = "deny"`. `execute` then refuses
+every mutation there before anything is asked or sent, so a write doesn't depend on a permission rule. Unlike
+`approval`, this setting can go in a template, and an endpoint can't undo it. Keep a separate endpoint for writes if
+you need one.
+
 Before you register fieldtrip, check the config:
 
 ```sh

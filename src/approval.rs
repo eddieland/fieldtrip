@@ -15,7 +15,7 @@ use rmcp::model::{
 use rmcp::service::{ElicitationMode, RequestContext};
 use rmcp::{Peer, RoleServer};
 
-use crate::config::{Approval, Endpoint};
+use crate::config::{Approval, Endpoint, Mutations};
 use crate::plan::{Kind, Plan, Variables};
 
 /// What came of asking.
@@ -58,6 +58,39 @@ impl Decision {
             )),
         }
     }
+}
+
+/// Refuses `operation` when it holds a mutation and `endpoint` denies them. `name` is the endpoint's name.
+///
+/// This runs on the parsed text alone, before validation, so a mutation is refused before the calling agent can
+/// read any validation error as something to fix and try again. A document that does not parse may still show a
+/// mutation, and is refused all the same.
+///
+/// # Errors
+///
+/// Returns the refusal, which names the setting and says what the calling agent can still do.
+pub(crate) fn refuse_denied_mutation(name: &str, endpoint: &Endpoint, operation: &str) -> Result<(), String> {
+    if endpoint.mutations != Mutations::Deny {
+        return Ok(());
+    }
+    let document =
+        apollo_compiler::ast::Document::parse(operation, "operation.graphql").unwrap_or_else(|invalid| invalid.partial);
+    let has_mutation = document.definitions.iter().any(|definition| {
+        matches!(
+            definition,
+            apollo_compiler::ast::Definition::OperationDefinition(operation)
+                if operation.operation_type == apollo_compiler::ast::OperationType::Mutation
+        )
+    });
+    if has_mutation {
+        return Err(format!(
+            "Nothing was sent to `{name}`. The user's fieldtrip config turns mutations off for this endpoint with \
+             `mutations = \"deny\"`, so `execute` refuses every mutation here, whoever approves it. Do not retry it \
+             on this endpoint. `estimate_cost` still validates and costs a mutation, so you can give the user a valid \
+             one to run themselves, or ask whether another endpoint in `list_endpoints` is meant for writes."
+        ));
+    }
+    Ok(())
 }
 
 /// Why `plan` may be sent to `endpoint` without asking, when the user's config says so. `None` means ask.
