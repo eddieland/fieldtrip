@@ -44,6 +44,8 @@ Register it with your MCP client as a stdio server:
 }
 ```
 
+For a step-by-step setup in a specific client, see [docs/opencode.md](docs/opencode.md) for OpenCode.
+
 Without `--config`, fieldtrip reads `~/.config/fieldtrip/config.toml`. For a single endpoint that needs no headers
 you can skip the file and pass `--url https://api.example.com/graphql`, optionally with `--schema schema.graphql`.
 
@@ -159,6 +161,7 @@ whatever they cost.
 | [DESIGN.md](DESIGN.md) | Goal, non-goals, tools, config, the header plugs, the cost map, approval, and the dated decisions |
 | [PLAN.md](PLAN.md) | The ordered checklist of slices, each with a test command that says when it is done |
 | `tests/` | The spec. Each slice has an integration test that drives the binary over MCP against a fixture schema |
+| [docs/](docs/) | Setup guides for specific MCP clients |
 | [AGENTS.md](AGENTS.md) | How to work in this repository |
 
 ## Development
