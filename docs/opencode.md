@@ -32,16 +32,33 @@ fieldtrip reads `~/.config/fieldtrip/config.toml` unless you pass `--config`. A 
 
 ```toml
 [endpoints.acme]
-url      = "https://api.acme.example/graphql"
-approval = "client"   # required in OpenCode: see "Read this first"
+url         = "https://api.acme.example/graphql"
+description = "The Acme store API."   # optional: tells the agent what this endpoint is for
+approval    = "client"                # required in OpenCode: see "Read this first"
 
 [endpoints.acme.headers]
 X-Api-Key = { env = "ACME_API_KEY" }
 ```
 
 Set `approval = "client"` on every endpoint you use from OpenCode. With it, fieldtrip sends every operation it is
-given without prompting, and OpenCode's permission prompt from step 4 is what stops it. `auto_approve_cost` has no
-effect in this mode.
+given without prompting, and OpenCode's permission prompt from step 4 is what stops it. Leave out
+`auto_approve_cost`: it would have no effect, so fieldtrip refuses to start when both are set.
+
+If you have several instances of one service, such as dev and prod, a `[templates.NAME]` table can hold the headers,
+cost map and other settings they share. A template can't hold `approval`, so write `approval = "client"` on each
+endpoint even when it uses a template. An endpoint that leaves it out falls back to fieldtrip's own prompt, which
+OpenCode accepts unseen. The [README](../README.md#several-instances-of-one-service) shows a template.
+
+Before you register fieldtrip, check the config:
+
+```sh
+fieldtrip check --config ~/.config/fieldtrip/config.toml
+```
+
+It prints what each endpoint resolves to, including `approval: left to the MCP client` for each one, and checks that
+every header can be produced, without printing a value or sending anything. Look for an endpoint that says
+`approval: the user is asked before every operation`: in OpenCode, that one would run unseen. Run `check` from the
+shell you will start OpenCode from, so it sees the same environment variables.
 
 You can't use the `--url` flag from OpenCode, because an endpoint defined by `--url` uses fieldtrip's own prompt.
 Write a config file instead.
@@ -90,7 +107,7 @@ Run `opencode mcp list` and check that fieldtrip shows as connected. Its tools a
 
 | Tool | What it's for |
 | --- | --- |
-| `fieldtrip_list_endpoints` | The endpoints in your config, and which headers each one has |
+| `fieldtrip_list_endpoints` | The endpoints in your config, their descriptions, and which headers each one has |
 | `fieldtrip_introspect` | Load an endpoint's schema and get an overview of it |
 | `fieldtrip_search_schema` | Find queries, mutations, types and fields by name |
 | `fieldtrip_describe` | Read one type or field as SDL |
@@ -148,9 +165,12 @@ also speaks MCP revision 2026-07-28, so `"protocol": "auto"` on the server works
 
 ## Troubleshooting
 
-- **fieldtrip doesn't connect.** Run the same command in a terminal. A config or cost map that isn't valid stops
-  fieldtrip at startup, and the error says why. Use `/mcps` in OpenCode to reconnect after fixing it.
+- **fieldtrip doesn't connect.** Run `fieldtrip check` with the same `--config` in a terminal. A config or cost map
+  that isn't valid stops fieldtrip at startup, and `check` prints why. Use `/mcps` in OpenCode to reconnect after
+  fixing it.
 - **You need more detail.** Set `FIELDTRIP_LOG` to `debug` in `environment`. fieldtrip logs only to stderr, so
   logging can't corrupt the connection.
-- **A header seems to be missing.** `fieldtrip_list_endpoints` shows each endpoint's header names, though never
-  their values. For an `env` header, check that the variable is set in the shell that started OpenCode.
+- **A header seems to be missing.** `fieldtrip check` lists each endpoint's headers, including those from its
+  template, and says whether each one can be produced: an `env` variable that isn't set, or a command that fails,
+  is reported as a problem. It never prints a value. Run it from the shell that started OpenCode, since fieldtrip
+  inherits that environment.
