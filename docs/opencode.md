@@ -1,10 +1,12 @@
 # Using fieldtrip with OpenCode
 
-This guide sets fieldtrip up as a local MCP server in [OpenCode](https://opencode.ai). It covers installing the
+This guide sets fieldtrip up as a local MCP server in [OpenCode](https://opencode.ai) V2. It covers installing the
 binary, registering it, and checking that the approval prompt reaches you before anything is sent.
 
-> fieldtrip has not yet been tested end to end in OpenCode. If a step here doesn't match what your version of
-> OpenCode does, please open an issue.
+> fieldtrip has not yet been tested end to end in OpenCode. The steps follow OpenCode's V2 documentation for
+> [MCP servers](https://opencode.ai/docs/mcp-servers/) and [permissions](https://opencode.ai/docs/permissions/). If
+> a step doesn't match what your version does, please open an issue. OpenCode V1 uses a different config shape, and
+> this guide doesn't cover it.
 
 ## 1. Install fieldtrip
 
@@ -33,31 +35,44 @@ header commands and cost maps.
 
 ## 3. Register fieldtrip in OpenCode
 
-Add fieldtrip under the `mcp` key of an OpenCode config file. Use `opencode.json` at the root of a project for that
-project only, or `~/.config/opencode/opencode.json` for every project.
+The quickest way is the CLI. Run it from the project that should use fieldtrip, or add `--global` to make it
+available in every project:
+
+```sh
+opencode mcp add fieldtrip -- fieldtrip --config ~/.config/fieldtrip/config.toml
+```
+
+To write the config by hand, add fieldtrip under `mcp.servers` in `opencode.jsonc` at the root of a project, or in
+`~/.config/opencode/opencode.jsonc` for every project:
 
 ```jsonc
 {
   "$schema": "https://opencode.ai/config.json",
   "mcp": {
-    "fieldtrip": {
-      "type": "local",
-      "command": ["fieldtrip", "--config", "/home/you/.config/fieldtrip/config.toml"],
-      "environment": {
-        "FIELDTRIP_LOG": "info"
-      }
-    }
-  }
+    "servers": {
+      "fieldtrip": {
+        "type": "local",
+        "command": ["fieldtrip", "--config", "/home/you/.config/fieldtrip/config.toml"],
+        "codemode": false,
+        "environment": {
+          "FIELDTRIP_LOG": "info",
+        },
+      },
+    },
+  },
 }
 ```
 
-- `command` is one list: the program, then its arguments.
+- `command` is one list: the program, then its arguments. JSON doesn't expand `~`, so write the full path.
+- `"codemode": false` puts fieldtrip's six tools directly on the agent's tool list instead of behind OpenCode's Code
+  Mode. That way the agent reads each tool's description, which says when to use the tool and in what order. This
+  is a recommendation, not a requirement.
 - For a single endpoint that needs no headers you can skip the fieldtrip config file:
   `"command": ["fieldtrip", "--url", "https://api.example.com/graphql"]`.
-- Keep secrets out of `opencode.json`, especially one that is committed to a project. Export `ACME_API_KEY` in the
-  shell you start `opencode` from, and fieldtrip reads it when it sends a request.
+- Keep secrets out of OpenCode's config, especially a config committed to a project. fieldtrip inherits OpenCode's
+  environment, so export `ACME_API_KEY` in the shell you start `opencode` from.
 
-Restart OpenCode. fieldtrip's tools appear with the server name in front of them:
+Run `opencode mcp list` and check that fieldtrip shows as connected. Its tools are named `<server>_<tool>`:
 
 | Tool | What it's for |
 | --- | --- |
@@ -70,21 +85,20 @@ Restart OpenCode. fieldtrip's tools appear with the server name in front of them
 
 ## 4. Check that approval reaches you
 
+fieldtrip asks you to approve each operation through MCP elicitation, and OpenCode shows such a request as a form.
 Ask the agent to run something small:
 
 > Use fieldtrip to run `{ __typename }` against acme.
 
-One of two things happens.
+OpenCode should show *"fieldtrip is requesting input"* with the endpoint, the operation, its variables and its
+estimated cost. Accept it and the query runs. Decline or dismiss it and nothing is sent.
 
-- **OpenCode shows you an accept or decline prompt** with the endpoint, the operation, its variables and its
-  estimated cost. Approval works, and you're done. Nothing is sent until you accept.
-- **The tool fails** with *"This MCP client cannot show approval prompts, because it does not support
-  elicitation…"*. Nothing was sent. fieldtrip asks for approval through MCP elicitation, and your version of
-  OpenCode doesn't support it. Use the fallback below.
+If the tool instead fails with *"This MCP client cannot show approval prompts, because it does not support
+elicitation…"*, nothing was sent, and the client didn't offer elicitation. Use the fallback below.
 
 ### Fallback: let OpenCode do the approving
 
-Set `approval = "client"` on the endpoint:
+Use this only if the prompt above never appears. Set `approval = "client"` on the endpoint:
 
 ```toml
 [endpoints.acme]
@@ -93,24 +107,33 @@ approval = "client"
 ```
 
 With this set, fieldtrip sends every operation it is given, mutations included, without prompting. OpenCode's own
-permission check becomes the only gate, so make sure it asks you before every `execute`:
+permission check becomes the only gate. OpenCode V2 allows every action by default, so add a rule that asks before
+each `execute`:
 
 ```jsonc
 {
-  "permission": {
-    "fieldtrip_execute": "ask"
-  }
+  "permissions": [
+    { "action": "fieldtrip_execute", "resource": "*", "effect": "ask" },
+  ],
 }
 ```
 
-The exact `permission` syntax has changed between OpenCode versions, so check OpenCode's permissions docs for the
-version you run. Then repeat the test above and confirm that OpenCode asks before the query is sent.
+Then repeat the test above and confirm that OpenCode asks before the query is sent.
 
-This fallback gives up two things:
+When it asks, choose **Allow once**. **Allow always** saves a rule that lets every later `execute` run without a
+prompt, so after that nothing stands between the agent and your API. If you chose it by mistake, remove the saved
+approval.
+
+This fallback also gives up two things:
 
 - OpenCode's prompt shows the tool's arguments, which are the operation and its variables, but not fieldtrip's cost
   estimate. Ask the agent to call `fieldtrip_estimate_cost` first, or call it yourself.
 - `auto_approve_cost` has no effect, because fieldtrip no longer prompts for anything.
+
+## Protocol revision
+
+OpenCode starts local servers with the classic `initialize` handshake by default, and fieldtrip supports it. fieldtrip
+also speaks MCP revision 2026-07-28, so `"protocol": "auto"` on the server works too. You don't need it.
 
 ## Example prompts
 
@@ -121,8 +144,8 @@ This fallback gives up two things:
 
 ## Troubleshooting
 
-- **The server doesn't start.** Run the same `command` in a terminal. A config or cost map that isn't valid stops
-  fieldtrip at startup, and the error says why.
+- **fieldtrip doesn't connect.** Run the same command in a terminal. A config or cost map that isn't valid stops
+  fieldtrip at startup, and the error says why. Use `/mcps` in OpenCode to reconnect after fixing it.
 - **You need more detail.** Set `FIELDTRIP_LOG` to `debug` in `environment`. fieldtrip logs only to stderr, so
   logging can't corrupt the connection.
 - **A header seems to be missing.** `fieldtrip_list_endpoints` shows each endpoint's header names, though never
