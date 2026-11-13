@@ -133,3 +133,8 @@ cargo test --workspace --all-features
   `mutations: denied`. An endpoint that sets `"prompt"` under a template that denies, or any other value, stops the
   server at startup.
   Done when: `cargo test mutations_denied`
+- [x] **30. Large schemas.** Introspection reads up to `max_schema_bytes`, 32 MiB by default, set on an endpoint or
+  a template, apart from what `execute` reads. A schema over 1 MiB loads and `introspect` gives the same counts as
+  the SDL file. One over the limit is an error that names the limit, `max_schema_bytes` and `schema`, never
+  introspection being turned off, and the fallback query is not sent. `fieldtrip check` shows the limit.
+  Done when: `cargo test large_schema`

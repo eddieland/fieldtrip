@@ -37,6 +37,7 @@ costs             = "acme.costs.toml"        # optional cost map, relative to th
 assumed_list_size = 20                       # optional, default 10
 timeout           = 30                       # optional, seconds, default 30
 response_headers  = ["x-request-id", "traceparent"]   # optional, shown by `execute`
+max_schema_bytes  = 33554432                 # optional, default 32 MiB, read of an introspection response
 
 [templates.acme.headers]
 X-Client      = "fieldtrip"
@@ -55,10 +56,10 @@ mutations         = "deny"                   # optional, default "prompt". A tem
 X-Api-Key = { env = "ACME_API_KEY" }
 ```
 
-An endpoint takes `schema`, `headers`, `costs`, `assumed_list_size`, `timeout` and `response_headers` from its
-template unless it sets them. Headers merge by name, ignoring case, and the endpoint's win. `url`, `description`, `approval` and
-`auto_approve_cost` are only ever set on the endpoint. `mutations` comes from the template too, but an endpoint can
-only make it stricter. A path may start with `~/`.
+An endpoint takes `schema`, `headers`, `costs`, `assumed_list_size`, `timeout`, `response_headers` and
+`max_schema_bytes` from its template unless it sets them. Headers merge by name, ignoring case, and the endpoint's
+win. `url`, `description`, `approval` and `auto_approve_cost` are only ever set on the endpoint. `mutations` comes from
+the template too, but an endpoint can only make it stricter. A path may start with `~/`.
 
 The config path comes from `--config`, defaulting to `$XDG_CONFIG_HOME/fieldtrip/config.toml` or
 `~/.config/fieldtrip/config.toml`. `--url`, with an optional `--schema`, defines a single endpoint with no headers and
@@ -191,3 +192,5 @@ Settled. To change one, ask the user, then add a new dated line instead of editi
 - 2026-11-13: `mutations` can come from a template, and an endpoint can only make it stricter.
 - 2026-11-13: An endpoint that sets `mutations = "prompt"` under a template that denies them stops the server.
 - 2026-11-13: With mutations denied, `estimate_cost` still costs them and `introspect` lists them as unavailable.
+- 2026-11-13: Introspection reads up to `max_schema_bytes`, 32 MiB unless set. This lifts the 1 MiB read for schemas.
+- 2026-11-13: A schema over that limit is an error naming it and `schema`. It never blames introspection being off.

@@ -30,7 +30,12 @@ impl FixtureApi {
             .join("fixtures")
             .join("schema.graphql");
         let text = std::fs::read_to_string(&path).expect("read the fixture schema");
-        let schema = Schema::parse_and_validate(text, &path).expect("the fixture schema is valid");
+        Self::serving(&text)
+    }
+
+    /// An API like [`FixtureApi::new`] that serves `sdl` instead of the fixture schema.
+    pub(crate) fn serving(sdl: &str) -> Self {
+        let schema = Schema::parse_and_validate(sdl, "served.graphql").expect("the served schema is valid");
         let implementers = schema.implementers_map();
         Self {
             schema,

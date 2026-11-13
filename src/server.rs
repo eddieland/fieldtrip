@@ -117,6 +117,9 @@ struct ExecuteArguments {
     variables: Variables,
 }
 
+/// The most of a response to `execute` that is read.
+const MAX_RESPONSE_BYTES: usize = crate::config::MIB;
+
 /// The most characters a tool result carries. Schemas and responses can be far larger than a caller can use.
 const MAX_OUTPUT: usize = 40_000;
 
@@ -373,7 +376,10 @@ impl Fieldtrip {
             String::new()
         };
 
-        let reply = self.http.post(endpoint, &plan.payload(&arguments.variables)).await?;
+        let reply = self
+            .http
+            .post(endpoint, &plan.payload(&arguments.variables), MAX_RESPONSE_BYTES)
+            .await?;
         let summary = format!(
             "Sent {} to `{name}`. Estimated cost: {}.{unasked}\n{}",
             plan.title(),

@@ -96,6 +96,7 @@ list, with no shell.
 | `assumed_list_size` | `10` | Items assumed for a list that nothing bounds |
 | `timeout` | `30` | Seconds a request may take |
 | `response_headers` | none | Response headers `execute` shows, such as `["x-request-id", "traceparent"]` |
+| `max_schema_bytes` | 32 MiB | Bytes of an introspection response that are read. Raise it for a larger schema |
 | `costs` | none | A cost map, below |
 
 ### Several instances of one service
@@ -122,12 +123,12 @@ schema      = "schemas/acme-prod.graphql"
 mutations   = "deny"
 ```
 
-An endpoint takes `schema`, `headers`, `costs`, `assumed_list_size`, `timeout` and `response_headers` from its
-template unless it sets them itself. Headers merge by name, and the endpoint's win. `approval`, `auto_approve_cost`, `url` and `description`
-are never taken from a template, so an endpoint that forgets them asks before every operation. `mutations` is the
-other way round: a template can set `mutations = "deny"`, and an endpoint that names it can't set it back to
-`"prompt"`, so forgetting the setting on one endpoint never opens writes. A shared cost map is
-checked against each endpoint's own schema, so a rule for a field that only dev has shows up in prod's
+An endpoint takes `schema`, `headers`, `costs`, `assumed_list_size`, `timeout`, `response_headers` and
+`max_schema_bytes` from its template unless it sets them itself. Headers merge by name, and the endpoint's win.
+`approval`, `auto_approve_cost`, `url` and `description` are never taken from a template, so an endpoint that forgets
+them asks before every operation. `mutations` is the other way round: a template can set `mutations = "deny"`, and an
+endpoint that names it can't set it back to `"prompt"`, so forgetting the setting on one endpoint never opens writes.
+A shared cost map is checked against each endpoint's own schema, so a rule for a field that only dev has shows up in prod's
 `introspect`.
 
 ### Checking a config

@@ -102,6 +102,9 @@ pub(crate) struct Endpoint {
     /// The response headers `execute` shows, as written in the config. Only the user chooses them, because some
     /// carry values the calling agent should not see.
     pub(crate) response_headers: Vec<String>,
+    /// The most of an introspection response that is read. A schema is read once and all of it is needed, so this
+    /// is far larger than what `execute` reads.
+    pub(crate) max_schema_bytes: usize,
     /// Who approves an operation before it is sent.
     pub(crate) approval: Approval,
     /// Queries with an estimated cost at or below this are sent without asking. Mutations always ask.
@@ -134,6 +137,13 @@ const FLAG_ENDPOINT: &str = "default";
 
 /// The `timeout` of an endpoint that does not set one.
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// The `max_schema_bytes` of an endpoint that does not set one: room for the largest public schemas, such as
+/// GitHub's, whose introspection response is about 4 MiB.
+const DEFAULT_MAX_SCHEMA_BYTES: usize = 32 * MIB;
+
+/// A mebibyte.
+pub(crate) const MIB: usize = 1024 * 1024;
 
 /// The `assumed_list_size` of an endpoint that does not set one.
 const DEFAULT_ASSUMED_LIST_SIZE: u64 = 10;
@@ -178,6 +188,7 @@ struct RawEndpoint {
     costs: Option<PathBuf>,
     timeout: Option<u64>,
     response_headers: Option<Vec<String>>,
+    max_schema_bytes: Option<u64>,
 }
 
 /// One `[templates.NAME]` table as written.
@@ -200,6 +211,7 @@ struct RawTemplate {
     costs: Option<PathBuf>,
     timeout: Option<u64>,
     response_headers: Option<Vec<String>>,
+    max_schema_bytes: Option<u64>,
 }
 
 /// The settings an endpoint can take from a template. serde cannot flatten them into a table that denies
@@ -212,6 +224,7 @@ struct RawShared {
     costs: Option<PathBuf>,
     timeout: Option<u64>,
     response_headers: Option<Vec<String>>,
+    max_schema_bytes: Option<u64>,
 }
 
 /// Moves the shared settings out of a raw endpoint or template.
@@ -224,6 +237,7 @@ macro_rules! shared {
             costs: $raw.costs,
             timeout: $raw.timeout,
             response_headers: $raw.response_headers,
+            max_schema_bytes: $raw.max_schema_bytes,
         }
     };
 }
@@ -238,6 +252,7 @@ struct Template {
     timeout: Option<Duration>,
     response_headers: Option<Vec<String>>,
     mutations: Option<Mutations>,
+    max_schema_bytes: Option<usize>,
 }
 
 impl Config {
@@ -370,6 +385,7 @@ impl Template {
             timeout: timeout(shared.timeout)?,
             response_headers: response_headers(shared.response_headers)?,
             mutations,
+            max_schema_bytes: byte_limit("max_schema_bytes", shared.max_schema_bytes)?,
         })
     }
 }
@@ -450,6 +466,9 @@ impl Endpoint {
             response_headers: response_headers(shared.response_headers)?
                 .or_else(|| template.response_headers.clone())
                 .unwrap_or_default(),
+            max_schema_bytes: byte_limit("max_schema_bytes", shared.max_schema_bytes)?
+                .or(template.max_schema_bytes)
+                .unwrap_or(DEFAULT_MAX_SCHEMA_BYTES),
             approval,
             auto_approve_cost: raw.auto_approve_cost,
             mutations,
@@ -596,6 +615,27 @@ fn timeout(seconds: Option<u64>) -> Result<Option<Duration>, String> {
         return Err("`timeout` is in seconds and must be at least 1".to_owned());
     }
     Ok(seconds.map(Duration::from_secs))
+}
+
+/// Checks a limit in bytes, such as `max_schema_bytes`, called `key` in the config.
+fn byte_limit(key: &str, bytes: Option<u64>) -> Result<Option<usize>, String> {
+    let Some(bytes) = bytes else { return Ok(None) };
+    if bytes == 0 {
+        return Err(format!("`{key}` is in bytes and must be at least 1"));
+    }
+    Ok(Some(usize::try_from(bytes).unwrap_or(usize::MAX)))
+}
+
+/// `bytes` for a person to read: `32 MiB`, `512 KiB`, or `1000 bytes`.
+pub(crate) fn show_bytes(bytes: usize) -> String {
+    const KIB: usize = 1024;
+    if bytes >= MIB && bytes.is_multiple_of(MIB) {
+        format!("{} MiB", bytes / MIB)
+    } else if bytes >= KIB && bytes.is_multiple_of(KIB) {
+        format!("{} KiB", bytes / KIB)
+    } else {
+        format!("{bytes} bytes")
+    }
 }
 
 /// Resolves a configured path: `~/` is the home directory, and a relative path is relative to `base`.
