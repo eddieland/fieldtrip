@@ -49,6 +49,8 @@ mod limits;
 #[cfg(test)]
 mod list_endpoints;
 #[cfg(test)]
+mod mutations_denied;
+#[cfg(test)]
 mod protocol_2026;
 #[cfg(test)]
 mod redaction;

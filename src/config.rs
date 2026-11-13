@@ -3,7 +3,8 @@
 //! An endpoint can name a template, which holds the settings that several endpoints share, such as the dev,
 //! staging and production instances of one service. There is one level: a template cannot name another. The URL,
 //! the description and the approval settings are never taken from a template, so an endpoint that leaves them out
-//! falls back to the defaults, which ask before every operation.
+//! falls back to the defaults, which ask before every operation. `mutations` is the exception: a template can deny
+//! them, and an endpoint can only make that stricter, so forgetting the setting on one endpoint never opens writes.
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
@@ -105,6 +106,18 @@ pub(crate) struct Endpoint {
     pub(crate) approval: Approval,
     /// Queries with an estimated cost at or below this are sent without asking. Mutations always ask.
     pub(crate) auto_approve_cost: Option<u64>,
+    /// Whether `execute` may send mutations at all.
+    pub(crate) mutations: Mutations,
+}
+
+/// Whether `execute` may send mutations to an endpoint.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Mutations {
+    /// Mutations go through the endpoint's approval policy, as queries do, and always ask unless approval is left
+    /// to the client. Written `"prompt"`, the default.
+    Prompt,
+    /// `execute` refuses every mutation before asking anyone. Written `"deny"`.
+    Deny,
 }
 
 /// Who approves an operation before it is sent.
@@ -157,6 +170,7 @@ struct RawEndpoint {
     template: Option<String>,
     approval: Option<String>,
     auto_approve_cost: Option<u64>,
+    mutations: Option<String>,
     schema: Option<PathBuf>,
     #[serde(default)]
     headers: BTreeMap<String, toml::Value>,
@@ -178,6 +192,7 @@ struct RawTemplate {
     template: Option<toml::Value>,
     approval: Option<toml::Value>,
     auto_approve_cost: Option<toml::Value>,
+    mutations: Option<String>,
     schema: Option<PathBuf>,
     #[serde(default)]
     headers: BTreeMap<String, toml::Value>,
@@ -222,6 +237,7 @@ struct Template {
     costs: Option<Arc<CostMap>>,
     timeout: Option<Duration>,
     response_headers: Option<Vec<String>>,
+    mutations: Option<Mutations>,
 }
 
 impl Config {
@@ -341,6 +357,7 @@ impl Template {
         if let Some((key, _, why)) = never_shared.into_iter().find(|(_, present, _)| *present) {
             return Err(format!("`{key}` cannot be set in a template: {why}"));
         }
+        let mutations = mutations(raw.mutations.as_deref())?;
         let shared = shared!(raw);
         Ok(Self {
             schema: schema_path(shared.schema.as_deref(), base)?,
@@ -352,6 +369,7 @@ impl Template {
                 .transpose()?,
             timeout: timeout(shared.timeout)?,
             response_headers: response_headers(shared.response_headers)?,
+            mutations,
         })
     }
 }
@@ -387,6 +405,19 @@ impl Endpoint {
                     .to_owned(),
             );
         }
+        // A template's deny holds: an endpoint can only make `mutations` stricter.
+        let mutations = match (template.mutations, mutations(raw.mutations.as_deref())?) {
+            (Some(Mutations::Deny), Some(Mutations::Prompt)) => {
+                return Err(format!(
+                    "`mutations = \"prompt\"` cannot loosen template `{}`, which sets `mutations = \"deny\"`. An \
+                     endpoint can only make it stricter. Remove the line to keep mutations denied, or define the \
+                     endpoint that may write without this template.",
+                    raw.template.as_deref().unwrap_or_default()
+                ));
+            }
+            (_, Some(own)) => own,
+            (inherited, None) => inherited.unwrap_or(Mutations::Prompt),
+        };
         let shared = shared!(raw);
 
         // The endpoint's own headers win over the template's, compared ignoring case as HTTP does.
@@ -421,6 +452,7 @@ impl Endpoint {
                 .unwrap_or_default(),
             approval,
             auto_approve_cost: raw.auto_approve_cost,
+            mutations,
             url: raw.url,
         })
     }
@@ -546,6 +578,16 @@ fn response_headers(names: Option<Vec<String>>) -> Result<Option<Vec<String>>, S
         seen.push(parsed);
     }
     Ok(Some(names))
+}
+
+/// Reads `mutations`.
+fn mutations(value: Option<&str>) -> Result<Option<Mutations>, String> {
+    match value {
+        None => Ok(None),
+        Some("prompt") => Ok(Some(Mutations::Prompt)),
+        Some("deny") => Ok(Some(Mutations::Deny)),
+        Some(other) => Err(format!("`mutations` must be \"deny\" or \"prompt\", got \"{other}\"")),
+    }
 }
 
 /// Checks `timeout`.

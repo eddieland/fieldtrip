@@ -14,9 +14,10 @@ use serde_json::value::RawValue;
 use tokio::sync::Mutex;
 
 use crate::approval::{self, Operation, Outstanding, Round};
-use crate::config::{Config, Endpoint};
+use crate::config::{Config, Endpoint, Mutations};
+
 use crate::http::Client;
-use crate::plan::{Plan, Variables};
+use crate::plan::{Kind, Plan, Variables};
 use crate::schema::{Loaded, introspection};
 use crate::suggest::backticked;
 
@@ -192,8 +193,8 @@ impl Fieldtrip {
         description = "List the GraphQL endpoints the user has configured. Call this first: every other tool takes \
                        one of these endpoint names, and fieldtrip talks to no other host. For each endpoint it \
                        returns the user's description of it when there is one, the URL, where the schema comes \
-                       from (a file or introspection), who approves `execute` requests, the cost map if there is \
-                       one, and the names of the headers sent with each request, so you can tell whether \
+                       from (a file or introspection), who approves `execute` requests, `mutations: denied` when \
+                       `execute` refuses every mutation there, the cost map if there is one, and the names of the headers sent with each request, so you can tell whether \
                        authentication is set up. Header values are never shown. When several endpoints are \
                        instances of one service, such as dev and prod, prefer the one the description or the user \
                        points to, and ask when it is unclear. Endpoints and headers come only from the user's \
@@ -221,6 +222,9 @@ impl Fieldtrip {
                 }
             }
             let _ = writeln!(out, "  approval: {}", approval::policy(endpoint));
+            if endpoint.mutations == Mutations::Deny {
+                let _ = writeln!(out, "  mutations: denied");
+            }
             if let Some(source) = &endpoint.costs.source {
                 let rules = endpoint.costs.len();
                 let plural = if rules == 1 { "" } else { "s" };
@@ -296,7 +300,14 @@ impl Fieldtrip {
         let endpoint = self.endpoint(name)?;
         let schema = self.schema(name, false).await?;
         let plan = Plan::new(&schema, name, endpoint, &arguments.operation, &arguments.variables)?;
-        Ok(format!("Valid {} for `{name}`.\n{}", plan.title(), plan.estimate()))
+        let mut out = format!("Valid {} for `{name}`.\n{}", plan.title(), plan.estimate());
+        if plan.kind == Kind::Mutation && endpoint.mutations == Mutations::Deny {
+            out.push_str(
+                "`execute` will refuse it: mutations are turned off for this endpoint by `mutations = \"deny\"` in \
+                 the user's config. The user can run it themselves.\n",
+            );
+        }
+        Ok(out)
     }
 
     #[tool(
@@ -331,6 +342,8 @@ impl Fieldtrip {
     ) -> Result<CallToolResponse, String> {
         let name = &arguments.endpoint;
         let endpoint = self.endpoint(name)?;
+        // Before the schema is loaded, so a denied mutation causes no request of any kind.
+        approval::refuse_denied_mutation(name, endpoint, &arguments.operation)?;
         let schema = self.schema(name, false).await?;
         let plan = Plan::new(&schema, name, endpoint, &arguments.operation, &arguments.variables)?;
         plan.check_variables(&schema, &arguments.variables)?;
@@ -425,7 +438,7 @@ impl Fieldtrip {
         );
         Ok(format!(
             "Schema for `{name}`, {source}.\n{}{}",
-            schema.overview(),
+            schema.overview(endpoint.mutations),
             schema.cost_map_report(&endpoint.costs)
         ))
     }
