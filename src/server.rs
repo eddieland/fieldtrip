@@ -14,8 +14,7 @@ use serde_json::value::RawValue;
 use tokio::sync::Mutex;
 
 use crate::approval::{self, Operation, Outstanding, Round};
-use crate::config::{Config, Endpoint, Mutations};
-
+use crate::config::{Config, Endpoint, Mutations, show_bytes};
 use crate::http::Client;
 use crate::plan::{Kind, Plan, Variables};
 use crate::schema::{Loaded, introspection};
@@ -117,39 +116,33 @@ struct ExecuteArguments {
     variables: Variables,
 }
 
-/// The most of a response to `execute` that is read.
-const MAX_RESPONSE_BYTES: usize = crate::config::MIB;
-
-/// The most characters a tool result carries. Schemas and responses can be far larger than a caller can use.
-const MAX_OUTPUT: usize = 40_000;
-
-/// Cuts `text` to [`MAX_OUTPUT`] characters and says so, with `advice` on how to get a smaller result.
-fn capped(text: String, advice: &str) -> String {
+/// Cuts `text` to `limit` characters and says so, with `advice` on how to get a smaller result.
+fn capped(text: String, limit: usize, advice: &str) -> String {
     let length = text.chars().count();
-    if length <= MAX_OUTPUT {
+    if length <= limit {
         return text;
     }
-    let mut kept: String = text.chars().take(MAX_OUTPUT).collect();
+    let mut kept: String = text.chars().take(limit).collect();
     let _ = write!(
         kept,
-        "\n[fieldtrip cut this off at {MAX_OUTPUT} characters. The full result had at least {length}. {advice}]"
+        "\n[fieldtrip cut this off at {limit} characters. The full result had at least {length}. {advice}]"
     );
     kept
 }
 
 /// Like [`capped`], but `head` is always kept whole, and only `rest`, which follows it, is cut.
-fn capped_after(head: String, rest: &str, advice: &str) -> String {
+fn capped_after(head: String, rest: &str, limit: usize, advice: &str) -> String {
     let head_length = head.chars().count();
     let length = head_length + rest.chars().count();
-    if length <= MAX_OUTPUT {
+    if length <= limit {
         return head + rest;
     }
     let mut kept = head;
-    kept.extend(rest.chars().take(MAX_OUTPUT.saturating_sub(head_length)));
+    kept.extend(rest.chars().take(limit.saturating_sub(head_length)));
     let _ = write!(
         kept,
-        "\n[fieldtrip cut this off at {MAX_OUTPUT} characters. The full result had at least {length}. Errors are \
-         never cut. {advice}]"
+        "\n[fieldtrip cut this off at {limit} characters. The full result had at least {length}. Errors are never \
+         cut. {advice}]"
     );
     kept
 }
@@ -261,10 +254,12 @@ impl Fieldtrip {
         annotations(read_only_hint = true, open_world_hint = true)
     )]
     async fn describe(&self, Parameters(arguments): Parameters<DescribeArguments>) -> ToolResult {
+        let endpoint = self.endpoint(&arguments.endpoint)?;
         let schema = self.schema(&arguments.endpoint, false).await?;
         let definition = schema.describe(&arguments.name)?;
         Ok(capped(
             definition,
+            endpoint.max_output_chars,
             "Describe one field at a time, as `Type.field`, or use `search_schema`.",
         ))
     }
@@ -378,7 +373,11 @@ impl Fieldtrip {
 
         let reply = self
             .http
-            .post(endpoint, &plan.payload(&arguments.variables), MAX_RESPONSE_BYTES)
+            .post(
+                endpoint,
+                &plan.payload(&arguments.variables),
+                endpoint.max_response_bytes,
+            )
             .await?;
         let summary = format!(
             "Sent {} to `{name}`. Estimated cost: {}.{unasked}\n{}",
@@ -388,7 +387,16 @@ impl Fieldtrip {
         );
         if reply.cut_short {
             // Too long to read in full, so it cannot be parsed. The status says whether it is a result.
-            let text = capped(format!("{summary}\n{}", reply.body.trim()), ASK_FOR_LESS);
+            let excerpt: String = reply.body.chars().take(EXCERPT).collect();
+            let text = format!(
+                "{summary}\n[The response is larger than {}, the `max_response_bytes` limit for this endpoint, so \
+                 fieldtrip read only that much. A cut-off body is not valid JSON, so `data` and `errors` are both \
+                 lost. The operation did reach the server, so a mutation has run. Ask for less: fewer fields, or a \
+                 smaller page with `first` or `limit`, and page through the rest. The user can raise \
+                 `max_response_bytes`.]\n\
+                 It began: {excerpt}",
+                show_bytes(endpoint.max_response_bytes)
+            );
             return if reply.status < 400 {
                 Ok(finished(text))
             } else {
@@ -405,6 +413,7 @@ impl Fieldtrip {
                     "{summary}\nThe response has neither `data` nor `errors`, so it is not a GraphQL response:\n{}",
                     reply.body.trim()
                 ),
+                endpoint.max_output_chars,
                 ASK_FOR_LESS,
             ));
         }
@@ -421,7 +430,12 @@ impl Fieldtrip {
         for (key, value) in &parts {
             let _ = write!(rest, "\n{key}: {}", value.get().trim());
         }
-        Ok(finished(capped_after(head, &rest, ASK_FOR_LESS)))
+        Ok(finished(capped_after(
+            head,
+            &rest,
+            endpoint.max_output_chars,
+            ASK_FOR_LESS,
+        )))
     }
 
     #[tool(

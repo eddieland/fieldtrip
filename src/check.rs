@@ -105,6 +105,8 @@ async fn endpoint_report(out: &mut Out, name: &str, endpoint: &Endpoint) {
     if !endpoint.response_headers.is_empty() {
         out.line("response headers shown", endpoint.response_headers.join(", "));
     }
+    out.line("max response bytes", show_bytes(endpoint.max_response_bytes));
+    out.line("max output chars", endpoint.max_output_chars);
 
     let schema = match &endpoint.schema {
         None => {

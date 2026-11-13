@@ -138,3 +138,8 @@ cargo test --workspace --all-features
   the SDL file. One over the limit is an error that names the limit, `max_schema_bytes` and `schema`, never
   introspection being turned off, and the fallback query is not sent. `fieldtrip check` shows the limit.
   Done when: `cargo test large_schema`
+- [x] **31. Response limits.** `execute` reads up to `max_response_bytes`, 8 MiB by default, and a tool result about
+  an endpoint carries up to `max_output_chars`, 40,000 by default. Both are set on an endpoint or a template, and
+  `fieldtrip check` shows them. A body over the read limit is reported with the limit's name and what was lost. A
+  limit of zero, or under 1,000 characters, stops the server at startup.
+  Done when: `cargo test response_limits`

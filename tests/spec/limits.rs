@@ -108,7 +108,7 @@ fn a_large_response_is_cut_off_with_a_note() {
 fn a_response_too_large_to_read_is_cut_off_without_failing() {
     let body = large_response(3000);
     let mock = MockServer::start(move |_| Response::new(200, body.clone()));
-    let mut mcp = start(&mock, "");
+    let mut mcp = start(&mock, "max_response_bytes = 1048576\n");
 
     let reply = execute(&mut mcp);
 
@@ -117,14 +117,13 @@ fn a_response_too_large_to_read_is_cut_off_without_failing() {
         "a 200 that is too long to read in full is still a result"
     );
     assert!(
-        reply.text.contains("[fieldtrip cut this off at 40000 characters."),
-        "the note is there"
+        reply
+            .text
+            .contains("[The response is larger than 1 MiB, the `max_response_bytes` limit"),
+        "the note names the limit: {}",
+        reply.text
     );
-    assert!(
-        reply.text.chars().count() < 40_400,
-        "the result is about the size of the cap: {}",
-        reply.text.len()
-    );
+    assert!(reply.text.chars().count() < 2_000, "only a short excerpt is quoted");
 
     let after = mcp.call("list_endpoints", &json!({}));
     assert!(!after.is_error, "the server keeps working afterwards: {}", after.text);

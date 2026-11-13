@@ -97,6 +97,8 @@ list, with no shell.
 | `timeout` | `30` | Seconds a request may take |
 | `response_headers` | none | Response headers `execute` shows, such as `["x-request-id", "traceparent"]` |
 | `max_schema_bytes` | 32 MiB | Bytes of an introspection response that are read. Raise it for a larger schema |
+| `max_response_bytes` | 8 MiB | Bytes of a response to `execute` that are read. A body cut off here cannot be parsed |
+| `max_output_chars` | `40000` | Characters in one tool result, which is what reaches the agent's context |
 | `costs` | none | A cost map, below |
 
 ### Several instances of one service
@@ -124,7 +126,7 @@ mutations   = "deny"
 ```
 
 An endpoint takes `schema`, `headers`, `costs`, `assumed_list_size`, `timeout`, `response_headers` and
-`max_schema_bytes` from its template unless it sets them itself. Headers merge by name, and the endpoint's win.
+the three `max_` limits from its template unless it sets them itself. Headers merge by name, and the endpoint's win.
 `approval`, `auto_approve_cost`, `url` and `description` are never taken from a template, so an endpoint that forgets
 them asks before every operation. `mutations` is the other way round: a template can set `mutations = "deny"`, and an
 endpoint that names it can't set it back to `"prompt"`, so forgetting the setting on one endpoint never opens writes.

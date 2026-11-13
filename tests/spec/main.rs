@@ -57,6 +57,8 @@ mod protocol_2026;
 #[cfg(test)]
 mod redaction;
 #[cfg(test)]
+mod response_limits;
+#[cfg(test)]
 mod response_metadata;
 #[cfg(test)]
 mod search_schema;
