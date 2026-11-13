@@ -17,6 +17,7 @@ use crate::approval::{self, Operation, Outstanding, Round};
 use crate::config::{Config, Endpoint, Mutations, show_bytes};
 use crate::http::Client;
 use crate::plan::{Kind, Plan, Variables};
+use crate::response;
 use crate::schema::{Loaded, introspection};
 use crate::suggest::backticked;
 
@@ -145,6 +146,34 @@ fn capped_after(head: String, rest: &str, limit: usize, advice: &str) -> String 
          cut. {advice}]"
     );
     kept
+}
+
+/// Room kept in a result for the note that follows a summary.
+const NOTE_ROOM: usize = 500;
+
+/// The result of `execute`: `head`, which ends with the errors, then each of the `rest` of the response's parts as
+/// the server wrote it when they fit in `limit` characters, or a summary of them that is still valid JSON when not.
+fn shown(head: String, rest: &[(String, Box<RawValue>)], limit: usize) -> String {
+    let mut written = String::new();
+    for (name, value) in rest {
+        let _ = write!(written, "\n{name}: {}", value.get().trim());
+    }
+    let length = head.chars().count() + written.chars().count();
+    if length <= limit {
+        return head + &written;
+    }
+    let parts: serde_json::Map<String, serde_json::Value> = rest
+        .iter()
+        .filter_map(|(name, value)| Some((name.clone(), serde_json::from_str(value.get()).ok()?)))
+        .collect();
+    let space = limit.saturating_sub(head.chars().count() + NOTE_ROOM);
+    match response::summarize(&parts, space) {
+        Some(summary) => {
+            let note = response::note(&summary, length, limit);
+            format!("{head}{}\n{note}", summary.lines)
+        }
+        None => capped_after(head, &written, limit, ASK_FOR_LESS),
+    }
 }
 
 /// How `execute` says to get a smaller result.
@@ -318,12 +347,14 @@ impl Fieldtrip {
                        only the fields you need. The result starts with what was sent and its estimated cost, then \
                        a line with the HTTP status, how long the request took, and any response headers the user \
                        chose to show, such as a request or trace ID to look up in their logs. Then come `errors`, \
-                       in full, then `data`, then any `extensions`, each as the server wrote it. A response can hold \
-                       both `data` and `errors`: read both, because one field can fail while the rest succeed. Each \
-                       error's `path` names the field that failed, and its `extensions` often carry a code. For a \
-                       mutation, select the result fields that confirm what changed, and any error fields its \
-                       payload type has. If the user declines, nothing was sent: do not send it again, ask what \
-                       they want instead.",
+                       in full, then `data`, then any `extensions`, each as the server wrote it. When those after \
+                       `errors` are too long for one result, they come back as a summary that is still valid JSON, \
+                       with long lists cut to their first items, each cut marked with what it dropped. A response \
+                       can hold both `data` and `errors`: read both, because one field can fail while the rest \
+                       succeed. Each error's `path` names the field that failed, and its `extensions` often carry a \
+                       code. For a mutation, select the result fields that confirm what changed, and any error \
+                       fields its payload type has. If the user declines, nothing was sent: do not send it again, \
+                       ask what they want instead.",
         annotations(
             read_only_hint = false,
             destructive_hint = true,
@@ -423,19 +454,9 @@ impl Fieldtrip {
         if let Some(errors) = parts.remove("errors") {
             let _ = write!(head, "\nerrors: {}", errors.get().trim());
         }
-        let mut rest = String::new();
-        if let Some(data) = parts.remove("data") {
-            let _ = write!(rest, "\ndata: {}", data.get().trim());
-        }
-        for (key, value) in &parts {
-            let _ = write!(rest, "\n{key}: {}", value.get().trim());
-        }
-        Ok(finished(capped_after(
-            head,
-            &rest,
-            endpoint.max_output_chars,
-            ASK_FOR_LESS,
-        )))
+        let data = parts.remove("data").map(|data| ("data".to_owned(), data));
+        let rest: Vec<(String, Box<RawValue>)> = data.into_iter().chain(parts).collect();
+        Ok(finished(shown(head, &rest, endpoint.max_output_chars)))
     }
 
     #[tool(

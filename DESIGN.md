@@ -27,7 +27,7 @@ in the user's config, out of the agent's sight and out of its control.
 | `search_schema` | `endpoint`, `query` | Ranked matches as one-line signatures |
 | `describe` | `endpoint`, `name` (`Type` or `Type.field`) | That definition as compact SDL |
 | `estimate_cost` | `endpoint`, `operation`, `variables?` | Validation errors, or cost, depth, breakdown, assumptions |
-| `execute` | `endpoint`, `operation`, `variables?` | Status, time, chosen headers, then `errors` whole, then `data` |
+| `execute` | `endpoint`, `operation`, `variables?` | Status, time, headers, `errors` whole, the rest or a summary |
 
 ## Config shape
 
@@ -198,3 +198,6 @@ Settled. To change one, ask the user, then add a new dated line instead of editi
 - 2026-11-13: A schema over that limit is an error naming it and `schema`. It never blames introspection being off.
 - 2026-11-13: `execute` reads up to `max_response_bytes` (8 MiB) and a result holds up to `max_output_chars` (40,000).
 - 2026-11-13: Both are set per endpoint or template. Together with the line above, they replace the 1 MiB and 40,000.
+- 2026-11-13: Parts after `errors` too long for a result are summarized as valid JSON, not cut as text. This refines
+  the line above that cut what follows `errors`. Parts that fit are as written.
+- 2026-11-13: A summary cuts lists and strings, each marked with what was dropped. `errors` is still never cut.

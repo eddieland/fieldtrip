@@ -11,6 +11,7 @@ mod costs;
 mod headers;
 mod http;
 mod plan;
+mod response;
 mod schema;
 mod server;
 mod suggest;

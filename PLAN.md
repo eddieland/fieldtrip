@@ -143,3 +143,8 @@ cargo test --workspace --all-features
   `fieldtrip check` shows them. A body over the read limit is reported with the limit's name and what was lost. A
   limit of zero, or under 1,000 characters, stops the server at startup.
   Done when: `cargo test response_limits`
+- [x] **32. Response summaries.** When the parts of a response after `errors` are too long for `max_output_chars`,
+  they come back as a summary in which each part is still valid JSON. `errors` stays whole. Long lists keep their
+  first items and long strings their first characters, each cut marked with what it dropped, such as
+  `"…(+412 more items)"`. A note after it says what was cut.
+  Done when: `cargo test response_summary`

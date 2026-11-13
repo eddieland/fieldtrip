@@ -138,7 +138,7 @@ fn a_template_sets_both_limits_and_check_shows_them() {
         own.text
     );
     assert!(
-        own.text.contains("at 3000 characters"),
+        own.text.contains("the 3000 it holds"),
         "the endpoint's output limit wins"
     );
     assert!(checked.passed, "{}", checked.stdout);

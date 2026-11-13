@@ -126,7 +126,7 @@ clap = { version = "4.6.7", features = ["derive"] }
 reqwest = { version = "0.13.5", default-features = false, features = ["rustls", "http2", "system-proxy"] }
 rmcp = { version = "3.10.0", features = ["elicitation", "transport-io"] }
 serde = { version = "1.0.229", features = ["derive"] }
-serde_json = { version = "1.0.154", features = ["raw_value"] }
+serde_json = { version = "1.0.154", features = ["preserve_order", "raw_value"] }
 thiserror = "2.0.21"
 tokio = { version = "1.54.1", features = ["macros", "process", "rt-multi-thread", "sync", "time"] }
 toml = "1.2.1"

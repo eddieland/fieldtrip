@@ -70,7 +70,7 @@ fn a_redirect_is_refused_and_its_target_receives_nothing() {
 }
 
 #[test]
-fn a_large_response_is_cut_off_with_a_note() {
+fn a_large_response_is_summarized_with_a_note() {
     let body = large_response(60);
     let mock = MockServer::start(move |_| Response::new(200, body.clone()));
     let mut mcp = start(&mock, "");
@@ -93,13 +93,13 @@ fn a_large_response_is_cut_off_with_a_note() {
     );
     let note = reply.text.lines().last().unwrap_or_default();
     assert!(
-        note.starts_with("[fieldtrip cut this off at 40000 characters."),
+        note.starts_with("[The result would have ") && note.contains("this is a summary"),
         "the last line is the note: {note}"
     );
     assert!(note.contains("Ask for less"), "the note says what to do: {note}");
     assert!(
-        reply.text.chars().count() < 40_400,
-        "the result is about the size of the cap: {}",
+        reply.text.chars().count() <= 40_000,
+        "the result fits the cap: {}",
         reply.text.len()
     );
 }

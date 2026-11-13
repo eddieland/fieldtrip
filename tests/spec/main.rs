@@ -61,6 +61,8 @@ mod response_limits;
 #[cfg(test)]
 mod response_metadata;
 #[cfg(test)]
+mod response_summary;
+#[cfg(test)]
 mod search_schema;
 #[cfg(test)]
 mod templates;
