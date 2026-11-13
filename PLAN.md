@@ -160,3 +160,8 @@ cargo test --workspace --all-features
   overwritten, and on Unix only the user can read it. Nothing is saved when nothing was sent or the body was cut
   off at `max_response_bytes`.
   Done when: `cargo test execute_save`
+- [x] **35. Pagination hints.** When a connection in `data` has `pageInfo.hasNextPage: true`, the result says so
+  right after the status line, with the connection's path and `endCursor`, and says to page with `after` rather than
+  raise `first`. A connection inside a list is counted across its items. At most five are named. The hints come with
+  a summary and with a selection too.
+  Done when: `cargo test pagination_hints`

@@ -194,3 +194,98 @@ pub(crate) fn note(summary: &Summary, length: usize, room: Room) -> String {
         cuts.join(" and ")
     )
 }
+
+/// The most connections a result points out as having more pages.
+const MAX_PAGE_HINTS: usize = 5;
+
+/// A connection in the response, wherever its path matched: how often it appeared, and how often with more pages.
+#[derive(Debug)]
+struct Connection {
+    /// The path, with `[*]` for any item of a list.
+    path: String,
+    /// How many times the path held a `pageInfo`.
+    seen: usize,
+    /// How many of those said `hasNextPage: true`.
+    more: usize,
+    /// The `endCursor` of the first that had more pages.
+    cursor: Option<String>,
+}
+
+/// Finds every object under `value` with a `pageInfo` in it, and notes whether it has more pages.
+fn connections(value: &Value, path: &str, found: &mut Vec<Connection>) {
+    match value {
+        Value::Object(map) => {
+            if let Some(Value::Object(info)) = map.get("pageInfo") {
+                let more = info.get("hasNextPage") == Some(&Value::Bool(true));
+                let index = found
+                    .iter()
+                    .position(|connection| connection.path == path)
+                    .unwrap_or_else(|| {
+                        found.push(Connection {
+                            path: path.to_owned(),
+                            seen: 0,
+                            more: 0,
+                            cursor: None,
+                        });
+                        found.len() - 1
+                    });
+                if let Some(connection) = found.get_mut(index) {
+                    connection.seen += 1;
+                    if more {
+                        connection.more += 1;
+                        if connection.cursor.is_none() {
+                            connection.cursor = info.get("endCursor").and_then(Value::as_str).map(str::to_owned);
+                        }
+                    }
+                }
+            }
+            for (key, inner) in map {
+                connections(inner, &format!("{path}.{key}"), found);
+            }
+        }
+        Value::Array(items) => {
+            let path = format!("{path}[*]");
+            for item in items {
+                connections(item, &path, found);
+            }
+        }
+        Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => {}
+    }
+}
+
+/// One line for each connection in a response's `data` that says it has more pages, so the calling agent pages
+/// through it instead of asking for a bigger page.
+pub(crate) fn page_hints(data: &Value) -> Vec<String> {
+    let mut found = Vec::new();
+    connections(data, "data", &mut found);
+    let with_more: Vec<&Connection> = found.iter().filter(|connection| connection.more > 0).collect();
+    let mut hints: Vec<String> = with_more
+        .iter()
+        .take(MAX_PAGE_HINTS)
+        .map(|connection| {
+            let path = &connection.path;
+            if connection.seen == 1 {
+                let cursor = connection.cursor.as_ref().map_or_else(String::new, |cursor| {
+                    format!(" Its `endCursor` is {}.", Value::from(cursor.as_str()))
+                });
+                format!(
+                    "More pages: `{path}` has `hasNextPage: true`.{cursor} To get the rest, pass the cursor as \
+                     `after` with the same page size, rather than raising `first`."
+                )
+            } else {
+                format!(
+                    "More pages: `{path}` has `hasNextPage: true` in {} of its {} appearances. Page through each \
+                     with `after` and its `endCursor`, rather than raising `first`.",
+                    connection.more, connection.seen
+                )
+            }
+        })
+        .collect();
+    if with_more.len() > MAX_PAGE_HINTS {
+        hints.push(format!(
+            "More pages: {} more connections have `hasNextPage: true`.",
+            with_more.len() - MAX_PAGE_HINTS
+        ));
+    }
+    hints
+}

@@ -374,7 +374,9 @@ impl Fieldtrip {
                        `errors` are too long for one result, they come back as a summary that is still valid JSON, \
                        with long lists cut to their first items, each cut marked with what it dropped. To keep a \
                        large response out of your context, pass `select` to pick the part you need, or `save` to \
-                       write all of it to a file and get its path and a preview. A response \
+                       write all of it to a file and get its path and a preview. A connection with \
+                       `hasNextPage: true` is pointed out with its cursor: page through it with `after` rather than \
+                       raising `first`. A response \
                        can hold both `data` and `errors`: read both, because one field can fail while the rest \
                        succeed. Each error's `path` names the field that failed, and its `extensions` often carry a \
                        code. For a mutation, select the result fields that confirm what changed, and any error \
@@ -500,6 +502,10 @@ impl Fieldtrip {
 
         // Errors come first and whole, because they say what went wrong. What follows them is cut to fit.
         let mut head = summary;
+        let data = parts.get("data").and_then(|data| serde_json::from_str(data.get()).ok());
+        for hint in data.as_ref().map_or_else(Vec::new, response::page_hints) {
+            let _ = write!(head, "\n{hint}");
+        }
         let errors = parts.remove("errors");
         let rest = if let Some(path) = &select {
             let picked = serde_json::from_str(&reply.body)

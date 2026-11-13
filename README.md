@@ -101,6 +101,25 @@ list, with no shell.
 | `max_output_chars` | `40000` | Characters in one tool result, which is what reaches the agent's context |
 | `costs` | none | A cost map, below |
 
+### Large schemas and responses
+
+A large API, such as GitHub's, has an introspection response of several megabytes. fieldtrip reads up to
+`max_schema_bytes` of it, 32 MiB unless you set it, and says so when a schema is larger. A response to `execute` is
+read up to `max_response_bytes`, 8 MiB.
+
+What reaches the agent is at most `max_output_chars` per tool result, 40,000 unless you set it. `errors` always comes
+first and whole. When `data` and what follows it don't fit, they come back as a summary that is still valid JSON:
+long lists cut to their first items and long strings to their first characters, each cut marked with what it
+dropped, such as `"…(+412 more items)"`. The agent can also ask for less after the fact, without changing what you approve:
+
+- `select` picks part of the response with a path such as `data.repository.pullRequests.nodes[*].number`.
+- `save` writes the whole response to a new file in `fieldtrip/responses` under your cache directory
+  (`$XDG_CACHE_HOME` or `~/.cache`), and returns its path, size and a short preview. Header values are removed from
+  the file as from any response, and only you can read it. fieldtrip does not delete these files.
+
+When a connection in the response has `pageInfo.hasNextPage: true`, the result points it out with its cursor, so the
+agent pages through it instead of asking for a bigger page.
+
 ### Several instances of one service
 
 Put what dev, staging and prod share in a template, and name it from each endpoint:
@@ -130,8 +149,8 @@ the three `max_` limits from its template unless it sets them itself. Headers me
 `approval`, `auto_approve_cost`, `url` and `description` are never taken from a template, so an endpoint that forgets
 them asks before every operation. `mutations` is the other way round: a template can set `mutations = "deny"`, and an
 endpoint that names it can't set it back to `"prompt"`, so forgetting the setting on one endpoint never opens writes.
-A shared cost map is checked against each endpoint's own schema, so a rule for a field that only dev has shows up in prod's
-`introspect`.
+A shared cost map is checked against each endpoint's own schema, so a rule for a field that only dev has shows up in
+prod's `introspect`.
 
 ### Checking a config
 

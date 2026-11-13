@@ -204,3 +204,4 @@ Settled. To change one, ask the user, then add a new dated line instead of editi
 - 2026-11-13: `select` is a path that picks part of a response after it arrives. It is not in the request or prompt.
 - 2026-11-13: `save` writes the whole response to a new file in fieldtrip's cache directory. The agent cannot name it.
 - 2026-11-13: A saved response has header values removed, as any response does. Only the user can read the file.
+- 2026-11-13: A connection whose `pageInfo` says `hasNextPage: true` is pointed out in the result, with its cursor.
