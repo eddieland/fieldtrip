@@ -1,0 +1,151 @@
+"""
+A small store API. This is the fixture schema for fieldtrip's tests.
+"""
+schema {
+  query: Query
+  mutation: Mutation
+  subscription: Subscription
+}
+
+type Query {
+  "The signed-in user, or null when signed out."
+  viewer: User
+  "Look up one user by ID."
+  user(id: ID!): User
+  "Users, newest first."
+  users(
+    "How many users to return."
+    first: Int = 20
+    after: String
+    role: Role
+  ): UserConnection!
+  "Look up one product."
+  product(id: ID!): Product
+  "Every product. This list takes no size argument."
+  products: [Product!]!
+  "Full-text search across products and users."
+  search(text: String!, limit: Int): [SearchResult!]!
+  catalog(pageSize: Int): ProductPage!
+  node(id: ID!): Node
+}
+
+type Mutation {
+  "Create an order for the signed-in user."
+  createOrder(input: CreateOrderInput!): Order!
+  "Cancel an order that has not shipped yet."
+  cancelOrder(id: ID!, reason: String): Order
+  deleteUser(id: ID!): Boolean! @deprecated(reason: "Use deactivateUser.")
+  deactivateUser(id: ID!): User
+}
+
+type Subscription {
+  orderUpdated(id: ID!): Order
+}
+
+"Anything that can be fetched by ID."
+interface Node {
+  id: ID!
+}
+
+"""
+A person with an account.
+Customers and staff are both users.
+"""
+type User implements Node {
+  id: ID!
+  "The name shown on the profile."
+  name: String!
+  email: String
+  role: Role!
+  "Orders placed by this user."
+  orders(first: Int, last: Int): [Order!]!
+  nickname: String @deprecated(reason: "Use name.")
+}
+
+type UserConnection {
+  nodes: [User!]!
+  totalCount: Int!
+  pageInfo: PageInfo!
+}
+
+type PageInfo {
+  hasNextPage: Boolean!
+  endCursor: String
+}
+
+type Product implements Node {
+  id: ID!
+  title: String!
+  "Price in minor units, such as cents."
+  priceCents: Int!
+  tags: [String!]!
+  reviews(limit: Int): [Review!]!
+  related(take: Int = 4): [Product!]!
+}
+
+type ProductPage {
+  items: [Product!]!
+  total: Int!
+}
+
+type Review {
+  rating: Int!
+  body: String
+  author: User!
+}
+
+type Order implements Node {
+  id: ID!
+  status: OrderStatus!
+  placedAt: DateTime!
+  items: [OrderItem!]!
+  total: Money!
+  customer: User!
+}
+
+type OrderItem {
+  product: Product!
+  quantity: Int!
+}
+
+type Money {
+  amountCents: Int!
+  currency: Currency!
+}
+
+union SearchResult = User | Product
+
+enum Role {
+  ADMIN
+  CUSTOMER
+  "Read-only access."
+  GUEST
+}
+
+enum OrderStatus {
+  PENDING
+  PAID
+  SHIPPED
+  CANCELLED
+  REFUNDED @deprecated(reason: "Refunds are tracked on payments now.")
+}
+
+enum Currency {
+  USD
+  EUR
+}
+
+input CreateOrderInput {
+  items: [OrderItemInput!]!
+  "Free-text note for the warehouse."
+  note: String
+  currency: Currency = USD
+}
+
+input OrderItemInput {
+  productId: ID!
+  quantity: Int! = 1
+}
+
+"An ISO 8601 timestamp."
+scalar DateTime

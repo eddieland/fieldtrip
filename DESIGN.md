@@ -1,0 +1,153 @@
+# Design
+
+One page: what fieldtrip is, and the questions that are already settled. Behavior is specified by the integration
+tests in `tests/`. The order of work is in [PLAN.md](PLAN.md).
+
+## Goal
+
+An MCP server in Rust that lets an agent use a GraphQL API it has never seen. The agent loads the schema, finds real
+queries and mutations, validates and costs an operation, and runs it only after the human approves. Credentials stay
+in the user's config, out of the agent's sight and out of its control.
+
+## Non-goals
+
+- Subscriptions, persisted queries and file uploads.
+- Transports other than stdio.
+- Reading `@cost` and `@listSize` directives.
+- Learning costs from real queries. It is wanted later. Until then a cost map is written by hand or by an agent.
+- Loading plugins at runtime. The plugs are a closed set.
+- Letting the agent choose a URL, a header or a command.
+
+## Tool surface
+
+| Tool | Input | Returns |
+| --- | --- | --- |
+| `list_endpoints` | none | Each endpoint's name, URL, schema source and header names |
+| `introspect` | `endpoint`, `refresh?` | Overview: root types, counts, query and mutation names |
+| `search_schema` | `endpoint`, `query` | Ranked matches as one-line signatures |
+| `describe` | `endpoint`, `name` (`Type` or `Type.field`) | That definition as compact SDL |
+| `estimate_cost` | `endpoint`, `operation`, `variables?` | Validation errors, or cost, depth, breakdown, assumptions |
+| `execute` | `endpoint`, `operation`, `variables?` | The response body, after a line with the status and estimate |
+
+## Config shape
+
+```toml
+[endpoints.acme]
+url               = "https://api.acme.example/graphql"
+schema            = "schemas/acme.graphql"   # optional SDL file, relative to this file
+auto_approve_cost = 50                       # optional, queries only
+assumed_list_size = 20                       # optional, default 10
+approval          = "elicit"                 # or "client"
+timeout           = 30                       # optional, seconds, default 30
+costs             = "acme.costs.toml"        # optional cost map, relative to this file
+
+[endpoints.acme.headers]
+X-Client      = "fieldtrip"
+X-Api-Key     = { env = "ACME_API_KEY" }
+Authorization = { command = ["python", "-m", "acme_auth", "token"], format = "Bearer {}", ttl = 300 }
+```
+
+The config path comes from `--config`, defaulting to `~/.config/fieldtrip/config.toml`. `--url`, with an optional
+`--schema`, defines a single endpoint with no headers and no file.
+
+## The three plugs
+
+A header value comes from one of three plugs. `env` and `command` take an optional `format`, in which `{}` is replaced
+by the value.
+
+| Plug | Config | Value |
+| --- | --- | --- |
+| Literal | `"fieldtrip"` | The string as written |
+| Environment | `{ env = "NAME" }` | The variable, read when the request is made |
+| Command | `{ command = ["python", "-m", "acme_auth", "token"] }` | The command's stdout, trimmed |
+
+## Cost map
+
+The built-in costs are guesses. An endpoint's `costs` file replaces them wherever its owner knows better. Each rule
+is a pattern over the fields of an operation, and sets a `cost`, a `multiplier`, or both.
+
+```toml
+"Query.products"  = { multiplier = 500 }      # an exact path from the root
+"User.orders"     = { multiplier = "take" }   # sized by the `take` argument
+"*.reviews"       = { multiplier = 3 }        # `reviews` on any type
+"Mutation.refund" = { cost = 100 }
+```
+
+A pattern is a type followed by one or more field names, and it matches a field reached through that chain. `*`
+stands for any one name. `cost` replaces what the field itself costs. `multiplier` replaces the size of a list.
+
+## Approval model
+
+`execute` validates and costs the operation, then asks the human through MCP elicitation. The prompt is built from
+the operation that will be sent and shows the endpoint, the kind (query or mutation), the operation text, the
+variables and the estimated cost. The request is sent only on an explicit accept. Up to MCP revision 2025-11-25 the
+prompt is a request from the server. From 2026-07-28 it is an "input required" result, answered on a retry.
+
+| Situation | Outcome |
+| --- | --- |
+| Human accepts | Sent |
+| Human declines, cancels, or the prompt fails or times out | Not sent |
+| Client has no elicitation support | Not sent |
+| Query with cost at or below `auto_approve_cost` | Sent without a prompt |
+| Endpoint sets `approval = "client"` | Sent without a prompt, mutations included |
+
+## Decisions
+
+Settled. To change one, ask the user, then add a new dated line instead of editing an old one.
+
+- 2026-11-12: Tools take an endpoint name. URLs, headers and commands come only from config or CLI flags.
+- 2026-11-12: Approval comes from the human through elicitation, never from a tool argument. Only accept counts.
+- 2026-11-12: Mutations always prompt. Queries prompt unless their cost is at or below `auto_approve_cost`.
+- 2026-11-12: With no elicitation support `execute` refuses. `approval = "client"` is the only opt-out.
+- 2026-11-12: The approval prompt contains nothing written by the calling agent except the operation and variables.
+- 2026-11-12: One operation per document. Its kind comes from the parser. Subscriptions are rejected.
+- 2026-11-12: When `schema` is set, no introspection query is ever sent to that endpoint.
+- 2026-11-12: Both schema sources normalize to one in-memory schema, so every tool behaves the same on either.
+- 2026-11-12: The plugs are an enum of three: literal, `env`, `command`. `{}` is the only `format` placeholder.
+- 2026-11-12: Commands run as argv with no shell. Output is cached for `ttl` seconds (300) and re-run once on a 401.
+- 2026-11-12: Header values never appear in tool output, prompts, errors or logs.
+- 2026-11-12: A failed command reports its exit status and stderr, never its stdout.
+- 2026-11-12: HTTP redirects are refused, so headers never reach a host the user didn't name.
+- 2026-11-12: Cost: scalar 0, object 1, list multiplies by `first`, `last` or `limit`, mutation field 10.
+- 2026-11-12: A list with no size argument uses `assumed_list_size` (10), and the estimate lists every assumption.
+- 2026-11-12: Estimating never sends the operation.
+- 2026-11-12: Every tool result is capped in size and says when it was truncated.
+- 2026-11-12: stdout carries the protocol. Logs go to stderr.
+- 2026-11-12: Stack: `rmcp`, `apollo-compiler` 1.x, `reqwest` with rustls, `tokio`.
+- 2026-11-12: Every slice in PLAN.md is checked by an integration test that drives the binary over MCP.
+- 2026-11-12: The server speaks MCP up to revision 2025-11-25 until PLAN slice 16 adds 2026-07-28.
+- 2026-11-12: `list_endpoints` shows header names, so the agent can tell whether auth is configured.
+- 2026-11-12: Cost: a size argument on a non-list field bounds the lists directly inside it, as connections page.
+- 2026-11-12: Cost: a size argument left out takes the default the schema declares for it, when there is one.
+- 2026-11-12: Cost: every fragment on an abstract type is counted, which is the worst case.
+- 2026-11-12: Cost: introspection fields such as `__typename` are free.
+- 2026-11-12: A header command runs in the config file's directory and has 30 seconds to finish.
+- 2026-11-12: Errors about a header command name the program but never its arguments, which can hold secrets.
+- 2026-11-12: The operation is sent in canonical form, printed from the parsed document, so comments are dropped.
+- 2026-11-12: The prompt shows that same canonical text. What the human reads is what the server receives.
+- 2026-11-12: Variables are checked against the operation before the human is asked.
+- 2026-11-12: `execute` returns the response body as the server wrote it. A response with no `data` is an error.
+- 2026-11-12: The prompt is a plain accept or decline, with no form fields. Any other answer counts as a refusal.
+- 2026-11-12: A value from an `env` or `command` plug is removed from response bodies, in case the server echoes it.
+- 2026-11-12: Literals and values shorter than 8 characters are not removed, because that would damage responses.
+- 2026-11-12: `FIELDTRIP_LOG` sets the log level for fieldtrip and the MCP SDK. Other crates stay at warnings.
+- 2026-11-12: A request has `timeout` seconds to complete, 30 unless the endpoint sets it.
+- 2026-11-12: A tool result carries at most 40,000 characters, and at most 1 MiB of a response body is read.
+- 2026-11-12: A redirect is reported as an error that names its target. It is never followed.
+- 2026-11-12: `--url` defines one endpoint called `default`. A relative `--schema` is relative to the working directory.
+- 2026-11-12: The server speaks every MCP revision the SDK knows. This lifts the 2025-11-25 ceiling set above.
+- 2026-11-12: On revision 2026-07-28 the prompt is an input-required result and the answer comes with the retry.
+- 2026-11-12: Each such prompt carries a single-use ticket tied to the operation. An accept without it sends nothing.
+- 2026-11-12: Costs can be overridden per endpoint by a cost map: a TOML file of rules, named by `costs`.
+- 2026-11-12: A rule's pattern is a type and a chain of field names, matched against the fields of the operation.
+- 2026-11-12: A pattern that starts at a root type is an exact path. One that starts elsewhere matches wherever it fits.
+- 2026-11-12: `*` in a pattern stands for any one type or field name.
+- 2026-11-12: `cost` replaces the field's own cost: 0 for a scalar, 1 for an object, 10 for a top-level mutation field.
+- 2026-11-12: `multiplier` replaces the size of a list, even a size the operation gives through an argument.
+- 2026-11-12: A `multiplier` on a field that is not a list bounds the lists directly inside it, as a size argument does.
+- 2026-11-12: A `multiplier` that is a string names the argument that carries the size.
+- 2026-11-12: When several rules match a field, each setting comes from the most specific: most names, then fewest `*`.
+- 2026-11-12: The cost map is config. No tool can change it, and it is read once, at startup.
+- 2026-11-12: The estimate lists every rule it used.
+- 2026-11-12: A cost map that is not valid stops the server at startup. A rule that cannot match is not an error.
+- 2026-11-12: `introspect` reports the rules that match nothing in the schema, so a misspelled rule is noticed.

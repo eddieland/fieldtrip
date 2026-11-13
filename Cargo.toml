@@ -119,3 +119,25 @@ unneeded_field_pattern = "warn"
 unseparated_literal_suffix = "warn"
 unwrap_used = "warn"
 verbose_file_reads = "warn"
+
+[dependencies]
+apollo-compiler = "1"
+clap = { version = "4.6.7", features = ["derive"] }
+reqwest = { version = "0.13.5", default-features = false, features = ["rustls", "http2", "system-proxy"] }
+rmcp = { version = "3.10.0", features = ["elicitation", "transport-io"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+thiserror = "2.0.21"
+tokio = { version = "1.54.1", features = ["macros", "process", "rt-multi-thread", "sync", "time"] }
+toml = "1.2.1"
+tracing = "0.1.44"
+tracing-subscriber = "0.3.23"
+
+[dev-dependencies]
+rmcp = { version = "3.10.0", features = ["client", "transport-child-process"] }
+tempfile = "3.27.0"
+tokio = { version = "1.54.1", features = ["macros", "rt-multi-thread", "process"] }
+
+[[test]]
+name = "spec"
+path = "tests/spec/main.rs"
