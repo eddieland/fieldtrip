@@ -57,6 +57,7 @@ pub(crate) struct Mcp {
     human: Human,
     prompts: Vec<String>,
     dir: TempDir,
+    instructions: Option<String>,
 }
 
 /// How to start the server for a test.
@@ -292,6 +293,7 @@ impl Mcp {
             human,
             prompts: Vec::new(),
             dir,
+            instructions: None,
         }
     }
 
@@ -314,6 +316,7 @@ impl Mcp {
             result.get("serverInfo").is_some(),
             "initialize should return serverInfo, got {result}"
         );
+        self.instructions = result.get("instructions").and_then(Value::as_str).map(str::to_owned);
         self.send(&json!({ "jsonrpc": "2.0", "method": "notifications/initialized" }));
     }
 
@@ -322,14 +325,24 @@ impl Mcp {
         self.dir.path()
     }
 
-    /// The names of the tools the server offers.
-    pub(crate) fn tools(&mut self) -> Vec<String> {
+    /// The instructions the server gave in its `initialize` result, if any.
+    pub(crate) fn instructions(&self) -> Option<&str> {
+        self.instructions.as_deref()
+    }
+
+    /// The tools the server offers, as `tools/list` returns them.
+    pub(crate) fn tool_list(&mut self) -> Vec<Value> {
         let result = self.request("tools/list", &json!({}));
-        let tools = result
+        result
             .get("tools")
             .and_then(Value::as_array)
-            .expect("tools/list returns a tools array");
-        tools
+            .cloned()
+            .expect("tools/list returns a tools array")
+    }
+
+    /// The names of the tools the server offers.
+    pub(crate) fn tools(&mut self) -> Vec<String> {
+        self.tool_list()
             .iter()
             .filter_map(|tool| tool.get("name").and_then(Value::as_str))
             .map(str::to_owned)

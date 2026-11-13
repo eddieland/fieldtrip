@@ -20,8 +20,18 @@ use crate::schema::{Loaded, introspection};
 use crate::suggest::backticked;
 
 /// What the server tells a client about itself and how to use it.
-const INSTRUCTIONS: &str = "fieldtrip lets you work with GraphQL APIs the user has configured. Start with \
-     `list_endpoints`. Every other tool takes one of those endpoint names.";
+const INSTRUCTIONS: &str = "fieldtrip lets you use GraphQL APIs the user has configured, reading the real schema \
+     instead of guessing it. Work in this order:\n\
+     1. `list_endpoints` gives the endpoint names. Every other tool takes one.\n\
+     2. `introspect` once per endpoint shows its query and mutation fields, the API's entry points.\n\
+     3. `search_schema` finds a type or field by a word. `describe` shows its exact arguments and return type.\n\
+     4. Write one operation and check it with `estimate_cost` until it is valid and cheap. Nothing is sent.\n\
+     5. `execute` sends it. The user approves each request unless their config says otherwise.\n\
+     GraphQL habits that matter here: take every field and argument name from the schema, never from memory. \
+     Select only the fields you need, since there is no wildcard. Name the operation and pass inputs as \
+     variables, not as values pasted into the text: the user reads both when approving. Give lists a page size, \
+     such as `first` or `limit`, because each list multiplies the cost of everything under it. Avoid fields \
+     marked deprecated, whose reason names the replacement.";
 
 /// What a tool hands back: text for the calling agent, or an error message that says what to do next.
 type ToolResult = Result<String, String>;
@@ -42,7 +52,11 @@ pub(crate) struct Fieldtrip {
 struct DescribeArguments {
     /// The endpoint name, as listed by `list_endpoints`.
     endpoint: String,
-    /// A type name such as `User`, or a field written as `Type.field`, such as `Query.user`.
+    /// The type or field to describe.
+    #[schemars(
+        description = "A type name such as `User`, or a field written as `Type.field`, such as `Query.user` or \
+                       `User.orders`. Names are case-sensitive, as in the schema."
+    )]
     name: String,
 }
 
@@ -51,18 +65,33 @@ struct DescribeArguments {
 struct SearchArguments {
     /// The endpoint name, as listed by `list_endpoints`.
     endpoint: String,
-    /// One or more words. Each must appear in a name or a description. Case is ignored.
+    /// The words to search for.
+    #[schemars(
+        description = "One or more words separated by spaces, such as `refund` or `user email`. Every word must \
+                       match. Case is ignored."
+    )]
     query: String,
 }
+
+/// How `estimate_cost` and `execute` describe their `operation` argument to the calling agent.
+const OPERATION: &str = "A GraphQL document holding exactly one query or mutation, plus any fragments it uses. \
+     Name the operation and declare its inputs as variables, such as \
+     `query UserName($id: ID!) { user(id: $id) { name } }`. Subscriptions are not supported.";
 
 /// Arguments of `estimate_cost`.
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 struct EstimateArguments {
     /// The endpoint name, as listed by `list_endpoints`.
     endpoint: String,
-    /// One GraphQL query or mutation, with any fragments it uses.
+    /// The GraphQL document.
+    #[schemars(description = OPERATION)]
     operation: String,
-    /// The operation's variables, as a JSON object. They are used to resolve list sizes such as `first: $n`.
+    /// The variables, used to size lists.
+    #[schemars(
+        description = "Values for the variables the operation declares, as a JSON object keyed by name without \
+                       the `$`. Here they size lists given as `first: $n`, so pass the same values you will pass \
+                       to `execute`."
+    )]
     #[serde(default)]
     variables: Variables,
 }
@@ -72,9 +101,16 @@ struct EstimateArguments {
 struct ExecuteArguments {
     /// The endpoint name, as listed by `list_endpoints`.
     endpoint: String,
-    /// One GraphQL query or mutation, with any fragments it uses.
+    /// The GraphQL document.
+    #[schemars(description = OPERATION)]
     operation: String,
-    /// The operation's variables, as a JSON object.
+    /// The variables sent with the operation.
+    #[schemars(
+        description = "Values for the variables the operation declares, as a JSON object keyed by name without \
+                       the `$`, such as `{\"id\": \"42\", \"first\": 10}`. Write an enum value as a JSON string and \
+                       an input object as a JSON object. They are checked against the declared types before the \
+                       user is asked."
+    )]
     #[serde(default)]
     variables: Variables,
 }
@@ -109,7 +145,11 @@ const EXCERPT: usize = 300;
 struct IntrospectArguments {
     /// The endpoint name, as listed by `list_endpoints`.
     endpoint: String,
-    /// Load the schema again from its source, instead of using the copy already loaded.
+    /// Whether to load the schema again.
+    #[schemars(
+        description = "Set to `true` to load the schema again from its source, after the API has changed. \
+                       Otherwise the copy already loaded is used."
+    )]
     #[serde(default)]
     refresh: bool,
 }
@@ -127,12 +167,17 @@ impl Fieldtrip {
     }
 
     #[tool(
+        title = "List GraphQL endpoints",
         description = "List the GraphQL endpoints the user has configured. Call this first: every other tool takes \
-                       one of these endpoint names. Returns each endpoint's name, the user's description of it when \
-                       there is one, its URL, where its schema comes from, who approves operations, and the names \
-                       of the headers sent with its requests. Header values are never shown. When several endpoints \
-                       are instances of one service, such as dev and prod, prefer the one the description or the \
-                       user points to, and ask when it is unclear."
+                       one of these endpoint names, and fieldtrip talks to no other host. For each endpoint it \
+                       returns the user's description of it when there is one, the URL, where the schema comes \
+                       from (a file or introspection), who approves `execute` requests, the cost map if there is \
+                       one, and the names of the headers sent with each request, so you can tell whether \
+                       authentication is set up. Header values are never shown. When several endpoints are \
+                       instances of one service, such as dev and prod, prefer the one the description or the user \
+                       points to, and ask when it is unclear. Endpoints and headers come only from the user's \
+                       config: if one is missing, ask the user to add it.",
+        annotations(read_only_hint = true, open_world_hint = false)
     )]
     fn list_endpoints(&self) -> String {
         let endpoints = &self.config.endpoints;
@@ -169,10 +214,16 @@ impl Fieldtrip {
     }
 
     #[tool(
-        description = "Show the exact definition of one type or one field, as compact GraphQL SDL. Use it before \
-                       writing an operation, to get field names, argument names and types right. `name` is a type \
+        title = "Describe a GraphQL type or field",
+        description = "Show the exact definition of one type or one field as GraphQL SDL, with its descriptions, \
+                       default values and deprecations. Read it before you write a selection: GraphQL has no \
+                       wildcard, and one wrong field or argument makes the whole operation invalid. `name` is a type \
                        (`User`) or a field (`Query.user`, `Mutation.createOrder`). For a field, the result also \
-                       includes its argument types and its return type."
+                       defines the types of its arguments and its return type, which shows the required arguments \
+                       (marked `!`), what an input object needs, and what you can select next. An interface or union \
+                       lists its possible types: select their own fields with `... on Type`. Avoid anything marked \
+                       deprecated; its reason names the replacement.",
+        annotations(read_only_hint = true, open_world_hint = true)
     )]
     async fn describe(&self, Parameters(arguments): Parameters<DescribeArguments>) -> ToolResult {
         let schema = self.schema(&arguments.endpoint, false).await?;
@@ -184,10 +235,16 @@ impl Fieldtrip {
     }
 
     #[tool(
-        description = "Search an endpoint's schema for queries, mutations, types, fields, arguments and enum values. \
-                       Matches names and descriptions, ignoring case, and returns the best matches as one-line \
-                       signatures. Use it to find the real name of something before you `describe` it. Use short \
-                       queries: one word, or a type name and a field name."
+        title = "Search a GraphQL schema",
+        description = "Find queries, mutations, types, fields, arguments and enum values by name or description, \
+                       when you know what you want but not what this schema calls it. Every word in `query` must \
+                       match, ignoring case. Names rank above descriptions, and queries and mutations come first. \
+                       Returns the best 20 matches as one-line signatures, each starting with a name that \
+                       `describe` accepts, and says how many more there were. Search for words from the domain \
+                       (`invoice`, `refund`), not GraphQL words such as `query` or `list`. To look inside one type, \
+                       add its name as a second word: `user orders`, not `User.orders`. When nothing matches, the \
+                       nearest names are suggested.",
+        annotations(read_only_hint = true, open_world_hint = true)
     )]
     async fn search_schema(&self, Parameters(arguments): Parameters<SearchArguments>) -> ToolResult {
         let schema = self.schema(&arguments.endpoint, false).await?;
@@ -195,10 +252,16 @@ impl Fieldtrip {
     }
 
     #[tool(
-        description = "Check a query or mutation against the schema and estimate its cost, without sending it. Use \
-                       it while writing an operation: it reports validation errors with positions, or the estimated \
-                       cost, the depth, the cost of each top-level field, and the assumptions behind the estimate. \
-                       Pass exactly one operation. The estimate is a heuristic, not the server's own accounting."
+        title = "Validate and cost a GraphQL operation",
+        description = "Validate one query or mutation against the schema and estimate its cost, without sending \
+                       anything to the endpoint. Run it after each change while you write an operation, and before \
+                       `execute`. An invalid operation returns every error with its line and column, and the nearest \
+                       field names for a misspelled one. A valid operation returns the estimated cost, the depth, the \
+                       cost of each top-level field, the cost-map rules used, and every assumption made. Lists drive \
+                       the cost: a list multiplies everything selected under it by its size. An assumption that a \
+                       list had no size usually means you should pass `first`, `last` or `limit`, or select less \
+                       under it. The estimate is fieldtrip's heuristic, not the server's own rate limit.",
+        annotations(read_only_hint = true, open_world_hint = true)
     )]
     async fn estimate_cost(&self, Parameters(arguments): Parameters<EstimateArguments>) -> ToolResult {
         let name = &arguments.endpoint;
@@ -209,10 +272,23 @@ impl Fieldtrip {
     }
 
     #[tool(
-        description = "Send a query or mutation to the endpoint and return the GraphQL response. The user is shown \
-                       the exact operation, its variables and its estimated cost, and it is sent only if they \
-                       approve. Check the operation with `estimate_cost` first. If the user declines, do not send \
-                       the same operation again: ask them what they want. Pass exactly one operation."
+        title = "Execute a GraphQL operation (the user approves)",
+        description = "Send one query or mutation to the endpoint and return the response body as the server wrote \
+                       it, after a line with the HTTP status and the estimated cost. Make it valid with \
+                       `estimate_cost` first, and use `describe` rather than this tool to explore. The user \
+                       approves each request in a prompt that shows the operation exactly as it will be sent, its \
+                       variables and its cost, unless their config says otherwise (`list_endpoints` shows who \
+                       approves). Write for that reader: name the operation, pass inputs as variables, and select only the fields you need. \
+                       A response can hold both `data` and `errors`: read both, because one field can fail while \
+                       the rest succeed. For a mutation, select the result fields that confirm what changed, and \
+                       any error fields its payload type has. A response with no `data` is returned as an error. If \
+                       the user declines, nothing was sent: do not send it again, ask what they want instead.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = false,
+            open_world_hint = true
+        )
     )]
     async fn execute(
         &self,
@@ -280,10 +356,14 @@ impl Fieldtrip {
     }
 
     #[tool(
-        description = "Load an endpoint's schema and get an overview of it: how many types it has and the names of \
-                       its queries and mutations. Use it once per endpoint to see what the API offers, then \
-                       `describe` the fields you need. The schema stays loaded. Pass `refresh` only when the API has \
-                       changed."
+        title = "Load a GraphQL schema overview",
+        description = "Load an endpoint's schema and summarize it: its description, how many types of each kind it \
+                       has, and the name of every query and mutation field, which are the API's entry points. Call \
+                       it once per endpoint to see what the API offers, then use `search_schema` and `describe` to \
+                       read the fields you need. The schema stays loaded for every tool, so there is no need to send \
+                       an introspection query with `execute`. It also reports cost-map rules that match nothing in \
+                       the schema. Pass `refresh` only when the API has changed since it was loaded.",
+        annotations(read_only_hint = true, open_world_hint = true)
     )]
     async fn introspect(&self, Parameters(arguments): Parameters<IntrospectArguments>) -> ToolResult {
         let name = &arguments.endpoint;

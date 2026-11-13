@@ -57,4 +57,6 @@ mod search_schema;
 #[cfg(test)]
 mod templates;
 #[cfg(test)]
+mod tool_descriptions;
+#[cfg(test)]
 mod url_secrets;
