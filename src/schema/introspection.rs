@@ -54,7 +54,7 @@ pub(crate) async fn fetch(http: &Client, endpoint: &Endpoint) -> Result<String, 
                 "{} did not answer the introspection query: {reason}. If introspection is turned off for this API, \
                  ask the user to export the schema to a file and set `schema` for this endpoint in the fieldtrip \
                  config.",
-                endpoint.url
+                endpoint.shown_url
             )
         })?,
     };
@@ -76,7 +76,7 @@ async fn attempt(
         return Err(format!(
             "{} answered HTTP {}: it did not accept the credentials. The user has to check the headers configured \
              for this endpoint.",
-            endpoint.url, reply.status
+            endpoint.shown_url, reply.status
         ));
     }
     let Ok(response) = serde_json::from_str::<Response>(&reply.body) else {

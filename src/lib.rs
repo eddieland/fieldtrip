@@ -4,6 +4,7 @@
 //! running them, and execute them only with the user's approval.
 
 mod approval;
+mod check;
 mod cli;
 mod config;
 mod costs;
@@ -20,7 +21,7 @@ use std::process::ExitCode;
 use clap::Parser as _;
 use rmcp::ServiceExt as _;
 
-use crate::cli::Args;
+use crate::cli::{Args, Command};
 use crate::config::Config;
 use crate::server::Fieldtrip;
 
@@ -36,6 +37,9 @@ enum Error {
     /// The HTTP client could not be set up.
     #[error("{0}")]
     Http(String),
+    /// The report of `fieldtrip check` could not be written.
+    #[error("could not write the report: {0}")]
+    Output(#[source] std::io::Error),
     /// The MCP session failed.
     #[error("the MCP session failed: {0}")]
     Session(String),
@@ -62,8 +66,13 @@ pub fn run(args: impl IntoIterator<Item = OsString>) -> ExitCode {
 
     init_logging();
 
-    match start(&args) {
-        Ok(()) => ExitCode::SUCCESS,
+    let outcome = match args.command {
+        Some(Command::Check) => check(&args),
+        None => start(&args).map(|()| true),
+    };
+    match outcome {
+        Ok(true) => ExitCode::SUCCESS,
+        Ok(false) => ExitCode::FAILURE,
         Err(error) => {
             tracing::error!("{error}");
             ExitCode::FAILURE
@@ -97,14 +106,33 @@ fn init_logging() {
     tracing_subscriber::registry().with(stderr).init();
 }
 
+/// Runs `fieldtrip check` and prints its report on stdout, where no MCP session is running. Returns whether the
+/// configuration has no problems.
+fn check(args: &Args) -> Result<bool, Error> {
+    use std::io::Write as _;
+
+    let config = Config::load(args)?;
+    let runtime = runtime()?;
+    let report = runtime.block_on(check::check(&config));
+    std::io::stdout()
+        .lock()
+        .write_all(report.text.as_bytes())
+        .map_err(Error::Output)?;
+    Ok(report.problems == 0)
+}
+
+/// The async runtime.
+fn runtime() -> Result<tokio::runtime::Runtime, Error> {
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .map_err(Error::Runtime)
+}
+
 /// Loads the configuration and blocks on the MCP session.
 fn start(args: &Args) -> Result<(), Error> {
     let config = Config::load(args)?;
-    let runtime = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()
-        .map_err(Error::Runtime)?;
-    runtime.block_on(serve(config))
+    runtime()?.block_on(serve(config))
 }
 
 /// Serves MCP on stdio until the client disconnects.

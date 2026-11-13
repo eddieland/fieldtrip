@@ -3,7 +3,6 @@
 use std::error::Error as _;
 
 use crate::config::Endpoint;
-use crate::headers::Header;
 
 /// The `User-Agent` sent with every request.
 const USER_AGENT: &str = concat!(env!("CARGO_PKG_NAME"), "/", env!("CARGO_PKG_VERSION"));
@@ -59,7 +58,7 @@ impl Client {
     /// error here: GraphQL servers put useful detail in the body, so the caller decides what the status means.
     pub(crate) async fn post(&self, endpoint: &Endpoint, payload: &serde_json::Value) -> Result<Reply, String> {
         let reply = self.send(endpoint, payload, false).await?;
-        if reply.status == UNAUTHORIZED && endpoint.headers.iter().any(Header::is_refreshable) {
+        if reply.status == UNAUTHORIZED && endpoint.headers.iter().any(|header| header.is_refreshable()) {
             return self.send(endpoint, payload, true).await;
         }
         Ok(reply)
@@ -97,7 +96,11 @@ impl Client {
                 if error.is_timeout() {
                     timed_out(endpoint)
                 } else {
-                    format!("The request to {} failed: {}", endpoint.url, explain(&error))
+                    format!(
+                        "The request to {} failed: {}",
+                        endpoint.shown_url,
+                        explain(&error.without_url())
+                    )
                 }
             })?;
         let status = response.status().as_u16();
@@ -111,7 +114,7 @@ impl Client {
                 "{} answered HTTP {status}, a redirect to {target}. fieldtrip does not follow redirects, because the \
                  headers configured for this endpoint would go to a host the user did not name. The user has to put \
                  the final URL in the fieldtrip config.",
-                endpoint.url
+                endpoint.shown_url
             ));
         }
 
@@ -124,8 +127,8 @@ impl Client {
                 } else {
                     format!(
                         "The response from {} could not be read: {}",
-                        endpoint.url,
-                        explain(&error)
+                        endpoint.shown_url,
+                        explain(&error.without_url())
                     )
                 }
             })?;
@@ -156,7 +159,7 @@ fn timed_out(endpoint: &Endpoint) -> String {
     format!(
         "{} did not answer within {} seconds, the `timeout` for this endpoint. Nothing is known about whether the \
          operation ran. For a query, ask for less. For a mutation, check its effect before sending it again.",
-        endpoint.url,
+        endpoint.shown_url,
         endpoint.timeout.as_secs()
     )
 }

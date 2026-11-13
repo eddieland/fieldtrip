@@ -9,7 +9,11 @@ mod support;
 #[cfg(test)]
 mod approval_policy;
 #[cfg(test)]
+mod check_command;
+#[cfg(test)]
 mod cli_flags;
+#[cfg(test)]
+mod config_checks;
 #[cfg(test)]
 mod cost_argument;
 #[cfg(test)]
@@ -21,11 +25,15 @@ mod cost_patterns;
 #[cfg(test)]
 mod describe;
 #[cfg(test)]
+mod descriptions;
+#[cfg(test)]
 mod estimate_cost;
 #[cfg(test)]
 mod execute_approved;
 #[cfg(test)]
 mod execute_refused;
+#[cfg(test)]
+mod header_names;
 #[cfg(test)]
 mod headers_command;
 #[cfg(test)]
@@ -46,3 +54,7 @@ mod protocol_2026;
 mod redaction;
 #[cfg(test)]
 mod search_schema;
+#[cfg(test)]
+mod templates;
+#[cfg(test)]
+mod url_secrets;

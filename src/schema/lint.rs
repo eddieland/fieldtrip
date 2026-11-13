@@ -21,7 +21,20 @@ pub(super) fn report(loaded: &Loaded, costs: &CostMap) -> String {
     let count = costs.len();
     let plural = if count == 1 { "" } else { "s" };
     let mut out = format!("\nCost map: {count} rule{plural} from {}.", source.display());
+    let findings = findings(loaded, costs);
+    if findings.is_empty() {
+        out.push_str(" Every rule matches something in this schema.\n");
+        return out;
+    }
+    out.push('\n');
+    for finding in findings {
+        let _ = writeln!(out, "{finding}");
+    }
+    out
+}
 
+/// One sentence per kind of rule that cannot apply in this schema. Empty when every rule can.
+pub(super) fn findings(loaded: &Loaded, costs: &CostMap) -> Vec<String> {
     let mut unmatched = Vec::new();
     let mut wrong_argument = Vec::new();
     for shape in costs.shapes() {
@@ -34,25 +47,19 @@ pub(super) fn report(loaded: &Loaded, costs: &CostMap) -> String {
             wrong_argument.push((shape.text, argument));
         }
     }
-    if unmatched.is_empty() && wrong_argument.is_empty() {
-        out.push_str(" Every rule matches something in this schema.\n");
-        return out;
-    }
-    out.push('\n');
+    let mut findings = Vec::new();
     if !unmatched.is_empty() {
-        let _ = writeln!(
-            out,
+        findings.push(format!(
             "These rules match nothing in this schema: {}.",
             backticked(unmatched)
-        );
+        ));
     }
     for (rule, argument) in wrong_argument {
-        let _ = writeln!(
-            out,
+        findings.push(format!(
             "`{rule}` names the argument `{argument}`, which no field it matches has."
-        );
+        ));
     }
-    out
+    findings
 }
 
 /// The fields a pattern can land on in this schema. Empty when nothing in the schema fits it.
