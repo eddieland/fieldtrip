@@ -1,12 +1,21 @@
 # Using fieldtrip with OpenCode
 
 This guide sets fieldtrip up as a local MCP server in [OpenCode](https://opencode.ai) V2. It covers installing the
-binary, registering it, and checking that the approval prompt reaches you before anything is sent.
+binary, registering it, and making sure nothing runs against your API until you approve it.
 
-> fieldtrip has not yet been tested end to end in OpenCode. The steps follow OpenCode's V2 documentation for
-> [MCP servers](https://opencode.ai/docs/mcp-servers/) and [permissions](https://opencode.ai/docs/permissions/). If
-> a step doesn't match what your version does, please open an issue. OpenCode V1 uses a different config shape, and
-> this guide doesn't cover it.
+> fieldtrip has not yet been tested end to end in OpenCode. The steps follow OpenCode 2.2.7's documentation for
+> [MCP servers](https://opencode.ai/docs/mcp-servers/) and [permissions](https://opencode.ai/docs/permissions/), and
+> its source. If a step doesn't match what your version does, please open an issue. OpenCode V1 uses a different
+> config shape, and this guide doesn't cover it.
+
+## Read this first: approval in OpenCode
+
+fieldtrip normally asks you to approve each operation through an MCP elicitation prompt. Its prompt is a plain
+accept or decline, with no fields to fill in. **OpenCode accepts a prompt like that automatically, without showing
+it to you.** If you use fieldtrip's default approval in OpenCode, every operation runs unseen, mutations included.
+
+So in OpenCode, approval has to come from OpenCode itself: set `approval = "client"` on every endpoint, and add an
+OpenCode permission rule that asks before `fieldtrip_execute`. Steps 2 and 4 below do both. Don't skip either one.
 
 ## 1. Install fieldtrip
 
@@ -23,12 +32,19 @@ fieldtrip reads `~/.config/fieldtrip/config.toml` unless you pass `--config`. A 
 
 ```toml
 [endpoints.acme]
-url               = "https://api.acme.example/graphql"
-auto_approve_cost = 50   # optional: queries that cost 50 or less run without a prompt
+url      = "https://api.acme.example/graphql"
+approval = "client"   # required in OpenCode: see "Read this first"
 
 [endpoints.acme.headers]
 X-Api-Key = { env = "ACME_API_KEY" }
 ```
+
+Set `approval = "client"` on every endpoint you use from OpenCode. With it, fieldtrip sends every operation it is
+given without prompting, and OpenCode's permission prompt from step 4 is what stops it. `auto_approve_cost` has no
+effect in this mode.
+
+You can't use the `--url` flag from OpenCode, because an endpoint defined by `--url` uses fieldtrip's own prompt.
+Write a config file instead.
 
 The [README](../README.md#configuration) and [DESIGN.md](../DESIGN.md#config-shape) describe every option, including
 header commands and cost maps.
@@ -67,8 +83,6 @@ To write the config by hand, add fieldtrip under `mcp.servers` in `opencode.json
 - `"codemode": false` puts fieldtrip's six tools directly on the agent's tool list instead of behind OpenCode's Code
   Mode. That way the agent reads each tool's description, which says when to use the tool and in what order. This
   is a recommendation, not a requirement.
-- For a single endpoint that needs no headers you can skip the fieldtrip config file:
-  `"command": ["fieldtrip", "--url", "https://api.example.com/graphql"]`.
 - Keep secrets out of OpenCode's config, especially a config committed to a project. fieldtrip inherits OpenCode's
   environment, so export `ACME_API_KEY` in the shell you start `opencode` from.
 
@@ -83,32 +97,10 @@ Run `opencode mcp list` and check that fieldtrip shows as connected. Its tools a
 | `fieldtrip_estimate_cost` | Validate and cost an operation without sending it |
 | `fieldtrip_execute` | Run an operation, after you approve it |
 
-## 4. Check that approval reaches you
+## 4. Make OpenCode ask before every execute
 
-fieldtrip asks you to approve each operation through MCP elicitation, and OpenCode shows such a request as a form.
-Ask the agent to run something small:
-
-> Use fieldtrip to run `{ __typename }` against acme.
-
-OpenCode should show *"fieldtrip is requesting input"* with the endpoint, the operation, its variables and its
-estimated cost. Accept it and the query runs. Decline or dismiss it and nothing is sent.
-
-If the tool instead fails with *"This MCP client cannot show approval prompts, because it does not support
-elicitation…"*, nothing was sent, and the client didn't offer elicitation. Use the fallback below.
-
-### Fallback: let OpenCode do the approving
-
-Use this only if the prompt above never appears. Set `approval = "client"` on the endpoint:
-
-```toml
-[endpoints.acme]
-url      = "https://api.acme.example/graphql"
-approval = "client"
-```
-
-With this set, fieldtrip sends every operation it is given, mutations included, without prompting. OpenCode's own
-permission check becomes the only gate. OpenCode V2 allows every action by default, so add a rule that asks before
-each `execute`:
+OpenCode V2 allows every action unless a rule says otherwise, so add a rule that asks before `fieldtrip_execute`. Put
+it in the same OpenCode config file as the server:
 
 ```jsonc
 {
@@ -118,17 +110,29 @@ each `execute`:
 }
 ```
 
-Then repeat the test above and confirm that OpenCode asks before the query is sent.
+When OpenCode asks, the request includes the tool's input: the endpoint, the operation and its variables. Read the
+operation before you answer, and choose **Allow once**.
 
-When it asks, choose **Allow once**. **Allow always** saves a rule that lets every later `execute` run without a
-prompt, so after that nothing stands between the agent and your API. If you chose it by mistake, remove the saved
-approval.
+- **Never choose Allow always** for `fieldtrip_execute`. It saves a rule that lets every later `execute` run
+  without asking, on that project, from then on. If you chose it by mistake, remove the saved approval.
+- **Don't run `opencode run` with `--auto`** (or its hidden variants) in a project that has fieldtrip. That flag
+  approves every permission that isn't explicitly denied, `fieldtrip_execute` included.
+- The other five tools only read the schema or cost an operation, and never send it, so they don't need a rule.
 
-This fallback also gives up two things:
+## 5. Check that approval reaches you
 
-- OpenCode's prompt shows the tool's arguments, which are the operation and its variables, but not fieldtrip's cost
-  estimate. Ask the agent to call `fieldtrip_estimate_cost` first, or call it yourself.
-- `auto_approve_cost` has no effect, because fieldtrip no longer prompts for anything.
+Ask the agent to run something small:
+
+> Use fieldtrip to run `{ __typename }` against acme.
+
+OpenCode should ask for permission to use `fieldtrip_execute` before anything is sent. Reject it, then check that the
+agent reports the call was rejected. Then try again and choose **Allow once** to see the query run.
+
+If the query runs without OpenCode asking, stop and check two things: the `permissions` rule from step 4, and that
+you didn't save an "Allow always" for it earlier.
+
+OpenCode's prompt doesn't show fieldtrip's cost estimate. If cost matters, ask the agent to call
+`fieldtrip_estimate_cost` before `execute`, or call it yourself.
 
 ## Protocol revision
 
@@ -139,8 +143,8 @@ also speaks MCP revision 2026-07-28, so `"protocol": "auto"` on the server works
 
 - "List the fieldtrip endpoints, then introspect acme."
 - "Search the acme schema for refunds and describe `Mutation.refundOrder`."
-- "Write a query for the 20 most recent orders with their line items, estimate its cost, and run it if it's under
-  100."
+- "Write a query for the 20 most recent orders with their line items, estimate its cost, and show me both before you
+  run it."
 
 ## Troubleshooting
 
