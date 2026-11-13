@@ -99,6 +99,9 @@ async fn endpoint_report(out: &mut Out, name: &str, endpoint: &Endpoint) {
     out.line("approval", approval::policy(endpoint));
     out.line("timeout", format!("{}s", endpoint.timeout.as_secs()));
     out.line("assumed list size", endpoint.assumed_list_size);
+    if !endpoint.response_headers.is_empty() {
+        out.line("response headers shown", endpoint.response_headers.join(", "));
+    }
 
     let schema = match &endpoint.schema {
         None => {

@@ -14,6 +14,13 @@ fn start(mock: &MockServer, human: Human) -> Mcp {
     Launch::new(&config).human(human).start()
 }
 
+/// Whether `line` is `HTTP <status> · <n> ms`, with nothing after it.
+fn is_status_line(line: &str, status: u16) -> bool {
+    line.strip_prefix(&format!("HTTP {status} · "))
+        .and_then(|rest| rest.strip_suffix(" ms"))
+        .is_some_and(|millis| millis.parse::<u64>().is_ok())
+}
+
 /// The JSON body of the only request `mock` received.
 fn only_request_body(mock: &MockServer) -> Value {
     let requests = mock.requests();
@@ -35,11 +42,33 @@ fn sends_the_operation_and_returns_the_response_with_the_estimate() {
     );
 
     assert!(!reply.is_error, "execute should succeed: {}", reply.text);
+    let lines: Vec<&str> = reply.text.lines().collect();
     assert_eq!(
-        reply.text,
-        "Sent query `Me` to `store`. HTTP 200. Estimated cost: 1.\n\
-         {\"data\":{\"viewer\":{\"name\":\"Ada\"}},\"extensions\":{\"cost\":{\"actualQueryCost\":1}}}",
-        "the response comes back as the server wrote it, after a line with the status and the estimate"
+        lines.len(),
+        4,
+        "two summary lines, then data and extensions: {}",
+        reply.text
+    );
+    assert_eq!(
+        lines.first().copied(),
+        Some("Sent query `Me` to `store`. Estimated cost: 1."),
+        "says what was sent and its estimate"
+    );
+    assert!(
+        lines.get(1).is_some_and(|line| is_status_line(line, 200)),
+        "then the status and how long it took: {}",
+        reply.text
+    );
+    assert_eq!(
+        lines.get(2..),
+        Some(
+            [
+                "data: {\"viewer\":{\"name\":\"Ada\"}}",
+                "extensions: {\"cost\":{\"actualQueryCost\":1}}",
+            ]
+            .as_slice()
+        ),
+        "each part comes back as the server wrote it"
     );
     let body = only_request_body(&mock);
     assert_eq!(
@@ -149,7 +178,7 @@ fn partial_data_with_errors_is_returned_as_a_result() {
 }
 
 #[test]
-fn errors_with_no_data_are_a_tool_error() {
+fn errors_with_no_data_are_a_result() {
     let mock = MockServer::answering(&json!({ "errors": [{ "message": "Not authorized to read users" }] }));
     let mut mcp = start(&mock, Human::Accepts);
 
@@ -159,13 +188,38 @@ fn errors_with_no_data_are_a_tool_error() {
     );
 
     assert!(
-        reply.is_error,
-        "a response with only errors is a failure: {}",
+        !reply.is_error,
+        "a response with only errors is read like any other: {}",
         reply.text
     );
     assert!(
-        reply.text.contains("Not authorized to read users"),
+        reply
+            .text
+            .ends_with("\nerrors: [{\"message\":\"Not authorized to read users\"}]"),
         "the errors are passed on: {}",
+        reply.text
+    );
+}
+
+#[test]
+fn json_that_is_not_a_graphql_response_is_a_tool_error() {
+    let mock = MockServer::start(|_| Response::new(401, "{\"message\":\"Bad credentials\"}"));
+    let mut mcp = start(&mock, Human::Accepts);
+
+    let reply = mcp.call(
+        "execute",
+        &json!({ "endpoint": "store", "operation": "{ viewer { name } }" }),
+    );
+
+    assert!(
+        reply.is_error,
+        "a body with neither data nor errors is a failure: {}",
+        reply.text
+    );
+    assert!(reply.text.contains("HTTP 401"), "names the status: {}", reply.text);
+    assert!(
+        reply.text.contains("Bad credentials"),
+        "quotes the body: {}",
         reply.text
     );
 }

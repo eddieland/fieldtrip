@@ -27,7 +27,7 @@ in the user's config, out of the agent's sight and out of its control.
 | `search_schema` | `endpoint`, `query` | Ranked matches as one-line signatures |
 | `describe` | `endpoint`, `name` (`Type` or `Type.field`) | That definition as compact SDL |
 | `estimate_cost` | `endpoint`, `operation`, `variables?` | Validation errors, or cost, depth, breakdown, assumptions |
-| `execute` | `endpoint`, `operation`, `variables?` | The response body, after a line with the status and estimate |
+| `execute` | `endpoint`, `operation`, `variables?` | Status, time, chosen headers, then `errors` whole, then `data` |
 
 ## Config shape
 
@@ -36,6 +36,7 @@ in the user's config, out of the agent's sight and out of its control.
 costs             = "acme.costs.toml"        # optional cost map, relative to this file
 assumed_list_size = 20                       # optional, default 10
 timeout           = 30                       # optional, seconds, default 30
+response_headers  = ["x-request-id", "traceparent"]   # optional, shown by `execute`
 
 [templates.acme.headers]
 X-Client      = "fieldtrip"
@@ -53,8 +54,8 @@ auto_approve_cost = 50                       # optional, queries only
 X-Api-Key = { env = "ACME_API_KEY" }
 ```
 
-An endpoint takes `schema`, `headers`, `costs`, `assumed_list_size` and `timeout` from its template unless it sets
-them. Headers merge by name, ignoring case, and the endpoint's win. `url`, `description`, `approval` and
+An endpoint takes `schema`, `headers`, `costs`, `assumed_list_size`, `timeout` and `response_headers` from its
+template unless it sets them. Headers merge by name, ignoring case, and the endpoint's win. `url`, `description`, `approval` and
 `auto_approve_cost` are only ever set on the endpoint. A path may start with `~/`.
 
 The config path comes from `--config`, defaulting to `$XDG_CONFIG_HOME/fieldtrip/config.toml` or
@@ -174,3 +175,11 @@ Settled. To change one, ask the user, then add a new dated line instead of editi
 - 2026-11-13: `fieldtrip check` resolves every header and reads schema files, but sends nothing to an endpoint.
 - 2026-11-13: In `check`, a header or schema that fails is a problem and fails the run. An unmatched rule only warns.
 - 2026-11-13: A relative `--config` is made absolute first, so header commands start in a real directory.
+- 2026-11-13: `execute` gives a summary line, then status, time taken and chosen headers, then `errors`, then `data`.
+- 2026-11-13: Each part of the response is quoted as the server wrote it. This replaces returning the body whole.
+- 2026-11-13: A GraphQL response with `errors` and no `data` is a result, whatever the status. This replaces the
+  2026-11-12 line that made it an error. JSON with neither `data` nor `errors` is still an error.
+- 2026-11-13: `errors` are never cut. The 40,000-character cap is met by cutting what follows them.
+- 2026-11-13: Response headers are shown only when `response_headers` names them. The agent cannot choose them.
+- 2026-11-13: A shown response header has secrets removed as a body does, and is cut at 200 characters.
+- 2026-11-13: A request that fails or times out says how many milliseconds fieldtrip waited.

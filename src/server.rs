@@ -1,6 +1,6 @@
 //! The MCP server. Each tool is a thin wrapper over the rest of the crate.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fmt::Write as _;
 use std::sync::Arc;
 
@@ -10,6 +10,7 @@ use rmcp::model::{CallToolResponse, CallToolResult, ContentBlock, Implementation
 use rmcp::service::RequestContext;
 use rmcp::{RoleServer, ServerHandler, schemars, tool, tool_handler, tool_router};
 use serde::Deserialize;
+use serde_json::value::RawValue;
 use tokio::sync::Mutex;
 
 use crate::approval::{self, Operation, Outstanding, Round};
@@ -132,6 +133,26 @@ fn capped(text: String, advice: &str) -> String {
     kept
 }
 
+/// Like [`capped`], but `head` is always kept whole, and only `rest`, which follows it, is cut.
+fn capped_after(head: String, rest: &str, advice: &str) -> String {
+    let head_length = head.chars().count();
+    let length = head_length + rest.chars().count();
+    if length <= MAX_OUTPUT {
+        return head + rest;
+    }
+    let mut kept = head;
+    kept.extend(rest.chars().take(MAX_OUTPUT.saturating_sub(head_length)));
+    let _ = write!(
+        kept,
+        "\n[fieldtrip cut this off at {MAX_OUTPUT} characters. The full result had at least {length}. Errors are \
+         never cut. {advice}]"
+    );
+    kept
+}
+
+/// How `execute` says to get a smaller result.
+const ASK_FOR_LESS: &str = "Ask for less: fewer fields, or a smaller page with `first` or `limit`.";
+
 /// A finished tool call with `text` as its result.
 fn finished(text: String) -> CallToolResponse {
     CallToolResult::success(vec![ContentBlock::text(text)]).into()
@@ -209,6 +230,13 @@ impl Fieldtrip {
                 let names: Vec<&str> = endpoint.headers.iter().map(|header| header.name.as_str()).collect();
                 let _ = writeln!(out, "  headers: {}", names.join(", "));
             }
+            if !endpoint.response_headers.is_empty() {
+                let _ = writeln!(
+                    out,
+                    "  response headers shown: {}",
+                    endpoint.response_headers.join(", ")
+                );
+            }
         }
         out
     }
@@ -273,16 +301,20 @@ impl Fieldtrip {
 
     #[tool(
         title = "Execute a GraphQL operation (the user approves)",
-        description = "Send one query or mutation to the endpoint and return the response body as the server wrote \
-                       it, after a line with the HTTP status and the estimated cost. Make it valid with \
+        description = "Send one query or mutation to the endpoint and return the response. Make it valid with \
                        `estimate_cost` first, and use `describe` rather than this tool to explore. The user \
                        approves each request in a prompt that shows the operation exactly as it will be sent, its \
                        variables and its cost, unless their config says otherwise (`list_endpoints` shows who \
-                       approves). Write for that reader: name the operation, pass inputs as variables, and select only the fields you need. \
-                       A response can hold both `data` and `errors`: read both, because one field can fail while \
-                       the rest succeed. For a mutation, select the result fields that confirm what changed, and \
-                       any error fields its payload type has. A response with no `data` is returned as an error. If \
-                       the user declines, nothing was sent: do not send it again, ask what they want instead.",
+                       approves). Write for that reader: name the operation, pass inputs as variables, and select \
+                       only the fields you need. The result starts with what was sent and its estimated cost, then \
+                       a line with the HTTP status, how long the request took, and any response headers the user \
+                       chose to show, such as a request or trace ID to look up in their logs. Then come `errors`, \
+                       in full, then `data`, then any `extensions`, each as the server wrote it. A response can hold \
+                       both `data` and `errors`: read both, because one field can fail while the rest succeed. Each \
+                       error's `path` names the field that failed, and its `extensions` often carry a code. For a \
+                       mutation, select the result fields that confirm what changed, and any error fields its \
+                       payload type has. If the user declines, nothing was sent: do not send it again, ask what \
+                       they want instead.",
         annotations(
             read_only_hint = false,
             destructive_hint = true,
@@ -330,29 +362,47 @@ impl Fieldtrip {
 
         let reply = self.http.post(endpoint, &plan.payload(&arguments.variables)).await?;
         let summary = format!(
-            "Sent {} to `{name}`. HTTP {}. Estimated cost: {}.{unasked}",
+            "Sent {} to `{name}`. Estimated cost: {}.{unasked}\n{}",
             plan.title(),
-            reply.status,
-            plan.cost
-        );
-        let text = capped(
-            format!("{summary}\n{}", reply.body.trim()),
-            "Ask for less: fewer fields, or a smaller page with `first` or `limit`.",
+            plan.cost,
+            reply.metadata()
         );
         if reply.cut_short {
             // Too long to read in full, so it cannot be parsed. The status says whether it is a result.
+            let text = capped(format!("{summary}\n{}", reply.body.trim()), ASK_FOR_LESS);
             return if reply.status < 400 {
                 Ok(finished(text))
             } else {
                 Err(text)
             };
         }
-        let Ok(serde_json::Value::Object(response)) = serde_json::from_str::<serde_json::Value>(&reply.body) else {
+        let Ok(mut parts) = serde_json::from_str::<BTreeMap<String, Box<RawValue>>>(&reply.body) else {
             let excerpt: String = reply.body.chars().take(EXCERPT).collect();
             return Err(format!("{summary}\nThe response was not a GraphQL response: {excerpt}"));
         };
-        let has_data = response.get("data").is_some_and(|data| !data.is_null());
-        if has_data { Ok(finished(text)) } else { Err(text) }
+        if !parts.contains_key("errors") && !parts.contains_key("data") {
+            return Err(capped(
+                format!(
+                    "{summary}\nThe response has neither `data` nor `errors`, so it is not a GraphQL response:\n{}",
+                    reply.body.trim()
+                ),
+                ASK_FOR_LESS,
+            ));
+        }
+
+        // Errors come first and whole, because they say what went wrong. What follows them is cut to fit.
+        let mut head = summary;
+        if let Some(errors) = parts.remove("errors") {
+            let _ = write!(head, "\nerrors: {}", errors.get().trim());
+        }
+        let mut rest = String::new();
+        if let Some(data) = parts.remove("data") {
+            let _ = write!(rest, "\ndata: {}", data.get().trim());
+        }
+        for (key, value) in &parts {
+            let _ = write!(rest, "\n{key}: {}", value.get().trim());
+        }
+        Ok(finished(capped_after(head, &rest, ASK_FOR_LESS)))
     }
 
     #[tool(

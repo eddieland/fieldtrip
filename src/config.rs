@@ -11,6 +11,7 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
+use reqwest::header::HeaderName;
 use serde::Deserialize;
 
 use crate::cli::Args;
@@ -97,6 +98,9 @@ pub(crate) struct Endpoint {
     pub(crate) costs: Arc<CostMap>,
     /// How long a request to this endpoint may take.
     pub(crate) timeout: Duration,
+    /// The response headers `execute` shows, as written in the config. Only the user chooses them, because some
+    /// carry values the calling agent should not see.
+    pub(crate) response_headers: Vec<String>,
     /// Who approves an operation before it is sent.
     pub(crate) approval: Approval,
     /// Queries with an estimated cost at or below this are sent without asking. Mutations always ask.
@@ -159,6 +163,7 @@ struct RawEndpoint {
     assumed_list_size: Option<u64>,
     costs: Option<PathBuf>,
     timeout: Option<u64>,
+    response_headers: Option<Vec<String>>,
 }
 
 /// One `[templates.NAME]` table as written.
@@ -179,6 +184,7 @@ struct RawTemplate {
     assumed_list_size: Option<u64>,
     costs: Option<PathBuf>,
     timeout: Option<u64>,
+    response_headers: Option<Vec<String>>,
 }
 
 /// The settings an endpoint can take from a template. serde cannot flatten them into a table that denies
@@ -190,6 +196,7 @@ struct RawShared {
     assumed_list_size: Option<u64>,
     costs: Option<PathBuf>,
     timeout: Option<u64>,
+    response_headers: Option<Vec<String>>,
 }
 
 /// Moves the shared settings out of a raw endpoint or template.
@@ -201,6 +208,7 @@ macro_rules! shared {
             assumed_list_size: $raw.assumed_list_size,
             costs: $raw.costs,
             timeout: $raw.timeout,
+            response_headers: $raw.response_headers,
         }
     };
 }
@@ -213,6 +221,7 @@ struct Template {
     assumed_list_size: Option<u64>,
     costs: Option<Arc<CostMap>>,
     timeout: Option<Duration>,
+    response_headers: Option<Vec<String>>,
 }
 
 impl Config {
@@ -342,6 +351,7 @@ impl Template {
                 .map(|costs| CostMap::load(&resolve(&costs, base)).map(Arc::new))
                 .transpose()?,
             timeout: timeout(shared.timeout)?,
+            response_headers: response_headers(shared.response_headers)?,
         })
     }
 }
@@ -406,6 +416,9 @@ impl Endpoint {
                 .unwrap_or(DEFAULT_ASSUMED_LIST_SIZE),
             costs,
             timeout: timeout(shared.timeout)?.or(template.timeout).unwrap_or(DEFAULT_TIMEOUT),
+            response_headers: response_headers(shared.response_headers)?
+                .or_else(|| template.response_headers.clone())
+                .unwrap_or_default(),
             approval,
             auto_approve_cost: raw.auto_approve_cost,
             url: raw.url,
@@ -516,6 +529,23 @@ fn assumed_list_size(size: Option<u64>) -> Result<Option<u64>, String> {
         );
     }
     Ok(size)
+}
+
+/// Checks `response_headers`: each must be a header name, and no two may differ only in case.
+fn response_headers(names: Option<Vec<String>>) -> Result<Option<Vec<String>>, String> {
+    let Some(names) = names else { return Ok(None) };
+    let mut seen: Vec<HeaderName> = Vec::with_capacity(names.len());
+    for name in &names {
+        let parsed = HeaderName::from_bytes(name.as_bytes())
+            .map_err(|_error| format!("`response_headers` has `{name}`, which is not a header name"))?;
+        if seen.contains(&parsed) {
+            return Err(format!(
+                "`response_headers` names `{name}` twice, because header names ignore case. Keep one of them."
+            ));
+        }
+        seen.push(parsed);
+    }
+    Ok(Some(names))
 }
 
 /// Checks `timeout`.
