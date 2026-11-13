@@ -114,3 +114,9 @@ cargo test --workspace --all-features
   cost map findings, and each header's plug with whether it resolves, with no value. Fails on a header or schema
   problem, warns on an unmatched rule, and sends nothing to any endpoint.
   Done when: `cargo test check_command`
+- [x] **27. Tool descriptions.** Every tool has a title, a description that says when to use it and what it
+  returns, and a description for each argument. Annotations mark every tool but `execute` as read-only, and
+  `execute` as destructive and not idempotent. The server instructions lay out the workflow in tool order, and the
+  descriptions carry the GraphQL habits where they apply: names from the schema, variables, page sizes, fragments
+  on abstract types, deprecations, and reading `errors` alongside `data`.
+  Done when: `cargo test tool_descriptions`
