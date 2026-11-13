@@ -163,8 +163,8 @@ pub(crate) fn note(summary: &Summary, length: usize, limit: usize) -> String {
     }
     format!(
         "{why}, so this is a summary. `errors` is whole. Each part after it is still valid JSON, cut by structure: \
-         {}, each marked with what was dropped, such as \"…(+412 more items)\". Ask for less: fewer fields, or a \
-         smaller page with `first` or `limit`.]",
+         {}, each marked with what was dropped, such as \"…(+412 more items)\". Ask for less with fewer fields or a \
+         smaller page, or pick one part with `select`.]",
         cuts.join(" and ")
     )
 }

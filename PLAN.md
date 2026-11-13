@@ -148,3 +148,9 @@ cargo test --workspace --all-features
   first items and long strings their first characters, each cut marked with what it dropped, such as
   `"…(+412 more items)"`. A note after it says what was cut.
   Done when: `cargo test response_summary`
+- [x] **33. `select`.** `execute` takes an optional path such as `data.products[*].id`, applied to the response
+  after it arrives: names joined by `.`, `[N]` for one item and `[*]` for every item, which gives a list. The result
+  has `errors` first and in full, then the selection, summarized like any other result when it is too long. A path
+  that misses says what is there. A path that is not valid is an error before anything is sent or asked, and a path
+  changes neither the request nor the prompt.
+  Done when: `cargo test execute_select`

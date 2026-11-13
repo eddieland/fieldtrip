@@ -13,6 +13,7 @@ mod http;
 mod plan;
 mod response;
 mod schema;
+mod select;
 mod server;
 mod suggest;
 

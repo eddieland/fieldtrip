@@ -17,9 +17,9 @@ use crate::approval::{self, Operation, Outstanding, Round};
 use crate::config::{Config, Endpoint, Mutations, show_bytes};
 use crate::http::Client;
 use crate::plan::{Kind, Plan, Variables};
-use crate::response;
 use crate::schema::{Loaded, introspection};
 use crate::suggest::backticked;
+use crate::{response, select};
 
 /// What the server tells a client about itself and how to use it.
 const INSTRUCTIONS: &str = "fieldtrip lets you use GraphQL APIs the user has configured, reading the real schema \
@@ -115,6 +115,16 @@ struct ExecuteArguments {
     )]
     #[serde(default)]
     variables: Variables,
+    /// A path that picks part of the response.
+    #[schemars(
+        description = "Optional. A path that picks part of the response once it arrives, such as \
+                       `data.repository.pullRequests.nodes[*].number`. It starts at the top of the response: \
+                       `data`, `errors` or `extensions`. Names are joined by `.`, and an alias in the operation is \
+                       the name in the response. `[0]` takes one item of a list, and `[*]` takes every item, which \
+                       makes the result a list of every match. `errors` is still shown in full. It changes \
+                       neither what is sent nor what the user approves: to fetch less, change the operation."
+    )]
+    select: Option<String>,
 }
 
 /// Cuts `text` to `limit` characters and says so, with `advice` on how to get a smaller result.
@@ -373,6 +383,7 @@ impl Fieldtrip {
         let endpoint = self.endpoint(name)?;
         // Before the schema is loaded, so a denied mutation causes no request of any kind.
         approval::refuse_denied_mutation(name, endpoint, &arguments.operation)?;
+        let select = arguments.select.as_deref().map(select::Path::parse).transpose()?;
         let schema = self.schema(name, false).await?;
         let plan = Plan::new(&schema, name, endpoint, &arguments.operation, &arguments.variables)?;
         plan.check_variables(&schema, &arguments.variables)?;
@@ -451,11 +462,27 @@ impl Fieldtrip {
 
         // Errors come first and whole, because they say what went wrong. What follows them is cut to fit.
         let mut head = summary;
-        if let Some(errors) = parts.remove("errors") {
-            let _ = write!(head, "\nerrors: {}", errors.get().trim());
-        }
-        let data = parts.remove("data").map(|data| ("data".to_owned(), data));
-        let rest: Vec<(String, Box<RawValue>)> = data.into_iter().chain(parts).collect();
+        let errors = parts.remove("errors");
+        let rest = if let Some(path) = &select {
+            let picked = serde_json::from_str(&reply.body)
+                .map_or_else(|_error| select::Selected::nothing(), |whole| path.select(&whole));
+            let _ = write!(head, "\n{}", picked.line);
+            if let Some(errors) = errors.filter(|_| !path.is_in_errors()) {
+                let _ = write!(head, "\nerrors: {}", errors.get().trim());
+            }
+            picked
+                .value
+                .and_then(|value| serde_json::value::to_raw_value(&value).ok())
+                .map(|value| ("selected".to_owned(), value))
+                .into_iter()
+                .collect()
+        } else {
+            if let Some(errors) = errors {
+                let _ = write!(head, "\nerrors: {}", errors.get().trim());
+            }
+            let data = parts.remove("data").map(|data| ("data".to_owned(), data));
+            data.into_iter().chain(parts).collect::<Vec<_>>()
+        };
         Ok(finished(shown(head, &rest, endpoint.max_output_chars)))
     }
 

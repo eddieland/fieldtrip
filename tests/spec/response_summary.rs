@@ -94,7 +94,7 @@ fn a_large_data_is_summarized_after_whole_errors() {
         &json!({ "cost": 5000 }),
         "small parts are whole"
     );
-    for phrase in ["`max_output_chars`", "valid JSON", "`errors` is whole", "`first`"] {
+    for phrase in ["`max_output_chars`", "valid JSON", "`errors` is whole", "`select`"] {
         assert!(note.contains(phrase), "the note says {phrase:?}: {note}");
     }
     let list = part(&parts, "data")["products"].as_array().expect("the list is kept");
