@@ -190,7 +190,8 @@ impl Launch {
 
     /// Creates the working directory with the fixtures in it, and works out the command line and environment.
     ///
-    /// The config home always points into that directory, so a test never reads the developer's own config.
+    /// The config and cache homes always point into that directory, so a test never reads the developer's own config
+    /// or writes to their cache.
     pub(super) fn prepare(&self) -> (TempDir, Vec<std::ffi::OsString>, Vec<(String, String)>) {
         let dir = tempfile::tempdir().expect("create a temp dir");
         copy_fixtures(dir.path());
@@ -198,7 +199,11 @@ impl Launch {
             std::fs::write(dir.path().join(name), contents).expect("write an extra file");
         }
         let config_home = dir.path().join("config-home");
-        let mut env = vec![("XDG_CONFIG_HOME".to_owned(), config_home.display().to_string())];
+        let cache_home = dir.path().join("cache-home");
+        let mut env = vec![
+            ("XDG_CONFIG_HOME".to_owned(), config_home.display().to_string()),
+            ("XDG_CACHE_HOME".to_owned(), cache_home.display().to_string()),
+        ];
         env.extend(self.env.iter().cloned());
 
         let arguments = match &self.how {

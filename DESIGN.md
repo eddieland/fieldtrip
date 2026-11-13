@@ -27,7 +27,7 @@ in the user's config, out of the agent's sight and out of its control.
 | `search_schema` | `endpoint`, `query` | Ranked matches as one-line signatures |
 | `describe` | `endpoint`, `name` (`Type` or `Type.field`) | That definition as compact SDL |
 | `estimate_cost` | `endpoint`, `operation`, `variables?` | Validation errors, or cost, depth, breakdown, assumptions |
-| `execute` | `endpoint`, `operation`, `variables?`, `select?` | Status, `errors` whole, then the rest or a summary |
+| `execute` | `endpoint`, `operation`, `variables?`, `select?`, `save?` | Status, `errors`, then the rest or a summary |
 
 ## Config shape
 
@@ -202,3 +202,5 @@ Settled. To change one, ask the user, then add a new dated line instead of editi
   the line above that cut what follows `errors`. Parts that fit are as written.
 - 2026-11-13: A summary cuts lists and strings, each marked with what was dropped. `errors` is still never cut.
 - 2026-11-13: `select` is a path that picks part of a response after it arrives. It is not in the request or prompt.
+- 2026-11-13: `save` writes the whole response to a new file in fieldtrip's cache directory. The agent cannot name it.
+- 2026-11-13: A saved response has header values removed, as any response does. Only the user can read the file.

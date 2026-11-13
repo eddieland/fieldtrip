@@ -145,9 +145,37 @@ pub(crate) fn summarize(parts: &Map<String, Value>, budget: usize) -> Option<Sum
     fallback.map(|(_, summary)| summary)
 }
 
+/// How much of a response a result shows: all it holds, or a preview of a response that was saved to a file.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum Room {
+    /// A result holds at most this many characters, the endpoint's `max_output_chars`.
+    Result(usize),
+    /// The response was saved to a file, and the result shows at most this many characters of it.
+    Preview(usize),
+}
+
+impl Room {
+    /// The most characters the result holds.
+    pub(crate) const fn limit(self) -> usize {
+        match self {
+            Self::Result(limit) | Self::Preview(limit) => limit,
+        }
+    }
+}
+
 /// The note that follows a summary: what was cut, and how to get the rest. `length` is how long the result would
-/// have been, and `limit` how long it may be.
-pub(crate) fn note(summary: &Summary, length: usize, limit: usize) -> String {
+/// have been.
+pub(crate) fn note(summary: &Summary, length: usize, room: Room) -> String {
+    let (why, advice) = match room {
+        Room::Result(limit) => (
+            format!("more than the {limit} it holds here (`max_output_chars`)"),
+            "Ask for less with fewer fields or a smaller page, or pick one part with `select`.",
+        ),
+        Room::Preview(limit) => (
+            format!("more than the {limit} shown of a saved response"),
+            "The file has all of it.",
+        ),
+    };
     let mut cuts = Vec::new();
     if let Some(items) = summary.items {
         let noun = if items == 1 { "item" } else { "items" };
@@ -156,15 +184,13 @@ pub(crate) fn note(summary: &Summary, length: usize, limit: usize) -> String {
     if let Some(chars) = summary.chars {
         cuts.push(format!("strings to {chars} characters"));
     }
-    let why =
-        format!("[The result would have {length} characters, more than the {limit} it holds here (`max_output_chars`)");
+    let why = format!("[The result would have {length} characters, {why}");
     if cuts.is_empty() {
         return format!("{why}, so each part is shown without its whitespace. Nothing was dropped.]");
     }
     format!(
         "{why}, so this is a summary. `errors` is whole. Each part after it is still valid JSON, cut by structure: \
-         {}, each marked with what was dropped, such as \"…(+412 more items)\". Ask for less with fewer fields or a \
-         smaller page, or pick one part with `select`.]",
+         {}, each marked with what was dropped, such as \"…(+412 more items)\". {advice}]",
         cuts.join(" and ")
     )
 }

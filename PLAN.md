@@ -154,3 +154,9 @@ cargo test --workspace --all-features
   that misses says what is there. A path that is not valid is an error before anything is sent or asked, and a path
   changes neither the request nor the prompt.
   Done when: `cargo test execute_select`
+- [x] **34. `save`.** `execute` takes an optional `save` flag that writes the whole response, as the server wrote it
+  and without secrets, to a new file in `fieldtrip/responses` under the user's cache directory. The result gives
+  the path, the size and a preview of at most 4,000 characters, summarized like any other result. A file is never
+  overwritten, and on Unix only the user can read it. Nothing is saved when nothing was sent or the body was cut
+  off at `max_response_bytes`.
+  Done when: `cargo test execute_save`

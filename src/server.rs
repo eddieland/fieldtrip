@@ -19,7 +19,7 @@ use crate::http::Client;
 use crate::plan::{Kind, Plan, Variables};
 use crate::schema::{Loaded, introspection};
 use crate::suggest::backticked;
-use crate::{response, select};
+use crate::{response, saved, select};
 
 /// What the server tells a client about itself and how to use it.
 const INSTRUCTIONS: &str = "fieldtrip lets you use GraphQL APIs the user has configured, reading the real schema \
@@ -125,6 +125,15 @@ struct ExecuteArguments {
                        neither what is sent nor what the user approves: to fetch less, change the operation."
     )]
     select: Option<String>,
+    /// Whether to save the whole response to a file.
+    #[schemars(
+        description = "Optional. Set to `true` to write the whole response to a new file that fieldtrip names, and \
+                       get back its path and size with a short preview instead of the response. Use it when the \
+                       response may be large and you can read files, or need all of it but not in your context. It \
+                       changes neither what is sent nor what the user approves."
+    )]
+    #[serde(default)]
+    save: bool,
 }
 
 /// Cuts `text` to `limit` characters and says so, with `advice` on how to get a smaller result.
@@ -158,12 +167,16 @@ fn capped_after(head: String, rest: &str, limit: usize, advice: &str) -> String 
     kept
 }
 
+/// The most characters shown of a response that was saved to a file.
+const SAVED_PREVIEW: usize = 4_000;
+
 /// Room kept in a result for the note that follows a summary.
 const NOTE_ROOM: usize = 500;
 
 /// The result of `execute`: `head`, which ends with the errors, then each of the `rest` of the response's parts as
-/// the server wrote it when they fit in `limit` characters, or a summary of them that is still valid JSON when not.
-fn shown(head: String, rest: &[(String, Box<RawValue>)], limit: usize) -> String {
+/// the server wrote it when they fit in the `room`, or a summary of them that is still valid JSON when not.
+fn shown(head: String, rest: &[(String, Box<RawValue>)], room: response::Room) -> String {
+    let limit = room.limit();
     let mut written = String::new();
     for (name, value) in rest {
         let _ = write!(written, "\n{name}: {}", value.get().trim());
@@ -179,7 +192,7 @@ fn shown(head: String, rest: &[(String, Box<RawValue>)], limit: usize) -> String
     let space = limit.saturating_sub(head.chars().count() + NOTE_ROOM);
     match response::summarize(&parts, space) {
         Some(summary) => {
-            let note = response::note(&summary, length, limit);
+            let note = response::note(&summary, length, room);
             format!("{head}{}\n{note}", summary.lines)
         }
         None => capped_after(head, &written, limit, ASK_FOR_LESS),
@@ -359,7 +372,9 @@ impl Fieldtrip {
                        chose to show, such as a request or trace ID to look up in their logs. Then come `errors`, \
                        in full, then `data`, then any `extensions`, each as the server wrote it. When those after \
                        `errors` are too long for one result, they come back as a summary that is still valid JSON, \
-                       with long lists cut to their first items, each cut marked with what it dropped. A response \
+                       with long lists cut to their first items, each cut marked with what it dropped. To keep a \
+                       large response out of your context, pass `select` to pick the part you need, or `save` to \
+                       write all of it to a file and get its path and a preview. A response \
                        can hold both `data` and `errors`: read both, because one field can fail while the rest \
                        succeed. Each error's `path` names the field that failed, and its `extensions` often carry a \
                        code. For a mutation, select the result fields that confirm what changed, and any error \
@@ -430,12 +445,17 @@ impl Fieldtrip {
         if reply.cut_short {
             // Too long to read in full, so it cannot be parsed. The status says whether it is a result.
             let excerpt: String = reply.body.chars().take(EXCERPT).collect();
+            let unsaved = if arguments.save {
+                " Nothing was saved, because only part of the body was read."
+            } else {
+                ""
+            };
             let text = format!(
                 "{summary}\n[The response is larger than {}, the `max_response_bytes` limit for this endpoint, so \
                  fieldtrip read only that much. A cut-off body is not valid JSON, so `data` and `errors` are both \
                  lost. The operation did reach the server, so a mutation has run. Ask for less: fewer fields, or a \
                  smaller page with `first` or `limit`, and page through the rest. The user can raise \
-                 `max_response_bytes`.]\n\
+                 `max_response_bytes`.{unsaved}]\n\
                  It began: {excerpt}",
                 show_bytes(endpoint.max_response_bytes)
             );
@@ -445,6 +465,24 @@ impl Fieldtrip {
                 Err(text)
             };
         }
+        let (summary, room) = if arguments.save {
+            match saved::save(name, &reply.body) {
+                Ok(path) => (
+                    format!(
+                        "{summary}\nSaved the whole response, {} bytes, to {}",
+                        reply.body.len(),
+                        path.display()
+                    ),
+                    response::Room::Preview(endpoint.max_output_chars.min(SAVED_PREVIEW)),
+                ),
+                Err(error) => (
+                    format!("{summary}\nThe response was not saved: {error}."),
+                    response::Room::Result(endpoint.max_output_chars),
+                ),
+            }
+        } else {
+            (summary, response::Room::Result(endpoint.max_output_chars))
+        };
         let Ok(mut parts) = serde_json::from_str::<BTreeMap<String, Box<RawValue>>>(&reply.body) else {
             let excerpt: String = reply.body.chars().take(EXCERPT).collect();
             return Err(format!("{summary}\nThe response was not a GraphQL response: {excerpt}"));
@@ -483,7 +521,7 @@ impl Fieldtrip {
             let data = parts.remove("data").map(|data| ("data".to_owned(), data));
             data.into_iter().chain(parts).collect::<Vec<_>>()
         };
-        Ok(finished(shown(head, &rest, endpoint.max_output_chars)))
+        Ok(finished(shown(head, &rest, room)))
     }
 
     #[tool(
