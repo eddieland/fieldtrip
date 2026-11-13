@@ -94,6 +94,7 @@ list, with no shell.
 | `auto_approve_cost` | none | Queries estimated at or below this run without a prompt. Mutations always prompt |
 | `assumed_list_size` | `10` | Items assumed for a list that nothing bounds |
 | `timeout` | `30` | Seconds a request may take |
+| `response_headers` | none | Response headers `execute` shows, such as `["x-request-id", "traceparent"]` |
 | `costs` | none | A cost map, below |
 
 ### Several instances of one service
@@ -119,8 +120,8 @@ description = "Production. Real customer data."
 schema      = "schemas/acme-prod.graphql"
 ```
 
-An endpoint takes `schema`, `headers`, `costs`, `assumed_list_size` and `timeout` from its template unless it sets
-them itself. Headers merge by name, and the endpoint's win. `approval`, `auto_approve_cost`, `url` and `description`
+An endpoint takes `schema`, `headers`, `costs`, `assumed_list_size`, `timeout` and `response_headers` from its
+template unless it sets them itself. Headers merge by name, and the endpoint's win. `approval`, `auto_approve_cost`, `url` and `description`
 are never taken from a template, so an endpoint that forgets them asks before every operation. A shared cost map is
 checked against each endpoint's own schema, so a rule for a field that only dev has shows up in prod's
 `introspect`.

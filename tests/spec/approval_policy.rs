@@ -48,8 +48,8 @@ fn a_query_within_the_threshold_runs_with_no_prompt() {
     assert_eq!(mock.requests().len(), 2, "both queries are sent");
     assert!(
         cheap.text.starts_with(
-            "Sent query to `store`. HTTP 200. Estimated cost: 1. The user was not asked: the cost is within \
-             `auto_approve_cost` (5).\n"
+            "Sent query to `store`. Estimated cost: 1. The user was not asked: the cost is within \
+             `auto_approve_cost` (5).\nHTTP 200 · "
         ),
         "the result says why nobody was asked: {}",
         cheap.text
@@ -126,8 +126,8 @@ fn approval_left_to_the_client_runs_with_no_prompt() {
     assert_eq!(mock.requests().len(), 1, "the mutation is sent");
     assert!(
         reply.text.starts_with(
-            "Sent mutation to `store`. HTTP 200. Estimated cost: 10. The user was not asked: approval is left to \
-             the MCP client for this endpoint.\n"
+            "Sent mutation to `store`. Estimated cost: 10. The user was not asked: approval is left to the MCP \
+             client for this endpoint.\nHTTP 200 · "
         ),
         "the result says why nobody was asked: {}",
         reply.text

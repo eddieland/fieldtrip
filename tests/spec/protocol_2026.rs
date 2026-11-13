@@ -107,7 +107,7 @@ fn an_accepted_approval_sends_the_operation() {
     assert!(
         reply
             .text
-            .starts_with("Sent mutation to `store`. HTTP 200. Estimated cost: 10.\n"),
+            .starts_with("Sent mutation to `store`. Estimated cost: 10.\nHTTP 200 · "),
         "{}",
         reply.text
     );

@@ -1,8 +1,11 @@
 //! The HTTP client that talks to GraphQL endpoints.
 
 use std::error::Error as _;
+use std::fmt::Write as _;
+use std::time::{Duration, Instant};
 
 use crate::config::Endpoint;
+use crate::headers::Secret;
 
 /// The `User-Agent` sent with every request.
 const USER_AGENT: &str = concat!(env!("CARGO_PKG_NAME"), "/", env!("CARGO_PKG_VERSION"));
@@ -28,6 +31,26 @@ pub(crate) struct Reply {
     pub(crate) body: String,
     /// Whether the body was longer than what was read.
     pub(crate) cut_short: bool,
+    /// How long the request took, from sending it to reading the last of the body.
+    pub(crate) elapsed: Duration,
+    /// The endpoint's configured `response_headers` that came back, by their configured name, in config order.
+    /// Values have had secrets removed.
+    pub(crate) headers: Vec<(String, String)>,
+}
+
+/// The most characters of one response header's value that are shown.
+const MAX_HEADER_VALUE: usize = 200;
+
+impl Reply {
+    /// One line with the status, how long the request took, and the chosen response headers:
+    /// `HTTP 200 · 812 ms · x-request-id abc123`.
+    pub(crate) fn metadata(&self) -> String {
+        let mut line = format!("HTTP {} · {} ms", self.status, self.elapsed.as_millis());
+        for (name, value) in &self.headers {
+            let _ = write!(line, " · {name} {value}");
+        }
+        line
+    }
 }
 
 impl Client {
@@ -87,6 +110,7 @@ impl Client {
             request = request.header(header.name, header.value);
             secrets.extend(header.secret);
         }
+        let started = Instant::now();
         let mut response = request
             .body(payload.to_string())
             .timeout(endpoint.timeout)
@@ -94,11 +118,12 @@ impl Client {
             .await
             .map_err(|error| {
                 if error.is_timeout() {
-                    timed_out(endpoint)
+                    timed_out(endpoint, started)
                 } else {
                     format!(
-                        "The request to {} failed: {}",
+                        "The request to {} failed after {} ms: {}",
                         endpoint.shown_url,
+                        started.elapsed().as_millis(),
                         explain(&error.without_url())
                     )
                 }
@@ -123,11 +148,12 @@ impl Client {
         loop {
             let chunk = response.chunk().await.map_err(|error| {
                 if error.is_timeout() {
-                    timed_out(endpoint)
+                    timed_out(endpoint, started)
                 } else {
                     format!(
-                        "The response from {} could not be read: {}",
+                        "The response from {} could not be read after {} ms: {}",
                         endpoint.shown_url,
+                        started.elapsed().as_millis(),
                         explain(&error.without_url())
                     )
                 }
@@ -141,26 +167,68 @@ impl Client {
             }
             bytes.extend_from_slice(&chunk);
         }
-        let body = String::from_utf8_lossy(&bytes).into_owned();
+        let elapsed = started.elapsed();
+        let headers = chosen_headers(endpoint, response.headers(), &secrets);
         // A server can echo a credential back, in an error message for instance. It must not reach the caller.
-        let body = secrets
-            .iter()
-            .fold(body, |body, secret| secret.scrub(&body).unwrap_or(body));
+        let body = scrubbed(String::from_utf8_lossy(&bytes).into_owned(), &secrets);
         Ok(Reply {
             status,
             body,
             cut_short,
+            elapsed,
+            headers,
         })
     }
 }
 
+/// `text` with every secret in `secrets` replaced.
+fn scrubbed(text: String, secrets: &[Secret]) -> String {
+    secrets
+        .iter()
+        .fold(text, |text, secret| secret.scrub(&text).unwrap_or(text))
+}
+
+/// The response headers the user chose to show for `endpoint`, with secrets removed and long values cut. A header
+/// that came more than once is shown once, its values joined with `, `.
+fn chosen_headers(
+    endpoint: &Endpoint,
+    received: &reqwest::header::HeaderMap,
+    secrets: &[Secret],
+) -> Vec<(String, String)> {
+    endpoint
+        .response_headers
+        .iter()
+        .filter_map(|name| {
+            let values: Vec<String> = received
+                .get_all(name.as_str())
+                .iter()
+                .map(|value| String::from_utf8_lossy(value.as_bytes()).into_owned())
+                .collect();
+            if values.is_empty() {
+                return None;
+            }
+            let value = scrubbed(values.join(", "), secrets);
+            let value = if value.chars().count() > MAX_HEADER_VALUE {
+                let mut cut: String = value.chars().take(MAX_HEADER_VALUE).collect();
+                cut.push('…');
+                cut
+            } else {
+                value
+            };
+            Some((name.clone(), value))
+        })
+        .collect()
+}
+
 /// The error for an endpoint that took longer than its `timeout`.
-fn timed_out(endpoint: &Endpoint) -> String {
+fn timed_out(endpoint: &Endpoint, started: Instant) -> String {
     format!(
-        "{} did not answer within {} seconds, the `timeout` for this endpoint. Nothing is known about whether the \
-         operation ran. For a query, ask for less. For a mutation, check its effect before sending it again.",
+        "{} did not answer within {} seconds, the `timeout` for this endpoint. fieldtrip waited {} ms. Nothing is \
+         known about whether the operation ran. For a query, ask for less. For a mutation, check its effect before \
+         sending it again.",
         endpoint.shown_url,
-        endpoint.timeout.as_secs()
+        endpoint.timeout.as_secs(),
+        started.elapsed().as_millis()
     )
 }
 

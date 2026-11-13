@@ -82,9 +82,14 @@ fn a_large_response_is_cut_off_with_a_note() {
         "a long response with data is still a result: {}",
         reply.text.len()
     );
+    let mut lines = reply.text.lines();
     assert!(
-        reply.text.starts_with("Sent query to `store`. HTTP 200."),
+        lines.next().unwrap_or_default().starts_with("Sent query to `store`."),
         "the summary line comes first"
+    );
+    assert!(
+        lines.next().unwrap_or_default().starts_with("HTTP 200 · "),
+        "the status line comes next"
     );
     let note = reply.text.lines().last().unwrap_or_default();
     assert!(

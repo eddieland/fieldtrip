@@ -120,3 +120,9 @@ cargo test --workspace --all-features
   descriptions carry the GraphQL habits where they apply: names from the schema, variables, page sizes, fragments
   on abstract types, deprecations, and reading `errors` alongside `data`.
   Done when: `cargo test tool_descriptions`
+- [x] **28. Response metadata.** `execute` shows the HTTP status, the time taken and the response headers named by
+  `response_headers`, then `errors` in full, then `data`. A response with only `errors` is a result, not a tool
+  error. A header that is not configured is not shown, and one that echoes a secret is redacted. An endpoint takes
+  `response_headers` from its template unless it sets them. When the data is cut to fit, the errors are not. A
+  connection error or a timeout says how long fieldtrip waited.
+  Done when: `cargo test response_metadata`
