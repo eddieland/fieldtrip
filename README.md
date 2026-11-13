@@ -5,7 +5,8 @@ approval.
 
 > **Status: every slice in [PLAN.md](PLAN.md) is implemented and passes its tests.** Those tests drive the real
 > binary, but against a mock endpoint and test clients. It has not yet been used from a real MCP client or against
-> a real GraphQL API, and there is no release.
+> a real GraphQL API. Releases are built by pushing a `v*` tag; until the first one, the install scripts below have
+> nothing to download, so build from source.
 
 ## What it does
 
@@ -25,10 +26,28 @@ can't point them at a different host.
 
 ## Setup
 
-Install the binary:
+Install the binary. On Linux (x86_64, aarch64) and macOS (Intel, Apple silicon):
 
 ```sh
-cargo install --git https://github.com/eddieland/fieldtrip
+curl -fsSL https://github.com/eddieland/fieldtrip/releases/latest/download/install.sh | sh
+```
+
+On Windows (x64, or Arm under emulation), in PowerShell:
+
+```powershell
+irm https://github.com/eddieland/fieldtrip/releases/latest/download/install.ps1 | iex
+```
+
+The scripts download the archive for your platform from the latest GitHub release, check it against the release's
+`SHA256SUMS`, and install `fieldtrip` to `~/.local/bin` (on Windows, `%LOCALAPPDATA%\fieldtrip\bin`, which is added
+to your user `PATH`). Set `FIELDTRIP_VERSION=0.1.0` to pin a version or `FIELDTRIP_INSTALL_DIR` to install
+elsewhere. Linux binaries are statically linked, so they run on any distribution. Each release asset carries a
+build provenance attestation, which you can check with `gh attestation verify <file> --repo eddieland/fieldtrip`.
+
+To build from source instead:
+
+```sh
+cargo install --locked --git https://github.com/eddieland/fieldtrip
 ```
 
 Register it with your MCP client as a stdio server:
@@ -129,6 +148,13 @@ cargo test --workspace --all-features
 Every public item needs a doc comment; functions returning `Result` need an `# Errors` section and functions that
 can panic need a `# Panics` section. To silence a lint locally, use `#[expect(lint, reason = "...")]` rather than
 `#[allow]`.
+
+### Releasing
+
+Bump `version` in `Cargo.toml`, merge, then push a matching tag (`git tag v0.1.0 && git push origin v0.1.0`). The
+release workflow in `.github/workflows/release.yml` builds every platform, and publishes the GitHub release with the
+archives, `SHA256SUMS` and the install scripts from `scripts/` only once all of them succeed. A tag with a suffix,
+such as `v0.2.0-rc.1`, is published as a prerelease.
 
 ## License
 

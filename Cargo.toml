@@ -138,6 +138,9 @@ rmcp = { version = "3.10.0", features = ["client", "transport-child-process"] }
 tempfile = "3.27.0"
 tokio = { version = "1.54.1", features = ["macros", "rt-multi-thread", "process"] }
 
+[profile.release]
+strip = true # Release binaries ship without symbols, which takes about a quarter off their size.
+
 [[test]]
 name = "spec"
 path = "tests/spec/main.rs"
