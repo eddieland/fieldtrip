@@ -133,3 +133,35 @@ cargo test --workspace --all-features
   `mutations: denied`. An endpoint that sets `"prompt"` under a template that denies, or any other value, stops the
   server at startup.
   Done when: `cargo test mutations_denied`
+- [x] **30. Large schemas.** Introspection reads up to `max_schema_bytes`, 32 MiB by default, set on an endpoint or
+  a template, apart from what `execute` reads. A schema over 1 MiB loads and `introspect` gives the same counts as
+  the SDL file. One over the limit is an error that names the limit, `max_schema_bytes` and `schema`, never
+  introspection being turned off, and the fallback query is not sent. `fieldtrip check` shows the limit.
+  Done when: `cargo test large_schema`
+- [x] **31. Response limits.** `execute` reads up to `max_response_bytes`, 8 MiB by default, and a tool result about
+  an endpoint carries up to `max_output_chars`, 40,000 by default. Both are set on an endpoint or a template, and
+  `fieldtrip check` shows them. A body over the read limit is reported with the limit's name and what was lost. A
+  limit of zero, or under 1,000 characters, stops the server at startup.
+  Done when: `cargo test response_limits`
+- [x] **32. Response summaries.** When the parts of a response after `errors` are too long for `max_output_chars`,
+  they come back as a summary in which each part is still valid JSON. `errors` stays whole. Long lists keep their
+  first items and long strings their first characters, each cut marked with what it dropped, such as
+  `"…(+412 more items)"`. A note after it says what was cut.
+  Done when: `cargo test response_summary`
+- [x] **33. `select`.** `execute` takes an optional path such as `data.products[*].id`, applied to the response
+  after it arrives: names joined by `.`, `[N]` for one item and `[*]` for every item, which gives a list. The result
+  has `errors` first and in full, then the selection, summarized like any other result when it is too long. A path
+  that misses says what is there. A path that is not valid is an error before anything is sent or asked, and a path
+  changes neither the request nor the prompt.
+  Done when: `cargo test execute_select`
+- [x] **34. `save`.** `execute` takes an optional `save` flag that writes the whole response, as the server wrote it
+  and without secrets, to a new file in `fieldtrip/responses` under the user's cache directory. The result gives
+  the path, the size and a preview of at most 4,000 characters, summarized like any other result. A file is never
+  overwritten, and on Unix only the user can read it. Nothing is saved when nothing was sent or the body was cut
+  off at `max_response_bytes`.
+  Done when: `cargo test execute_save`
+- [x] **35. Pagination hints.** When a connection in `data` has `pageInfo.hasNextPage: true`, the result says so
+  right after the status line, with the connection's path and `endCursor`, and says to page with `after` rather than
+  raise `first`. A connection inside a list is counted across its items. At most five are named. The hints come with
+  a summary and with a selection too.
+  Done when: `cargo test pagination_hints`

@@ -7,7 +7,7 @@ use std::fmt::Write as _;
 
 use serde::Deserialize;
 
-use crate::config::Endpoint;
+use crate::config::{Endpoint, show_bytes};
 use crate::http::Client;
 
 /// The parts every introspection query shares: the type reference fragment, deep enough for any real schema.
@@ -61,7 +61,8 @@ pub(crate) async fn fetch(http: &Client, endpoint: &Endpoint) -> Result<String, 
     to_sdl(&schema)
 }
 
-/// Sends one introspection query. The outer error is a transport failure. The inner one is the server's refusal.
+/// Sends one introspection query. The outer error is final: the request failed, the credentials were refused, or the
+/// answer is too long to read. The inner one is the server's refusal, which the older query may avoid.
 async fn attempt(
     http: &Client,
     endpoint: &Endpoint,
@@ -71,7 +72,18 @@ async fn attempt(
         "query": format!("{query} {TYPE_REF}"),
         "operationName": "IntrospectionQuery",
     });
-    let reply = http.post(endpoint, &payload).await?;
+    let reply = http.post(endpoint, &payload, endpoint.max_schema_bytes).await?;
+    if reply.cut_short {
+        // The server did answer. Its answer is only too long, and the fallback query would be no shorter.
+        return Err(format!(
+            "{} answered the introspection query with HTTP {} and a schema larger than {}, the `max_schema_bytes` \
+             limit for this endpoint, so fieldtrip stopped reading it. Ask the user to raise `max_schema_bytes` for \
+             this endpoint in the fieldtrip config, or to export the schema to an SDL file and set `schema`.",
+            endpoint.shown_url,
+            reply.status,
+            show_bytes(endpoint.max_schema_bytes)
+        ));
+    }
     if matches!(reply.status, 401 | 403) {
         return Err(format!(
             "{} answered HTTP {}: it did not accept the credentials. The user has to check the headers configured \

@@ -14,12 +14,12 @@ use serde_json::value::RawValue;
 use tokio::sync::Mutex;
 
 use crate::approval::{self, Operation, Outstanding, Round};
-use crate::config::{Config, Endpoint, Mutations};
-
+use crate::config::{Config, Endpoint, Mutations, show_bytes};
 use crate::http::Client;
 use crate::plan::{Kind, Plan, Variables};
 use crate::schema::{Loaded, introspection};
 use crate::suggest::backticked;
+use crate::{response, saved, select};
 
 /// What the server tells a client about itself and how to use it.
 const INSTRUCTIONS: &str = "fieldtrip lets you use GraphQL APIs the user has configured, reading the real schema \
@@ -115,40 +115,88 @@ struct ExecuteArguments {
     )]
     #[serde(default)]
     variables: Variables,
+    /// A path that picks part of the response.
+    #[schemars(
+        description = "Optional. A path that picks part of the response once it arrives, such as \
+                       `data.repository.pullRequests.nodes[*].number`. It starts at the top of the response: \
+                       `data`, `errors` or `extensions`. Names are joined by `.`, and an alias in the operation is \
+                       the name in the response. `[0]` takes one item of a list, and `[*]` takes every item, which \
+                       makes the result a list of every match. `errors` is still shown in full. It changes \
+                       neither what is sent nor what the user approves: to fetch less, change the operation."
+    )]
+    select: Option<String>,
+    /// Whether to save the whole response to a file.
+    #[schemars(
+        description = "Optional. Set to `true` to write the whole response to a new file that fieldtrip names, and \
+                       get back its path and size with a short preview instead of the response. Use it when the \
+                       response may be large and you can read files, or need all of it but not in your context. It \
+                       changes neither what is sent nor what the user approves."
+    )]
+    #[serde(default)]
+    save: bool,
 }
 
-/// The most characters a tool result carries. Schemas and responses can be far larger than a caller can use.
-const MAX_OUTPUT: usize = 40_000;
-
-/// Cuts `text` to [`MAX_OUTPUT`] characters and says so, with `advice` on how to get a smaller result.
-fn capped(text: String, advice: &str) -> String {
+/// Cuts `text` to `limit` characters and says so, with `advice` on how to get a smaller result.
+fn capped(text: String, limit: usize, advice: &str) -> String {
     let length = text.chars().count();
-    if length <= MAX_OUTPUT {
+    if length <= limit {
         return text;
     }
-    let mut kept: String = text.chars().take(MAX_OUTPUT).collect();
+    let mut kept: String = text.chars().take(limit).collect();
     let _ = write!(
         kept,
-        "\n[fieldtrip cut this off at {MAX_OUTPUT} characters. The full result had at least {length}. {advice}]"
+        "\n[fieldtrip cut this off at {limit} characters. The full result had at least {length}. {advice}]"
     );
     kept
 }
 
 /// Like [`capped`], but `head` is always kept whole, and only `rest`, which follows it, is cut.
-fn capped_after(head: String, rest: &str, advice: &str) -> String {
+fn capped_after(head: String, rest: &str, limit: usize, advice: &str) -> String {
     let head_length = head.chars().count();
     let length = head_length + rest.chars().count();
-    if length <= MAX_OUTPUT {
+    if length <= limit {
         return head + rest;
     }
     let mut kept = head;
-    kept.extend(rest.chars().take(MAX_OUTPUT.saturating_sub(head_length)));
+    kept.extend(rest.chars().take(limit.saturating_sub(head_length)));
     let _ = write!(
         kept,
-        "\n[fieldtrip cut this off at {MAX_OUTPUT} characters. The full result had at least {length}. Errors are \
-         never cut. {advice}]"
+        "\n[fieldtrip cut this off at {limit} characters. The full result had at least {length}. Errors are never \
+         cut. {advice}]"
     );
     kept
+}
+
+/// The most characters shown of a response that was saved to a file.
+const SAVED_PREVIEW: usize = 4_000;
+
+/// Room kept in a result for the note that follows a summary.
+const NOTE_ROOM: usize = 500;
+
+/// The result of `execute`: `head`, which ends with the errors, then each of the `rest` of the response's parts as
+/// the server wrote it when they fit in the `room`, or a summary of them that is still valid JSON when not.
+fn shown(head: String, rest: &[(String, Box<RawValue>)], room: response::Room) -> String {
+    let limit = room.limit();
+    let mut written = String::new();
+    for (name, value) in rest {
+        let _ = write!(written, "\n{name}: {}", value.get().trim());
+    }
+    let length = head.chars().count() + written.chars().count();
+    if length <= limit {
+        return head + &written;
+    }
+    let parts: serde_json::Map<String, serde_json::Value> = rest
+        .iter()
+        .filter_map(|(name, value)| Some((name.clone(), serde_json::from_str(value.get()).ok()?)))
+        .collect();
+    let space = limit.saturating_sub(head.chars().count() + NOTE_ROOM);
+    match response::summarize(&parts, space) {
+        Some(summary) => {
+            let note = response::note(&summary, length, room);
+            format!("{head}{}\n{note}", summary.lines)
+        }
+        None => capped_after(head, &written, limit, ASK_FOR_LESS),
+    }
 }
 
 /// How `execute` says to get a smaller result.
@@ -258,10 +306,12 @@ impl Fieldtrip {
         annotations(read_only_hint = true, open_world_hint = true)
     )]
     async fn describe(&self, Parameters(arguments): Parameters<DescribeArguments>) -> ToolResult {
+        let endpoint = self.endpoint(&arguments.endpoint)?;
         let schema = self.schema(&arguments.endpoint, false).await?;
         let definition = schema.describe(&arguments.name)?;
         Ok(capped(
             definition,
+            endpoint.max_output_chars,
             "Describe one field at a time, as `Type.field`, or use `search_schema`.",
         ))
     }
@@ -320,12 +370,18 @@ impl Fieldtrip {
                        only the fields you need. The result starts with what was sent and its estimated cost, then \
                        a line with the HTTP status, how long the request took, and any response headers the user \
                        chose to show, such as a request or trace ID to look up in their logs. Then come `errors`, \
-                       in full, then `data`, then any `extensions`, each as the server wrote it. A response can hold \
-                       both `data` and `errors`: read both, because one field can fail while the rest succeed. Each \
-                       error's `path` names the field that failed, and its `extensions` often carry a code. For a \
-                       mutation, select the result fields that confirm what changed, and any error fields its \
-                       payload type has. If the user declines, nothing was sent: do not send it again, ask what \
-                       they want instead.",
+                       in full, then `data`, then any `extensions`, each as the server wrote it. When those after \
+                       `errors` are too long for one result, they come back as a summary that is still valid JSON, \
+                       with long lists cut to their first items, each cut marked with what it dropped. To keep a \
+                       large response out of your context, pass `select` to pick the part you need, or `save` to \
+                       write all of it to a file and get its path and a preview. A connection with \
+                       `hasNextPage: true` is pointed out with its cursor: page through it with `after` rather than \
+                       raising `first`. A response \
+                       can hold both `data` and `errors`: read both, because one field can fail while the rest \
+                       succeed. Each error's `path` names the field that failed, and its `extensions` often carry a \
+                       code. For a mutation, select the result fields that confirm what changed, and any error \
+                       fields its payload type has. If the user declines, nothing was sent: do not send it again, \
+                       ask what they want instead.",
         annotations(
             read_only_hint = false,
             destructive_hint = true,
@@ -344,6 +400,7 @@ impl Fieldtrip {
         let endpoint = self.endpoint(name)?;
         // Before the schema is loaded, so a denied mutation causes no request of any kind.
         approval::refuse_denied_mutation(name, endpoint, &arguments.operation)?;
+        let select = arguments.select.as_deref().map(select::Path::parse).transpose()?;
         let schema = self.schema(name, false).await?;
         let plan = Plan::new(&schema, name, endpoint, &arguments.operation, &arguments.variables)?;
         plan.check_variables(&schema, &arguments.variables)?;
@@ -373,7 +430,14 @@ impl Fieldtrip {
             String::new()
         };
 
-        let reply = self.http.post(endpoint, &plan.payload(&arguments.variables)).await?;
+        let reply = self
+            .http
+            .post(
+                endpoint,
+                &plan.payload(&arguments.variables),
+                endpoint.max_response_bytes,
+            )
+            .await?;
         let summary = format!(
             "Sent {} to `{name}`. Estimated cost: {}.{unasked}\n{}",
             plan.title(),
@@ -382,13 +446,45 @@ impl Fieldtrip {
         );
         if reply.cut_short {
             // Too long to read in full, so it cannot be parsed. The status says whether it is a result.
-            let text = capped(format!("{summary}\n{}", reply.body.trim()), ASK_FOR_LESS);
+            let excerpt: String = reply.body.chars().take(EXCERPT).collect();
+            let unsaved = if arguments.save {
+                " Nothing was saved, because only part of the body was read."
+            } else {
+                ""
+            };
+            let text = format!(
+                "{summary}\n[The response is larger than {}, the `max_response_bytes` limit for this endpoint, so \
+                 fieldtrip read only that much. A cut-off body is not valid JSON, so `data` and `errors` are both \
+                 lost. The operation did reach the server, so a mutation has run. Ask for less: fewer fields, or a \
+                 smaller page with `first` or `limit`, and page through the rest. The user can raise \
+                 `max_response_bytes`.{unsaved}]\n\
+                 It began: {excerpt}",
+                show_bytes(endpoint.max_response_bytes)
+            );
             return if reply.status < 400 {
                 Ok(finished(text))
             } else {
                 Err(text)
             };
         }
+        let (summary, room) = if arguments.save {
+            match saved::save(name, &reply.body) {
+                Ok(path) => (
+                    format!(
+                        "{summary}\nSaved the whole response, {} bytes, to {}",
+                        reply.body.len(),
+                        path.display()
+                    ),
+                    response::Room::Preview(endpoint.max_output_chars.min(SAVED_PREVIEW)),
+                ),
+                Err(error) => (
+                    format!("{summary}\nThe response was not saved: {error}."),
+                    response::Room::Result(endpoint.max_output_chars),
+                ),
+            }
+        } else {
+            (summary, response::Room::Result(endpoint.max_output_chars))
+        };
         let Ok(mut parts) = serde_json::from_str::<BTreeMap<String, Box<RawValue>>>(&reply.body) else {
             let excerpt: String = reply.body.chars().take(EXCERPT).collect();
             return Err(format!("{summary}\nThe response was not a GraphQL response: {excerpt}"));
@@ -399,23 +495,39 @@ impl Fieldtrip {
                     "{summary}\nThe response has neither `data` nor `errors`, so it is not a GraphQL response:\n{}",
                     reply.body.trim()
                 ),
+                endpoint.max_output_chars,
                 ASK_FOR_LESS,
             ));
         }
 
         // Errors come first and whole, because they say what went wrong. What follows them is cut to fit.
         let mut head = summary;
-        if let Some(errors) = parts.remove("errors") {
-            let _ = write!(head, "\nerrors: {}", errors.get().trim());
+        let data = parts.get("data").and_then(|data| serde_json::from_str(data.get()).ok());
+        for hint in data.as_ref().map_or_else(Vec::new, response::page_hints) {
+            let _ = write!(head, "\n{hint}");
         }
-        let mut rest = String::new();
-        if let Some(data) = parts.remove("data") {
-            let _ = write!(rest, "\ndata: {}", data.get().trim());
-        }
-        for (key, value) in &parts {
-            let _ = write!(rest, "\n{key}: {}", value.get().trim());
-        }
-        Ok(finished(capped_after(head, &rest, ASK_FOR_LESS)))
+        let errors = parts.remove("errors");
+        let rest = if let Some(path) = &select {
+            let picked = serde_json::from_str(&reply.body)
+                .map_or_else(|_error| select::Selected::nothing(), |whole| path.select(&whole));
+            let _ = write!(head, "\n{}", picked.line);
+            if let Some(errors) = errors.filter(|_| !path.is_in_errors()) {
+                let _ = write!(head, "\nerrors: {}", errors.get().trim());
+            }
+            picked
+                .value
+                .and_then(|value| serde_json::value::to_raw_value(&value).ok())
+                .map(|value| ("selected".to_owned(), value))
+                .into_iter()
+                .collect()
+        } else {
+            if let Some(errors) = errors {
+                let _ = write!(head, "\nerrors: {}", errors.get().trim());
+            }
+            let data = parts.remove("data").map(|data| ("data".to_owned(), data));
+            data.into_iter().chain(parts).collect::<Vec<_>>()
+        };
+        Ok(finished(shown(head, &rest, room)))
     }
 
     #[tool(

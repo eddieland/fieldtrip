@@ -33,6 +33,10 @@ mod execute_approved;
 #[cfg(test)]
 mod execute_refused;
 #[cfg(test)]
+mod execute_save;
+#[cfg(test)]
+mod execute_select;
+#[cfg(test)]
 mod header_names;
 #[cfg(test)]
 mod headers_command;
@@ -45,17 +49,25 @@ mod introspect_file;
 #[cfg(test)]
 mod introspect_http;
 #[cfg(test)]
+mod large_schema;
+#[cfg(test)]
 mod limits;
 #[cfg(test)]
 mod list_endpoints;
 #[cfg(test)]
 mod mutations_denied;
 #[cfg(test)]
+mod pagination_hints;
+#[cfg(test)]
 mod protocol_2026;
 #[cfg(test)]
 mod redaction;
 #[cfg(test)]
+mod response_limits;
+#[cfg(test)]
 mod response_metadata;
+#[cfg(test)]
+mod response_summary;
 #[cfg(test)]
 mod search_schema;
 #[cfg(test)]

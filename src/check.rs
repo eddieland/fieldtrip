@@ -8,7 +8,7 @@ use std::fmt::Write as _;
 use std::path::Path;
 
 use crate::approval;
-use crate::config::{Config, Endpoint, Mutations};
+use crate::config::{Config, Endpoint, Mutations, show_bytes};
 use crate::schema::Loaded;
 
 /// What the check found.
@@ -105,9 +105,12 @@ async fn endpoint_report(out: &mut Out, name: &str, endpoint: &Endpoint) {
     if !endpoint.response_headers.is_empty() {
         out.line("response headers shown", endpoint.response_headers.join(", "));
     }
+    out.line("max response bytes", show_bytes(endpoint.max_response_bytes));
+    out.line("max output chars", endpoint.max_output_chars);
 
     let schema = match &endpoint.schema {
         None => {
+            out.line("max schema bytes", show_bytes(endpoint.max_schema_bytes));
             out.line(
                 "schema",
                 "introspection, not checked: check sends nothing to the endpoint",

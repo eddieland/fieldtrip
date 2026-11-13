@@ -19,17 +19,14 @@ pub(crate) struct Client {
     http: reqwest::Client,
 }
 
-/// The most of a response body that is read. The rest is dropped, so a huge response cannot exhaust memory.
-const MAX_BODY_BYTES: usize = 1024 * 1024;
-
 /// What an endpoint answered.
 #[derive(Debug)]
 pub(crate) struct Reply {
     /// The HTTP status code.
     pub(crate) status: u16,
-    /// The response body as text, up to [`MAX_BODY_BYTES`].
+    /// The response body as text, up to the limit the caller gave.
     pub(crate) body: String,
-    /// Whether the body was longer than what was read.
+    /// Whether the body was longer than the limit, so that only its start was read.
     pub(crate) cut_short: bool,
     /// How long the request took, from sending it to reading the last of the body.
     pub(crate) elapsed: Duration,
@@ -72,6 +69,8 @@ impl Client {
 
     /// Sends `payload` to `endpoint` as a GraphQL-over-HTTP POST and returns whatever came back.
     ///
+    /// At most `limit` bytes of the body are read. The rest is dropped, so a huge response cannot exhaust memory.
+    ///
     /// When the endpoint answers 401 and one of its headers comes from a command, the command runs again and the
     /// request is retried once: the usual cause is a token that expired while its output was being reused.
     ///
@@ -79,10 +78,15 @@ impl Client {
     ///
     /// Returns a message when a header cannot be resolved or no response arrives. An HTTP error status is not an
     /// error here: GraphQL servers put useful detail in the body, so the caller decides what the status means.
-    pub(crate) async fn post(&self, endpoint: &Endpoint, payload: &serde_json::Value) -> Result<Reply, String> {
-        let reply = self.send(endpoint, payload, false).await?;
+    pub(crate) async fn post(
+        &self,
+        endpoint: &Endpoint,
+        payload: &serde_json::Value,
+        limit: usize,
+    ) -> Result<Reply, String> {
+        let reply = self.send(endpoint, payload, limit, false).await?;
         if reply.status == UNAUTHORIZED && endpoint.headers.iter().any(|header| header.is_refreshable()) {
-            return self.send(endpoint, payload, true).await;
+            return self.send(endpoint, payload, limit, true).await;
         }
         Ok(reply)
     }
@@ -92,6 +96,7 @@ impl Client {
         &self,
         endpoint: &Endpoint,
         payload: &serde_json::Value,
+        limit: usize,
         fresh_headers: bool,
     ) -> Result<Reply, String> {
         // Resolve every header before anything is sent, so a missing value never produces a half-authenticated
@@ -159,7 +164,7 @@ impl Client {
                 }
             })?;
             let Some(chunk) = chunk else { break };
-            let room = MAX_BODY_BYTES - bytes.len();
+            let room = limit - bytes.len();
             if chunk.len() > room {
                 bytes.extend_from_slice(chunk.get(..room).unwrap_or_default());
                 cut_short = true;

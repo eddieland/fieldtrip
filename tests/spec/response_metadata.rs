@@ -244,8 +244,8 @@ fn errors_are_kept_whole_when_data_is_cut() {
     );
     let note = reply.text.lines().last().unwrap_or_default();
     assert!(
-        note.starts_with("[fieldtrip cut this off at 40000 characters.") && note.contains("Errors are never cut."),
-        "the data is cut instead, with a note: {note}"
+        note.starts_with("[The result would have ") && note.contains("`errors` is whole."),
+        "the data is summarized instead, with a note: {note}"
     );
 }
 

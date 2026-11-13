@@ -27,7 +27,7 @@ in the user's config, out of the agent's sight and out of its control.
 | `search_schema` | `endpoint`, `query` | Ranked matches as one-line signatures |
 | `describe` | `endpoint`, `name` (`Type` or `Type.field`) | That definition as compact SDL |
 | `estimate_cost` | `endpoint`, `operation`, `variables?` | Validation errors, or cost, depth, breakdown, assumptions |
-| `execute` | `endpoint`, `operation`, `variables?` | Status, time, chosen headers, then `errors` whole, then `data` |
+| `execute` | `endpoint`, `operation`, `variables?`, `select?`, `save?` | Status, `errors`, then the rest or a summary |
 
 ## Config shape
 
@@ -37,6 +37,9 @@ costs             = "acme.costs.toml"        # optional cost map, relative to th
 assumed_list_size = 20                       # optional, default 10
 timeout           = 30                       # optional, seconds, default 30
 response_headers  = ["x-request-id", "traceparent"]   # optional, shown by `execute`
+max_schema_bytes  = 33554432                 # optional, default 32 MiB, read of an introspection response
+max_response_bytes = 8388608                 # optional, default 8 MiB, read of a response to `execute`
+max_output_chars  = 40000                    # optional, default 40,000, characters in one tool result
 
 [templates.acme.headers]
 X-Client      = "fieldtrip"
@@ -55,10 +58,10 @@ mutations         = "deny"                   # optional, default "prompt". A tem
 X-Api-Key = { env = "ACME_API_KEY" }
 ```
 
-An endpoint takes `schema`, `headers`, `costs`, `assumed_list_size`, `timeout` and `response_headers` from its
-template unless it sets them. Headers merge by name, ignoring case, and the endpoint's win. `url`, `description`, `approval` and
-`auto_approve_cost` are only ever set on the endpoint. `mutations` comes from the template too, but an endpoint can
-only make it stricter. A path may start with `~/`.
+An endpoint takes `schema`, `headers`, `costs`, `assumed_list_size`, `timeout`, `response_headers` and the three
+`max_` limits from its template unless it sets them. Headers merge by name, ignoring case, and the endpoint's win.
+`url`, `description`, `approval` and `auto_approve_cost` are only ever set on the endpoint. `mutations` comes from the
+template too, but an endpoint can only make it stricter. A path may start with `~/`.
 
 The config path comes from `--config`, defaulting to `$XDG_CONFIG_HOME/fieldtrip/config.toml` or
 `~/.config/fieldtrip/config.toml`. `--url`, with an optional `--schema`, defines a single endpoint with no headers and
@@ -191,3 +194,14 @@ Settled. To change one, ask the user, then add a new dated line instead of editi
 - 2026-11-13: `mutations` can come from a template, and an endpoint can only make it stricter.
 - 2026-11-13: An endpoint that sets `mutations = "prompt"` under a template that denies them stops the server.
 - 2026-11-13: With mutations denied, `estimate_cost` still costs them and `introspect` lists them as unavailable.
+- 2026-11-13: Introspection reads up to `max_schema_bytes`, 32 MiB unless set. This lifts the 1 MiB read for schemas.
+- 2026-11-13: A schema over that limit is an error naming it and `schema`. It never blames introspection being off.
+- 2026-11-13: `execute` reads up to `max_response_bytes` (8 MiB) and a result holds up to `max_output_chars` (40,000).
+- 2026-11-13: Both are set per endpoint or template. Together with the line above, they replace the 1 MiB and 40,000.
+- 2026-11-13: Parts after `errors` too long for a result are summarized as valid JSON, not cut as text. This refines
+  the line above that cut what follows `errors`. Parts that fit are as written.
+- 2026-11-13: A summary cuts lists and strings, each marked with what was dropped. `errors` is still never cut.
+- 2026-11-13: `select` is a path that picks part of a response after it arrives. It is not in the request or prompt.
+- 2026-11-13: `save` writes the whole response to a new file in fieldtrip's cache directory. The agent cannot name it.
+- 2026-11-13: A saved response has header values removed, as any response does. Only the user can read the file.
+- 2026-11-13: A connection whose `pageInfo` says `hasNextPage: true` is pointed out in the result, with its cursor.

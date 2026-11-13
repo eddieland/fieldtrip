@@ -70,7 +70,7 @@ fn a_redirect_is_refused_and_its_target_receives_nothing() {
 }
 
 #[test]
-fn a_large_response_is_cut_off_with_a_note() {
+fn a_large_response_is_summarized_with_a_note() {
     let body = large_response(60);
     let mock = MockServer::start(move |_| Response::new(200, body.clone()));
     let mut mcp = start(&mock, "");
@@ -93,13 +93,13 @@ fn a_large_response_is_cut_off_with_a_note() {
     );
     let note = reply.text.lines().last().unwrap_or_default();
     assert!(
-        note.starts_with("[fieldtrip cut this off at 40000 characters."),
+        note.starts_with("[The result would have ") && note.contains("this is a summary"),
         "the last line is the note: {note}"
     );
     assert!(note.contains("Ask for less"), "the note says what to do: {note}");
     assert!(
-        reply.text.chars().count() < 40_400,
-        "the result is about the size of the cap: {}",
+        reply.text.chars().count() <= 40_000,
+        "the result fits the cap: {}",
         reply.text.len()
     );
 }
@@ -108,7 +108,7 @@ fn a_large_response_is_cut_off_with_a_note() {
 fn a_response_too_large_to_read_is_cut_off_without_failing() {
     let body = large_response(3000);
     let mock = MockServer::start(move |_| Response::new(200, body.clone()));
-    let mut mcp = start(&mock, "");
+    let mut mcp = start(&mock, "max_response_bytes = 1048576\n");
 
     let reply = execute(&mut mcp);
 
@@ -117,14 +117,13 @@ fn a_response_too_large_to_read_is_cut_off_without_failing() {
         "a 200 that is too long to read in full is still a result"
     );
     assert!(
-        reply.text.contains("[fieldtrip cut this off at 40000 characters."),
-        "the note is there"
+        reply
+            .text
+            .contains("[The response is larger than 1 MiB, the `max_response_bytes` limit"),
+        "the note names the limit: {}",
+        reply.text
     );
-    assert!(
-        reply.text.chars().count() < 40_400,
-        "the result is about the size of the cap: {}",
-        reply.text.len()
-    );
+    assert!(reply.text.chars().count() < 2_000, "only a short excerpt is quoted");
 
     let after = mcp.call("list_endpoints", &json!({}));
     assert!(!after.is_error, "the server keeps working afterwards: {}", after.text);
