@@ -32,23 +32,34 @@ in the user's config, out of the agent's sight and out of its control.
 ## Config shape
 
 ```toml
-[endpoints.acme]
-url               = "https://api.acme.example/graphql"
-schema            = "schemas/acme.graphql"   # optional SDL file, relative to this file
-auto_approve_cost = 50                       # optional, queries only
-assumed_list_size = 20                       # optional, default 10
-approval          = "elicit"                 # or "client"
-timeout           = 30                       # optional, seconds, default 30
+[templates.acme]                             # optional: settings that several endpoints share
 costs             = "acme.costs.toml"        # optional cost map, relative to this file
+assumed_list_size = 20                       # optional, default 10
+timeout           = 30                       # optional, seconds, default 30
 
-[endpoints.acme.headers]
+[templates.acme.headers]
 X-Client      = "fieldtrip"
-X-Api-Key     = { env = "ACME_API_KEY" }
 Authorization = { command = ["python", "-m", "acme_auth", "token"], format = "Bearer {}", ttl = 300 }
+
+[endpoints.acme-prod]
+template          = "acme"                   # optional
+url               = "https://api.acme.example/graphql"
+description       = "Production. Real customers."   # optional, shown to the agent
+schema            = "schemas/acme.graphql"   # optional SDL file, relative to this file
+approval          = "elicit"                 # or "client"
+auto_approve_cost = 50                       # optional, queries only
+
+[endpoints.acme-prod.headers]
+X-Api-Key = { env = "ACME_API_KEY" }
 ```
 
-The config path comes from `--config`, defaulting to `~/.config/fieldtrip/config.toml`. `--url`, with an optional
-`--schema`, defines a single endpoint with no headers and no file.
+An endpoint takes `schema`, `headers`, `costs`, `assumed_list_size` and `timeout` from its template unless it sets
+them. Headers merge by name, ignoring case, and the endpoint's win. `url`, `description`, `approval` and
+`auto_approve_cost` are only ever set on the endpoint. A path may start with `~/`.
+
+The config path comes from `--config`, defaulting to `$XDG_CONFIG_HOME/fieldtrip/config.toml` or
+`~/.config/fieldtrip/config.toml`. `--url`, with an optional `--schema`, defines a single endpoint with no headers and
+no file. `fieldtrip check` loads the same configuration, prints what each endpoint resolves to and exits.
 
 ## The three plugs
 
@@ -151,3 +162,15 @@ Settled. To change one, ask the user, then add a new dated line instead of editi
 - 2026-11-12: The estimate lists every rule it used.
 - 2026-11-12: A cost map that is not valid stops the server at startup. A rule that cannot match is not an error.
 - 2026-11-12: `introspect` reports the rules that match nothing in the schema, so a misspelled rule is noticed.
+- 2026-11-13: An endpoint can name a template, which holds settings shared by instances of one service. One level only.
+- 2026-11-13: `url`, `description`, `approval` and `auto_approve_cost` never come from a template. A missing one asks.
+- 2026-11-13: Headers merge by name ignoring case, the endpoint's winning. A template header is shared, cache included.
+- 2026-11-13: Several services live in one config file. Templates, not separate servers, are how they share settings.
+- 2026-11-13: Header names that differ only in case are an error. Headers fieldtrip sets itself cannot be configured.
+- 2026-11-13: A URL with a user name or password is refused. Query values are shown as `<redacted>` wherever a URL is.
+- 2026-11-13: Startup refuses a URL with no host, a missing `schema` file, and `assumed_list_size = 0`.
+- 2026-11-13: Startup refuses `auto_approve_cost` with `approval = "client"`, which would silently ignore it.
+- 2026-11-13: An endpoint name has only letters, digits, `-`, `_` and `.`. A `description` is shown on one line.
+- 2026-11-13: `fieldtrip check` resolves every header and reads schema files, but sends nothing to an endpoint.
+- 2026-11-13: In `check`, a header or schema that fails is a problem and fails the run. An unmatched rule only warns.
+- 2026-11-13: A relative `--config` is made absolute first, so header commands start in a real directory.

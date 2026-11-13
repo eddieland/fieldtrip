@@ -129,13 +129,13 @@ fn a_response_too_large_to_read_is_cut_off_without_failing() {
 fn a_huge_type_is_cut_off_with_a_note() {
     let mock = MockServer::unreachable();
     let config = format!("[endpoints.big]\nurl = \"{}\"\nschema = \"big.graphql\"\n", mock.url());
-    let mut mcp = Mcp::start(&config);
     let mut schema = String::from("type Query {\n");
     for index in 0..4000 {
         let _ = writeln!(schema, "  \"The field with number {index}.\"\n  field{index}: String");
     }
     schema.push_str("}\n");
-    std::fs::write(mcp.dir().join("big.graphql"), schema).expect("write the big schema");
+    // The schema file has to be there when the server starts, which checks that it is.
+    let mut mcp = Launch::new(&config).file("big.graphql", &schema).start();
 
     let reply = mcp.call("describe", &json!({ "endpoint": "big", "name": "Query" }));
 

@@ -10,6 +10,8 @@ use std::sync::{Arc, Mutex};
 pub(crate) struct Recorded {
     /// The request method, such as `POST`.
     pub(crate) method: String,
+    /// The request target: the path and the query.
+    pub(crate) target: String,
     /// Header names, lowercased, with their values.
     pub(crate) headers: Vec<(String, String)>,
     /// The request body.
@@ -108,7 +110,9 @@ fn serve(stream: TcpStream, log: &Mutex<Vec<Recorded>>, respond: &dyn Fn(&Record
     if reader.read_line(&mut request_line).unwrap_or(0) == 0 {
         return;
     }
-    let method = request_line.split_whitespace().next().unwrap_or_default().to_owned();
+    let mut words = request_line.split_whitespace();
+    let method = words.next().unwrap_or_default().to_owned();
+    let target = words.next().unwrap_or_default().to_owned();
 
     let mut headers = Vec::new();
     loop {
@@ -132,6 +136,7 @@ fn serve(stream: TcpStream, log: &Mutex<Vec<Recorded>>, respond: &dyn Fn(&Record
 
     let recorded = Recorded {
         method,
+        target,
         headers,
         body: String::from_utf8_lossy(&body).into_owned(),
     };

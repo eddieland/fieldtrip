@@ -1,7 +1,14 @@
 //! The config file: which endpoints exist, where each schema comes from, and which headers each request carries.
+//!
+//! An endpoint can name a template, which holds the settings that several endpoints share, such as the dev,
+//! staging and production instances of one service. There is one level: a template cannot name another. The URL,
+//! the description and the approval settings are never taken from a template, so an endpoint that leaves them out
+//! falls back to the defaults, which ask before every operation.
 
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::fmt::Write as _;
+use std::path::{Component, Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 
 use serde::Deserialize;
@@ -46,13 +53,13 @@ pub(crate) enum ConfigError {
         /// The parser's message, without the source snippet, which could contain a header value.
         message: String,
     },
-    /// An endpoint has a value the server cannot use.
-    #[error("endpoint `{endpoint}` in {path}: {problem}")]
-    Endpoint {
-        /// The file the endpoint is defined in.
+    /// An endpoint or a template has a value the server cannot use.
+    #[error("{what} in {path}: {problem}")]
+    Invalid {
+        /// The file the endpoint or template is defined in.
         path: PathBuf,
-        /// The endpoint's name.
-        endpoint: String,
+        /// `` endpoint `name` `` or `` template `name` ``.
+        what: String,
         /// What is wrong with it.
         problem: String,
     },
@@ -61,6 +68,8 @@ pub(crate) enum ConfigError {
 /// The loaded configuration.
 #[derive(Debug)]
 pub(crate) struct Config {
+    /// Where the configuration came from: the config file, or `None` for `--url`.
+    pub(crate) path: Option<PathBuf>,
     /// Endpoints by name, in name order.
     pub(crate) endpoints: BTreeMap<String, Endpoint>,
 }
@@ -68,16 +77,24 @@ pub(crate) struct Config {
 /// One GraphQL endpoint.
 #[derive(Debug)]
 pub(crate) struct Endpoint {
-    /// Where operations are sent.
+    /// Where operations are sent, exactly as configured. It can carry a key in its query, so it is never shown:
+    /// [`Endpoint::shown_url`] is.
     pub(crate) url: String,
+    /// The URL with the value of every query parameter replaced, for showing in output, prompts and errors.
+    pub(crate) shown_url: String,
+    /// What the user says the endpoint is for, on one line.
+    pub(crate) description: Option<String>,
+    /// The template the endpoint takes its shared settings from.
+    pub(crate) template: Option<String>,
     /// The SDL file to read the schema from, as an absolute path. `None` means introspection.
     pub(crate) schema: Option<PathBuf>,
-    /// The headers sent with every request to this endpoint, in name order.
-    pub(crate) headers: Vec<Header>,
+    /// The headers sent with every request to this endpoint, in name order. A header that comes from a template is
+    /// shared with the template's other endpoints, and so is a command's cached output.
+    pub(crate) headers: Vec<Arc<Header>>,
     /// How many items to assume for a list whose size nothing bounds, when estimating cost.
     pub(crate) assumed_list_size: u64,
     /// The rules that replace the built-in costs for this endpoint. Empty when it has no cost map.
-    pub(crate) costs: CostMap,
+    pub(crate) costs: Arc<CostMap>,
     /// How long a request to this endpoint may take.
     pub(crate) timeout: Duration,
     /// Who approves an operation before it is sent.
@@ -104,12 +121,27 @@ const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 /// The `assumed_list_size` of an endpoint that does not set one.
 const DEFAULT_ASSUMED_LIST_SIZE: u64 = 10;
 
+/// The headers fieldtrip sets itself. Configuring one would send it twice, or point the request elsewhere.
+const RESERVED_HEADERS: [&str; 6] = [
+    "accept",
+    "connection",
+    "content-length",
+    "content-type",
+    "host",
+    "transfer-encoding",
+];
+
+/// What replaces the value of each query parameter in a URL that is shown.
+const HIDDEN: &str = "<redacted>";
+
 /// The file as written, before validation.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawConfig {
     #[serde(default)]
     endpoints: BTreeMap<String, RawEndpoint>,
+    #[serde(default)]
+    templates: BTreeMap<String, RawTemplate>,
 }
 
 /// One `[endpoints.NAME]` table as written.
@@ -117,14 +149,70 @@ struct RawConfig {
 #[serde(deny_unknown_fields)]
 struct RawEndpoint {
     url: String,
+    description: Option<String>,
+    template: Option<String>,
+    approval: Option<String>,
+    auto_approve_cost: Option<u64>,
     schema: Option<PathBuf>,
     #[serde(default)]
     headers: BTreeMap<String, toml::Value>,
     assumed_list_size: Option<u64>,
     costs: Option<PathBuf>,
-    approval: Option<String>,
-    auto_approve_cost: Option<u64>,
     timeout: Option<u64>,
+}
+
+/// One `[templates.NAME]` table as written.
+///
+/// The settings a template cannot hold are read too, so that the error can say why instead of only that the key
+/// is unknown.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawTemplate {
+    url: Option<toml::Value>,
+    description: Option<toml::Value>,
+    template: Option<toml::Value>,
+    approval: Option<toml::Value>,
+    auto_approve_cost: Option<toml::Value>,
+    schema: Option<PathBuf>,
+    #[serde(default)]
+    headers: BTreeMap<String, toml::Value>,
+    assumed_list_size: Option<u64>,
+    costs: Option<PathBuf>,
+    timeout: Option<u64>,
+}
+
+/// The settings an endpoint can take from a template. serde cannot flatten them into a table that denies
+/// unknown keys, so both tables list them and hand them over in this.
+#[derive(Default)]
+struct RawShared {
+    schema: Option<PathBuf>,
+    headers: BTreeMap<String, toml::Value>,
+    assumed_list_size: Option<u64>,
+    costs: Option<PathBuf>,
+    timeout: Option<u64>,
+}
+
+/// Moves the shared settings out of a raw endpoint or template.
+macro_rules! shared {
+    ($raw:expr) => {
+        RawShared {
+            schema: $raw.schema,
+            headers: $raw.headers,
+            assumed_list_size: $raw.assumed_list_size,
+            costs: $raw.costs,
+            timeout: $raw.timeout,
+        }
+    };
+}
+
+/// A template, checked and ready to be applied to the endpoints that name it.
+#[derive(Debug, Default)]
+struct Template {
+    schema: Option<PathBuf>,
+    headers: Vec<Arc<Header>>,
+    assumed_list_size: Option<u64>,
+    costs: Option<Arc<CostMap>>,
+    timeout: Option<Duration>,
 }
 
 impl Config {
@@ -141,6 +229,9 @@ impl Config {
             Some(path) => (path.clone(), false),
             None => (default_path().ok_or(ConfigError::NoDefaultPath)?, true),
         };
+        // Paths in the file are relative to its directory, and header commands run there. A relative `--config`
+        // has an empty directory, which no command can start in, so it is made absolute first.
+        let path = std::path::absolute(&path).unwrap_or(path);
         let text = std::fs::read_to_string(&path).map_err(|source| {
             if is_default && source.kind() == std::io::ErrorKind::NotFound {
                 ConfigError::NothingConfigured { path: path.clone() }
@@ -163,8 +254,9 @@ impl Config {
         };
         // A relative `--schema` is relative to where the server was started, as any command-line path is.
         let base = std::env::current_dir().unwrap_or_else(|_error| PathBuf::from("."));
-        let endpoint = Endpoint::from_raw(raw, &base).map_err(ConfigError::Flags)?;
+        let endpoint = Endpoint::from_raw(raw, &base, &BTreeMap::new()).map_err(ConfigError::Flags)?;
         Ok(Self {
+            path: None,
             endpoints: BTreeMap::from([(FLAG_ENDPOINT.to_owned(), endpoint)]),
         })
     }
@@ -179,56 +271,275 @@ impl Config {
             message: error.message().to_owned(),
         })?;
         let base = path.parent().unwrap_or_else(|| Path::new("."));
+        let invalid = |what: String| {
+            move |problem| ConfigError::Invalid {
+                path: path.to_path_buf(),
+                what,
+                problem,
+            }
+        };
+        let templates = raw
+            .templates
+            .into_iter()
+            .map(|(name, template)| {
+                let template = Template::from_raw(template, base).map_err(invalid(format!("template `{name}`")))?;
+                Ok((name, template))
+            })
+            .collect::<Result<BTreeMap<_, _>, ConfigError>>()?;
         let endpoints = raw
             .endpoints
             .into_iter()
             .map(|(name, endpoint)| {
-                let endpoint = Endpoint::from_raw(endpoint, base).map_err(|problem| ConfigError::Endpoint {
-                    path: path.to_path_buf(),
-                    endpoint: name.clone(),
-                    problem,
-                })?;
+                let endpoint = check_endpoint_name(&name)
+                    .and_then(|()| Endpoint::from_raw(endpoint, base, &templates))
+                    .map_err(invalid(format!("endpoint `{name}`")))?;
                 Ok((name, endpoint))
             })
             .collect::<Result<_, ConfigError>>()?;
-        Ok(Self { endpoints })
+        Ok(Self {
+            path: Some(path.to_path_buf()),
+            endpoints,
+        })
+    }
+}
+
+impl Template {
+    /// Checks one template. Paths in it are resolved against `base`, the config file's directory.
+    fn from_raw(raw: RawTemplate, base: &Path) -> Result<Self, String> {
+        let never_shared = [
+            ("url", raw.url.is_some(), "each endpoint names its own"),
+            (
+                "description",
+                raw.description.is_some(),
+                "each endpoint says what it is for",
+            ),
+            (
+                "template",
+                raw.template.is_some(),
+                "a template cannot name another template",
+            ),
+            (
+                "approval",
+                raw.approval.is_some(),
+                "each endpoint sets its own, so one that leaves it out still asks",
+            ),
+            (
+                "auto_approve_cost",
+                raw.auto_approve_cost.is_some(),
+                "each endpoint sets its own, so one that leaves it out still asks",
+            ),
+        ];
+        if let Some((key, _, why)) = never_shared.into_iter().find(|(_, present, _)| *present) {
+            return Err(format!("`{key}` cannot be set in a template: {why}"));
+        }
+        let shared = shared!(raw);
+        Ok(Self {
+            schema: schema_path(shared.schema.as_deref(), base)?,
+            headers: headers(shared.headers, base)?,
+            assumed_list_size: assumed_list_size(shared.assumed_list_size)?,
+            costs: shared
+                .costs
+                .map(|costs| CostMap::load(&resolve(&costs, base)).map(Arc::new))
+                .transpose()?,
+            timeout: timeout(shared.timeout)?,
+        })
     }
 }
 
 impl Endpoint {
-    /// Validates one endpoint. A relative `schema` path is resolved against `base`, the config file's directory.
-    fn from_raw(raw: RawEndpoint, base: &Path) -> Result<Self, String> {
-        if !(raw.url.starts_with("http://") || raw.url.starts_with("https://")) {
-            return Err(format!("`url` must start with http:// or https://, got `{}`", raw.url));
-        }
-        let headers = raw
-            .headers
-            .into_iter()
-            .map(|(name, value)| Header::from_config(name, value, base))
-            .collect::<Result<_, String>>()?;
+    /// Validates one endpoint and applies its template. A relative path is resolved against `base`, the config
+    /// file's directory.
+    fn from_raw(raw: RawEndpoint, base: &Path, templates: &BTreeMap<String, Template>) -> Result<Self, String> {
+        let shown_url = check_url(&raw.url)?;
+        let template = match &raw.template {
+            None => &Template::default(),
+            Some(name) => templates.get(name).ok_or_else(|| {
+                let known: Vec<String> = templates.keys().map(|name| format!("`{name}`")).collect();
+                if known.is_empty() {
+                    format!("`template` names `{name}`, but the config file defines no templates")
+                } else {
+                    format!(
+                        "`template` names `{name}`, which is not defined. Templates: {}",
+                        known.join(", ")
+                    )
+                }
+            })?,
+        };
         let approval = match raw.approval.as_deref() {
             None | Some("elicit") => Approval::Elicit,
             Some("client") => Approval::Client,
             Some(other) => return Err(format!("`approval` must be \"elicit\" or \"client\", got \"{other}\"")),
         };
-        if raw.timeout == Some(0) {
-            return Err("`timeout` is in seconds and must be at least 1".to_owned());
+        if approval == Approval::Client && raw.auto_approve_cost.is_some() {
+            return Err(
+                "`auto_approve_cost` has no effect with `approval = \"client\"`, which sends every operation without \
+                 asking. Remove one of them."
+                    .to_owned(),
+            );
         }
-        let costs = match &raw.costs {
-            Some(path) => CostMap::load(&base.join(path))?,
-            None => CostMap::default(),
+        let shared = shared!(raw);
+
+        // The endpoint's own headers win over the template's, compared ignoring case as HTTP does.
+        let mut headers = headers(shared.headers, base)?;
+        let own: Vec<String> = headers.iter().map(|header| header.wire_name().to_owned()).collect();
+        headers.extend(
+            template
+                .headers
+                .iter()
+                .filter(|header| !own.iter().any(|name| name == header.wire_name()))
+                .cloned(),
+        );
+        headers.sort_by(|left, right| left.name.cmp(&right.name));
+
+        let costs = match &shared.costs {
+            Some(path) => Arc::new(CostMap::load(&resolve(path, base))?),
+            None => template.costs.clone().unwrap_or_default(),
         };
         Ok(Self {
+            shown_url,
+            description: raw.description.as_deref().map(one_line).filter(|text| !text.is_empty()),
+            template: raw.template,
+            schema: schema_path(shared.schema.as_deref(), base)?.or_else(|| template.schema.clone()),
+            headers,
+            assumed_list_size: assumed_list_size(shared.assumed_list_size)?
+                .or(template.assumed_list_size)
+                .unwrap_or(DEFAULT_ASSUMED_LIST_SIZE),
             costs,
-            timeout: raw.timeout.map_or(DEFAULT_TIMEOUT, Duration::from_secs),
+            timeout: timeout(shared.timeout)?.or(template.timeout).unwrap_or(DEFAULT_TIMEOUT),
             approval,
             auto_approve_cost: raw.auto_approve_cost,
             url: raw.url,
-            schema: raw.schema.map(|schema| base.join(schema)),
-            headers,
-            assumed_list_size: raw.assumed_list_size.unwrap_or(DEFAULT_ASSUMED_LIST_SIZE),
         })
     }
+}
+
+/// Checks that `url` is an HTTP URL with a host and no credentials, and returns it as it may be shown.
+fn check_url(url: &str) -> Result<String, String> {
+    let not_http = || format!("`url` must start with http:// or https://, got `{}`", shown(url));
+    if !(url.starts_with("http://") || url.starts_with("https://")) {
+        return Err(not_http());
+    }
+    let parsed =
+        reqwest::Url::parse(url).map_err(|error| format!("`url` is not a usable URL ({error}): `{}`", shown(url)))?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return Err(not_http());
+    }
+    if parsed.host_str().is_none_or(str::is_empty) {
+        return Err(format!("`url` has no host: `{}`", shown(url)));
+    }
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err(
+            "`url` has a user name or password in it. Send credentials in a header instead, such as \
+             `Authorization = { env = \"NAME\", format = \"Basic {}\" }`, where they are kept out of every tool \
+             result."
+                .to_owned(),
+        );
+    }
+    Ok(shown(url))
+}
+
+/// `url` with the value of every query parameter replaced by [`HIDDEN`], and any fragment dropped. Keys stay, so
+/// the user can tell which parameters are set.
+fn shown(url: &str) -> String {
+    let without_fragment = url.split_once('#').map_or(url, |(before, _)| before);
+    let Some((address, query)) = without_fragment.split_once('?') else {
+        return without_fragment.to_owned();
+    };
+    let mut out = format!("{address}?");
+    for (index, pair) in query.split('&').enumerate() {
+        if index > 0 {
+            out.push('&');
+        }
+        let key = pair.split_once('=').map_or(pair, |(key, _)| key);
+        let _ = write!(out, "{key}={HIDDEN}");
+    }
+    out
+}
+
+/// Checks an endpoint's name. The calling agent types it into every tool call, so it is kept plain.
+fn check_endpoint_name(name: &str) -> Result<(), String> {
+    let plain = !name.is_empty()
+        && name
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.'));
+    if plain {
+        Ok(())
+    } else {
+        Err("an endpoint name may only have letters, digits, `-`, `_` and `.`, such as `acme-prod`".to_owned())
+    }
+}
+
+/// Reads a `headers` table. Two names that differ only in case are an error, since HTTP treats them as one.
+fn headers(table: BTreeMap<String, toml::Value>, base: &Path) -> Result<Vec<Arc<Header>>, String> {
+    let mut headers: Vec<Arc<Header>> = Vec::with_capacity(table.len());
+    for (name, value) in table {
+        let header = Header::from_config(name, value, base)?;
+        if RESERVED_HEADERS.contains(&header.wire_name()) {
+            return Err(format!(
+                "header `{}` is set by fieldtrip itself and cannot be configured",
+                header.name
+            ));
+        }
+        if let Some(earlier) = headers.iter().find(|earlier| earlier.wire_name() == header.wire_name()) {
+            return Err(format!(
+                "headers `{}` and `{}` are the same header, because header names ignore case. Keep one of them.",
+                earlier.name, header.name
+            ));
+        }
+        headers.push(Arc::new(header));
+    }
+    Ok(headers)
+}
+
+/// Resolves a configured `schema` path, and checks that the file is there.
+fn schema_path(schema: Option<&Path>, base: &Path) -> Result<Option<PathBuf>, String> {
+    let Some(schema) = schema else { return Ok(None) };
+    let path = resolve(schema, base);
+    if path.is_file() {
+        Ok(Some(path))
+    } else {
+        Err(format!(
+            "`schema` names {}, which is not a file. Export the schema there, or remove `schema` to load it by \
+             introspection.",
+            path.display()
+        ))
+    }
+}
+
+/// Checks `assumed_list_size`.
+fn assumed_list_size(size: Option<u64>) -> Result<Option<u64>, String> {
+    if size == Some(0) {
+        return Err(
+            "`assumed_list_size` must be at least 1. A list of unknown size assumed empty would make any query \
+             look free."
+                .to_owned(),
+        );
+    }
+    Ok(size)
+}
+
+/// Checks `timeout`.
+fn timeout(seconds: Option<u64>) -> Result<Option<Duration>, String> {
+    if seconds == Some(0) {
+        return Err("`timeout` is in seconds and must be at least 1".to_owned());
+    }
+    Ok(seconds.map(Duration::from_secs))
+}
+
+/// Resolves a configured path: `~/` is the home directory, and a relative path is relative to `base`.
+fn resolve(path: &Path, base: &Path) -> PathBuf {
+    let mut components = path.components();
+    if components.next() == Some(Component::Normal("~".as_ref()))
+        && let Some(home) = std::env::var_os("HOME").filter(|home| !home.is_empty())
+    {
+        return PathBuf::from(home).join(components.as_path());
+    }
+    base.join(path)
+}
+
+/// `text` on one line, with runs of whitespace collapsed.
+fn one_line(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 /// `$XDG_CONFIG_HOME/fieldtrip/config.toml`, falling back to `~/.config/fieldtrip/config.toml`.

@@ -69,6 +69,19 @@ pub(crate) struct Launch {
     files: Vec<(String, String)>,
 }
 
+/// What a run of `fieldtrip check` did.
+#[derive(Debug)]
+pub(crate) struct Checked {
+    /// Whether it exited with success.
+    pub(crate) passed: bool,
+    /// The report.
+    pub(crate) stdout: String,
+    /// The log.
+    pub(crate) stderr: String,
+    /// The directory it ran in, which holds the config file and the fixtures.
+    pub(crate) dir: TempDir,
+}
+
 /// How the server is told where its configuration is.
 #[derive(Debug)]
 enum How {
@@ -155,6 +168,23 @@ impl Launch {
             "nothing may be written to stdout on a failed start"
         );
         stderr
+    }
+
+    /// Runs `fieldtrip check` with this launch's config, flags and environment, and returns what it did.
+    pub(crate) fn check(self) -> Checked {
+        let (dir, mut arguments, env) = self.prepare();
+        arguments.insert(0, "check".into());
+        let arguments: Vec<&std::ffi::OsStr> = arguments.iter().map(AsRef::as_ref).collect();
+        let output = server_command(&arguments, &env, dir.path())
+            .stdin(Stdio::null())
+            .output()
+            .expect("run fieldtrip check");
+        Checked {
+            passed: output.status.success(),
+            stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+            dir,
+        }
     }
 
     /// Creates the working directory with the fixtures in it, and works out the command line and environment.

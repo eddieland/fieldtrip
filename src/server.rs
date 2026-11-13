@@ -128,8 +128,11 @@ impl Fieldtrip {
 
     #[tool(
         description = "List the GraphQL endpoints the user has configured. Call this first: every other tool takes \
-                       one of these endpoint names. Returns each endpoint's name, its URL, where its schema comes \
-                       from, and the names of the headers sent with its requests. Header values are never shown."
+                       one of these endpoint names. Returns each endpoint's name, the user's description of it when \
+                       there is one, its URL, where its schema comes from, who approves operations, and the names \
+                       of the headers sent with its requests. Header values are never shown. When several endpoints \
+                       are instances of one service, such as dev and prod, prefer the one the description or the \
+                       user points to, and ask when it is unclear."
     )]
     fn list_endpoints(&self) -> String {
         let endpoints = &self.config.endpoints;
@@ -139,7 +142,10 @@ impl Fieldtrip {
         let mut out = String::new();
         for (name, endpoint) in endpoints {
             let _ = writeln!(out, "{name}");
-            let _ = writeln!(out, "  url: {}", endpoint.url);
+            if let Some(description) = &endpoint.description {
+                let _ = writeln!(out, "  description: {description}");
+            }
+            let _ = writeln!(out, "  url: {}", endpoint.shown_url);
             match &endpoint.schema {
                 Some(path) => {
                     let _ = writeln!(out, "  schema: file {}", path.display());
@@ -225,7 +231,7 @@ impl Fieldtrip {
         let unasked = if let Some(reason) = approval::waiver(endpoint, &plan) {
             format!(" The user was not asked: {reason}.")
         } else {
-            let prompt = approval::prompt(name, &endpoint.url, &plan, &arguments.variables);
+            let prompt = approval::prompt(name, &endpoint.shown_url, &plan, &arguments.variables);
             let decision = if approval::asks_by_round_trip(&context) {
                 let operation = Operation {
                     endpoint: name,
@@ -284,7 +290,7 @@ impl Fieldtrip {
         let schema = self.schema(name, arguments.refresh).await?;
         let endpoint = self.endpoint(name)?;
         let source = endpoint.schema.as_ref().map_or_else(
-            || format!("loaded by introspection from {}", endpoint.url),
+            || format!("loaded by introspection from {}", endpoint.shown_url),
             |path| format!("read from the file {}", path.display()),
         );
         Ok(format!(
@@ -324,7 +330,7 @@ impl Fieldtrip {
     async fn load(&self, name: &str, endpoint: &Endpoint) -> Result<Loaded, String> {
         let Some(path) = &endpoint.schema else {
             let sdl = introspection::fetch(&self.http, endpoint).await?;
-            return Loaded::from_sdl(&sdl, &format!("The introspection result from {}", endpoint.url));
+            return Loaded::from_sdl(&sdl, &format!("The introspection result from {}", endpoint.shown_url));
         };
         let text = std::fs::read_to_string(path).map_err(|error| {
             format!(

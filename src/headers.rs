@@ -113,6 +113,28 @@ impl Header {
         })
     }
 
+    /// The header's name as it is sent: lowercase, so two names that differ only in case compare equal.
+    pub(crate) fn wire_name(&self) -> &str {
+        self.wire_name.as_str()
+    }
+
+    /// Where the value comes from, for `fieldtrip check`: the plug, the variable or the program, never a value,
+    /// an argument or the format.
+    pub(crate) fn source(&self) -> String {
+        match &self.source {
+            Source::Literal(_) => "literal".to_owned(),
+            Source::Env { variable, format } => {
+                let formatted = if format.is_some() { ", formatted" } else { "" };
+                format!("env `{variable}`{formatted}")
+            }
+            Source::Command { argv, format, ttl, .. } => {
+                let program = argv.first().map_or("", |Secret(program)| program.as_str());
+                let formatted = if format.is_some() { ", formatted" } else { "" };
+                format!("command `{program}`{formatted}, reused for {}s", ttl.as_secs())
+            }
+        }
+    }
+
     /// Whether the header comes from a command, whose output can go stale and be produced again.
     pub(crate) const fn is_refreshable(&self) -> bool {
         matches!(self.source, Source::Command { .. })

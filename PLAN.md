@@ -94,3 +94,23 @@ cargo test --workspace --all-features
   startup with a message that names the file and the rule. `introspect` reports the rules that match nothing in
   the schema.
   Done when: `cargo test cost_checks`
+- [x] **21. Config checks.** A URL with no host, a missing `schema` file, `assumed_list_size = 0`,
+  `auto_approve_cost` with `approval = "client"`, and an endpoint name with characters other than letters, digits,
+  `-`, `_` and `.` stop the server at startup. A path that starts with `~/` is in the home directory.
+  Done when: `cargo test config_checks`
+- [x] **22. Header names.** Two header names that differ only in case, and the headers fieldtrip sets itself, stop
+  the server at startup with a message that names them and quotes no value.
+  Done when: `cargo test header_names`
+- [x] **23. URL secrets.** The values of a URL's query parameters appear in no tool result, prompt, error or log,
+  but the request still goes to the URL as configured. A URL with a user name or password stops the server.
+  Done when: `cargo test url_secrets`
+- [x] **24. Templates.** An endpoint takes the headers, cost map, schema, sizes and timeout of the template it
+  names, and its own settings win. Approval settings, the URL and the description are never taken from a template.
+  A shared command header runs once for every endpoint. A shared cost map is checked against each endpoint's schema.
+  Done when: `cargo test templates`
+- [x] **25. Descriptions.** An endpoint's `description` is shown by `list_endpoints` on one line.
+  Done when: `cargo test descriptions`
+- [x] **26. `fieldtrip check`.** Prints each endpoint as it resolves: template, URL, approval, sizes, schema file,
+  cost map findings, and each header's plug with whether it resolves, with no value. Fails on a header or schema
+  problem, warns on an unmatched rule, and sends nothing to any endpoint.
+  Done when: `cargo test check_command`

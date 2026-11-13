@@ -80,6 +80,11 @@ impl Loaded {
         lint::report(self, costs)
     }
 
+    /// One sentence per kind of cost map rule that cannot apply in this schema. Empty when every rule can.
+    pub(crate) fn cost_map_findings(&self, costs: &crate::costs::CostMap) -> Vec<String> {
+        lint::findings(self, costs)
+    }
+
     /// Returns the schema's description, its type counts and the names of its root fields.
     pub(crate) fn overview(&self) -> String {
         overview::overview(self)

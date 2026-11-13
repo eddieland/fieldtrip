@@ -49,12 +49,13 @@ you can skip the file and pass `--url https://api.example.com/graphql`, optional
 
 ## Configuration
 
-Each endpoint has a name, a URL, and optionally a schema file and headers:
+Each endpoint has a name, a URL, and optionally a description, a schema file and headers:
 
 ```toml
 [endpoints.acme]
-url    = "https://api.acme.example/graphql"
-schema = "schemas/acme.graphql"   # optional: read SDL from this file instead of introspecting
+url         = "https://api.acme.example/graphql"
+description = "The Acme store API."   # optional: tells the agent what this endpoint is for
+schema      = "schemas/acme.graphql"  # optional: read SDL from this file instead of introspecting
 
 [endpoints.acme.headers]
 X-Client      = "fieldtrip"
@@ -65,6 +66,55 @@ Authorization = { command = ["python", "-m", "acme_auth", "token"], format = "Be
 A header value is a literal, an environment variable, or the trimmed stdout of a command. `format` wraps the value, so
 a CLI that prints a bare token becomes `Authorization: Bearer <token>`. The command runs directly from the argument
 list, with no shell.
+
+| Setting | Default | What it does |
+| --- | --- | --- |
+| `approval` | `"elicit"` | `"client"` skips fieldtrip's prompt and relies on the MCP client's own tool approval |
+| `auto_approve_cost` | none | Queries estimated at or below this run without a prompt. Mutations always prompt |
+| `assumed_list_size` | `10` | Items assumed for a list that nothing bounds |
+| `timeout` | `30` | Seconds a request may take |
+| `costs` | none | A cost map, below |
+
+### Several instances of one service
+
+Put what dev, staging and prod share in a template, and name it from each endpoint:
+
+```toml
+[templates.acme]
+costs = "acme.costs.toml"
+
+[templates.acme.headers]
+Authorization = { command = ["acme", "auth", "token"], format = "Bearer {}" }
+
+[endpoints.acme-dev]
+template = "acme"
+url      = "https://dev.acme.example/graphql"
+approval = "client"
+
+[endpoints.acme-prod]
+template    = "acme"
+url         = "https://api.acme.example/graphql"
+description = "Production. Real customer data."
+schema      = "schemas/acme-prod.graphql"
+```
+
+An endpoint takes `schema`, `headers`, `costs`, `assumed_list_size` and `timeout` from its template unless it sets
+them itself. Headers merge by name, and the endpoint's win. `approval`, `auto_approve_cost`, `url` and `description`
+are never taken from a template, so an endpoint that forgets them asks before every operation. A shared cost map is
+checked against each endpoint's own schema, so a rule for a field that only dev has shows up in prod's
+`introspect`.
+
+### Checking a config
+
+```sh
+fieldtrip check --config /path/to/fieldtrip.toml
+```
+
+This prints what each endpoint resolves to, runs every header command, reads every schema file, and checks each
+cost map against its schema, without printing a header value or sending anything to an endpoint. It exits non-zero
+when something is wrong. MCP clients often show only "server failed to start", so run it after any config change.
+
+Set `FIELDTRIP_LOG=debug` for more detail on stderr.
 
 [DESIGN.md](DESIGN.md) has the full config shape, the tools, and the approval rules.
 
