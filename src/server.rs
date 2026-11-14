@@ -910,12 +910,15 @@ impl Fieldtrip {
             .map_or_else(|error| Outcome::Failed(error), Outcome::Answered);
         self.audit.record(endpoint, &attempt, &verdict, outcome).await;
         let reply = sent?;
-        let summary = format!(
+        let mut summary = format!(
             "Sent {} to `{name}`. Estimated cost: {}.{unasked}\n{}",
             plan.title(),
             plan.cost,
             reply.metadata()
         );
+        if let Some(note) = &reply.refused_twice {
+            let _ = write!(summary, "\n{note}");
+        }
         if reply.cut_short {
             // Too long to read in full, so it cannot be parsed. The status says whether it is a result.
             let excerpt: String = reply.body.chars().take(EXCERPT).collect();

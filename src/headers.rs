@@ -96,6 +96,8 @@ enum Outcome {
     Ok,
     /// It failed, for the short reason given, such as `exit 3`.
     Failed(String),
+    /// It printed a value, run again after a 401, and the endpoint refused that too, with this status.
+    Refused(u16),
 }
 
 /// A header command that did not produce a value.
@@ -159,8 +161,8 @@ impl Header {
                 let formatted = if format.is_some() { ", formatted" } else { "" };
                 format!("env `{variable}`{formatted}")
             }
-            Source::Command { argv, format, ttl, .. } => {
-                let program = argv.first().map_or("", |Secret(program)| program.as_str());
+            Source::Command { format, ttl, .. } => {
+                let program = self.program().unwrap_or_default();
                 let formatted = if format.is_some() { ", formatted" } else { "" };
                 format!("command `{program}`{formatted}, reused for {}s", ttl.as_secs())
             }
@@ -200,7 +202,31 @@ impl Header {
                 "command failed, last run {}: {reason}. The user has to fix it, usually by signing in again.",
                 ago(at)
             ),
+            Some((at, Outcome::Refused(status))) => format!(
+                "command ran, last run {}, but what it printed was refused with HTTP {status}. The user has to sign \
+                 in again.",
+                ago(at)
+            ),
         })
+    }
+
+    /// The program a command header runs, without its arguments, which can hold secrets. `None` for other plugs.
+    pub(crate) fn program(&self) -> Option<&str> {
+        let Source::Command { argv, .. } = &self.source else {
+            return None;
+        };
+        argv.first().map(|Secret(program)| program.as_str())
+    }
+
+    /// Records that the endpoint answered `status` to the value the command just printed, run again for the
+    /// purpose. Does nothing for other plugs, or when the last run failed.
+    pub(crate) fn refused(&self, status: u16) {
+        if let Source::Command { last_run, .. } = &self.source {
+            let mut last_run = last_run.lock().unwrap_or_else(PoisonError::into_inner);
+            if let Some((_, outcome @ Outcome::Ok)) = last_run.as_mut() {
+                *outcome = Outcome::Refused(status);
+            }
+        }
     }
 
     /// Produces the header to send. With `fresh`, a command runs again even if its last output is still in its

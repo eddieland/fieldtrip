@@ -205,3 +205,8 @@ cargo test --workspace --all-features
   Listing runs nothing and sends nothing, and shows neither stdout nor stderr. A template's command reports the same
   run for every endpoint that shares it. Literal and `env` headers have no such line.
   Done when: `cargo test credential_status`
+- [x] **41. The 401 retry is reported.** When a 401 makes the header commands run again and the retry is refused
+  with a 401 too, `introspect` and `execute` say both happened, name each header and its program, and say the user
+  has to sign in again, as distinct from a 403. `list_endpoints` shows the command's value as refused. A command that
+  fails when run again says the 401 came first, and the retry is not sent. A retry that works adds nothing.
+  Done when: `cargo test unauthorized_retry`

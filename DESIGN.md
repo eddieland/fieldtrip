@@ -240,3 +240,6 @@ Settled. To change one, ask the user, then add a new dated line instead of editi
 - 2026-11-14: `list_endpoints` shows how each header command's last run went: ok, failed and why, or not run yet.
 - 2026-11-14: That status is only read, never produced: listing endpoints runs no command and sends nothing.
 - 2026-11-14: A failure is shown by a short reason, such as `exit 3`. Stdout and stderr are not shown there.
+- 2026-11-14: When the retry after a 401 is refused with a 401 too, the result says both happened and names each
+  header and program that ran again, so the user knows to sign in again rather than ask for a permission.
+- 2026-11-14: A command that fails when run again after a 401 is reported with that 401 as the reason it ran.
