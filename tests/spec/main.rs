@@ -47,6 +47,8 @@ mod headers_refresh;
 #[cfg(test)]
 mod headers_static;
 #[cfg(test)]
+mod history;
+#[cfg(test)]
 mod introspect_file;
 #[cfg(test)]
 mod introspect_http;

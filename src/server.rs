@@ -4,6 +4,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::fmt::Write as _;
 use std::sync::Arc;
 
+use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::tool::{InputResponses, RequestState};
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{CallToolResponse, CallToolResult, ContentBlock, Implementation, ServerCapabilities, ServerConfig};
@@ -40,6 +41,11 @@ const INSTRUCTIONS: &str = "fieldtrip lets you use GraphQL APIs the user has con
      such as `first` or `limit`, because each list multiplies the cost of everything under it. Avoid fields \
      marked deprecated, whose reason names the replacement.";
 
+/// Added to [`INSTRUCTIONS`] when the user keeps an audit log, which `history` reads.
+const HISTORY_INSTRUCTIONS: &str = "\nThe user keeps an audit log of `execute` attempts. At the start of a task, or \
+     after an interruption, `history` shows what was already sent or refused, in this session and earlier ones. Do \
+     not send again what the user declined unless they ask for it.";
+
 /// What a tool hands back: text for the calling agent, or an error message that says what to do next.
 type ToolResult = Result<String, String>;
 
@@ -54,6 +60,8 @@ pub(crate) struct Fieldtrip {
     outstanding: Arc<Outstanding>,
     /// Where each `execute` attempt is recorded.
     audit: Arc<Audit>,
+    /// The tools this server offers. `history` is left out when there is no audit log to read.
+    tools: Arc<ToolRouter<Self>>,
 }
 
 /// Arguments of `describe`.
@@ -489,6 +497,28 @@ fn listing(out: &mut String, schema: &Loaded, name: &str, endpoint: &Endpoint, s
 /// How much of a response that is not JSON to quote in an error.
 const EXCERPT: usize = 300;
 
+/// How many attempts `history` returns when it is not told.
+const DEFAULT_HISTORY: usize = 20;
+
+/// The most attempts `history` returns.
+const MAX_HISTORY: usize = 100;
+
+/// Arguments of `history`.
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+struct HistoryArguments {
+    /// The endpoint to show the attempts on.
+    #[schemars(
+        description = "Optional. An endpoint name, as listed by `list_endpoints`, to see only the attempts on it. \
+                       Leave it out to see the attempts on every configured endpoint."
+    )]
+    endpoint: Option<String>,
+    /// How many attempts to show.
+    #[schemars(
+        description = "Optional. How many of the most recent attempts to return, from 1 to 100. Defaults to 20."
+    )]
+    limit: Option<usize>,
+}
+
 /// Arguments of `introspect`.
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 struct IntrospectArguments {
@@ -507,12 +537,17 @@ struct IntrospectArguments {
 impl Fieldtrip {
     /// Creates a server for `config` that reaches endpoints through `http` and records attempts in `audit`.
     pub(crate) fn new(config: Config, http: Client, audit: Audit) -> Self {
+        let mut tools = Self::tool_router();
+        if audit.path().is_none() {
+            tools.remove_route("history");
+        }
         Self {
             config: Arc::new(config),
             schemas: Arc::default(),
             http,
             outstanding: Arc::default(),
             audit: Arc::new(audit),
+            tools: Arc::new(tools),
         }
     }
 
@@ -960,6 +995,97 @@ impl Fieldtrip {
     }
 
     #[tool(
+        title = "Show earlier GraphQL executions",
+        description = "List the `execute` attempts recorded in the user's audit log, in this session and earlier \
+                       ones, so you can see what was already sent or refused before you repeat it. Use it at the \
+                       start of a task that may have been started before, after an interruption, or when the user \
+                       asks what was run. Returns the most recent attempts, oldest first, one JSON object per line \
+                       with the time, the `session`, the endpoint, the operation's name and text, its variables \
+                       unless the user keeps them out, and `approval`: `accepted`, `auto` or `client` for one that \
+                       was sent, with its HTTP `status`, time in `ms` and number of `errors`, or `declined`, \
+                       `cancelled`, `unavailable`, `failed` or `denied` with a `reason` for one that was not. The \
+                       first line names this session. Responses are not recorded: run the operation again to see \
+                       data. Do not send again what the user declined unless they ask for it.",
+        annotations(read_only_hint = true, open_world_hint = false)
+    )]
+    fn history(&self, Parameters(arguments): Parameters<HistoryArguments>) -> ToolResult {
+        // With no endpoint named, the result is held to the smallest limit of any of them.
+        let (budget, scope) = if let Some(name) = &arguments.endpoint {
+            (self.endpoint(name)?.max_output_chars, format!(" on `{name}`"))
+        } else {
+            let smallest = self
+                .config
+                .endpoints
+                .values()
+                .map(|endpoint| endpoint.max_output_chars)
+                .min();
+            (smallest.unwrap_or(usize::MAX), String::new())
+        };
+        let wanted = arguments.endpoint.as_deref();
+        let history = self.audit.history(|endpoint| {
+            wanted.map_or_else(
+                || self.config.endpoints.contains_key(endpoint),
+                |wanted| wanted == endpoint,
+            )
+        })?;
+        let session = self.audit.session();
+        let mut notes = String::new();
+        if history.partial {
+            notes.push_str("\n[Only the end of the audit log was read, so older attempts are not counted.]");
+        }
+        if history.unreadable > 0 {
+            let lines = if history.unreadable == 1 {
+                "1 line".to_owned()
+            } else {
+                format!("{} lines", history.unreadable)
+            };
+            let _ = write!(
+                notes,
+                "\n[{lines} of the audit log could not be read and were skipped.]"
+            );
+        }
+        let total = history.lines.len();
+        if total == 0 {
+            return Ok(format!(
+                "The audit log has no `execute` attempts{scope} yet. This session is `{session}`.{notes}"
+            ));
+        }
+        let limit = arguments.limit.unwrap_or(DEFAULT_HISTORY).clamp(1, MAX_HISTORY);
+        let recent = history.lines.get(total.saturating_sub(limit)..).unwrap_or_default();
+
+        // The newest attempts matter most, so when they do not all fit, the oldest are left out.
+        let head_room = 400 + notes.chars().count();
+        let mut room = budget.saturating_sub(head_room + NOTE_ROOM);
+        let mut kept = 0;
+        for line in recent.iter().rev() {
+            let length = line.chars().count() + 1;
+            if kept > 0 && length > room {
+                break;
+            }
+            room = room.saturating_sub(length);
+            kept += 1;
+        }
+        let shown = recent.get(recent.len() - kept..).unwrap_or_default();
+        let mut out = format!(
+            "The last {kept} of {total} `execute` attempts{scope} in the audit log, oldest first, one JSON object per \
+             line. This session is `{session}`: a line with another `session` is from an earlier run of fieldtrip."
+        );
+        for line in shown {
+            let _ = write!(out, "\n{line}");
+        }
+        let dropped = recent.len() - kept;
+        if dropped > 0 {
+            let attempts = if dropped == 1 { "attempt" } else { "attempts" };
+            let _ = write!(
+                out,
+                "\n[{dropped} older {attempts} did not fit in this result. Pass a smaller `limit`, or an `endpoint`.]"
+            );
+        }
+        out.push_str(&notes);
+        Ok(capped(out, budget, "Pass a smaller `limit`, or an `endpoint`."))
+    }
+
+    #[tool(
         title = "Load a GraphQL schema overview",
         description = "Load an endpoint's schema and summarize it: its description, how many types of each kind it \
                        has, and the name of every query and mutation field, which are the API's entry points. Call \
@@ -986,6 +1112,15 @@ impl Fieldtrip {
 }
 
 impl Fieldtrip {
+    /// The server's instructions, which mention `history` only when it is offered.
+    fn instructions(&self) -> String {
+        if self.audit.path().is_some() {
+            format!("{INSTRUCTIONS}{HISTORY_INSTRUCTIONS}")
+        } else {
+            INSTRUCTIONS.to_owned()
+        }
+    }
+
     /// Looks up an endpoint by name.
     fn endpoint(&self, name: &str) -> Result<&Endpoint, String> {
         self.config.endpoints.get(name).ok_or_else(|| {
@@ -1060,11 +1195,11 @@ impl Fieldtrip {
     clippy::unused_async_trait_impl,
     reason = "the async fn is generated by rmcp's `tool_handler` macro"
 )]
-#[tool_handler]
+#[tool_handler(router = self.tools)]
 impl ServerHandler for Fieldtrip {
     fn get_info(&self) -> ServerConfig {
         ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(Implementation::new(env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION")))
-            .with_instructions(INSTRUCTIONS)
+            .with_instructions(self.instructions())
     }
 }

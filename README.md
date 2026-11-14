@@ -181,6 +181,10 @@ its variables is replaced with `<redacted>`. For an API whose variables are sens
 `audit_variables = false` on its endpoint or template to leave them out. The file and its folders are created
 readable by you alone, fieldtrip never rotates or deletes it, and a log that cannot be opened stops the server.
 
+With an audit log, the agent also gets a read-only `history` tool. It returns the latest attempts from the log, for
+the endpoints in your config, so an agent starting a new session can see what was already run or declined before it
+repeats anything. Responses are never in the log, only what was sent and how it went.
+
 ### Checking a config
 
 ```sh

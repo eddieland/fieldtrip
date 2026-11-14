@@ -29,6 +29,7 @@ in the user's config, out of the agent's sight and out of its control.
 | `describe` | `endpoint`, `name` (`Type` or `Type.field`) | That definition as compact SDL |
 | `estimate_cost` | `endpoint`, `operation` or `operation_name`, `variables?` | Validation errors, or cost, depth, breakdown, assumptions |
 | `execute` | `endpoint`, `operation` or `operation_name`, `variables?`, `select?`, `save?` | Status, `errors`, then the rest or a summary |
+| `history` | `endpoint?`, `limit?` | The latest `execute` attempts from the audit log. Only offered with `audit_log` |
 
 ## Config shape
 
@@ -234,3 +235,5 @@ Settled. To change one, ask the user, then add a new dated line instead of editi
 - 2026-11-14: The log never holds a header value. `env` and `command` values in a line are removed, as from a body,
   using values already known: no command runs for the log. `audit_variables = false` leaves the variables out.
 - 2026-11-14: A line that cannot be written is logged to stderr. The attempt has happened, so the call is not failed.
+- 2026-11-14: `history` reads the log back as it is written, newest last, and is offered only when `audit_log` is set.
+- 2026-11-14: `history` shows only endpoints in the current config, since several configs can share one log.

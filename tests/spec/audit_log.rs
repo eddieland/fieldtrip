@@ -1,4 +1,4 @@
-//! Slice 36: `audit_log` appends one JSON line per `execute` attempt, so the user can tell afterwards what an agent
+//! Slice 38: `audit_log` appends one JSON line per `execute` attempt, so the user can tell afterwards what an agent
 //! ran, where, and who approved it. Attempts that were refused or declined are recorded too, with the reason. Header
 //! values never are, secrets are removed from what the calling agent wrote, and `audit_variables = false` leaves the
 //! variables out.

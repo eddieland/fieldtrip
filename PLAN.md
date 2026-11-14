@@ -193,3 +193,10 @@ cargo test --workspace --all-features
   by the user alone, and a log that cannot be opened stops the server. Without the setting no file is created.
   `fieldtrip check` shows the path.
   Done when: `cargo test audit_log`
+- [x] **39. `history`.** With `audit_log` set, a read-only `history` tool, taking an optional `endpoint` and `limit`
+  (20, at most 100), returns the most recent attempts as the JSON lines the log holds, oldest first, after a line
+  that names this session, so attempts from earlier sessions can be told apart. Only configured endpoints are shown,
+  an unknown `endpoint` is an error that lists them, and lines that are not readable are counted and skipped. When the
+  lines do not fit in `max_output_chars`, the oldest are left out and the result says so. Without `audit_log` the
+  tool is not offered and the instructions do not mention it.
+  Done when: `cargo test history`

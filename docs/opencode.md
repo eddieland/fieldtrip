@@ -102,7 +102,7 @@ To write the config by hand, add fieldtrip under `mcp.servers` in `opencode.json
 ```
 
 - `command` is one list: the program, then its arguments. JSON doesn't expand `~`, so write the full path.
-- `"codemode": false` puts fieldtrip's six tools directly on the agent's tool list instead of behind OpenCode's Code
+- `"codemode": false` puts fieldtrip's tools directly on the agent's tool list instead of behind OpenCode's Code
   Mode. That way the agent reads each tool's description, which says when to use the tool and in what order. This
   is a recommendation, not a requirement.
 - Keep secrets out of OpenCode's config, especially a config committed to a project. fieldtrip inherits OpenCode's
@@ -119,6 +119,7 @@ Run `opencode mcp list` and check that fieldtrip shows as connected. Its tools a
 | `fieldtrip_describe` | Read one type or field as SDL |
 | `fieldtrip_estimate_cost` | Validate and cost an operation without sending it |
 | `fieldtrip_execute` | Run an operation, after you approve it |
+| `fieldtrip_history` | The operations already run or refused, when your config sets `audit_log` |
 
 ## 4. Make OpenCode ask before every execute
 

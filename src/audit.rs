@@ -4,6 +4,8 @@
 //! what approved them, and what came back. Attempts that were refused, declined or failed are recorded too, with the
 //! reason. An operation that is not valid is not an attempt, since nothing could have been sent.
 //!
+//! `history` reads the log back, so a calling agent can see what was already tried, in this session or an earlier one.
+//!
 //! Header values never reach the log. What the calling agent wrote, the operation and its variables, has the values
 //! of the endpoint's `env` and `command` plugs removed, as a response body does, and an endpoint with
 //! `audit_variables = false` has its variables left out altogether.
@@ -11,7 +13,7 @@
 use std::fmt::Write as _;
 use std::fs::OpenOptions;
 use std::hash::{BuildHasher as _, RandomState};
-use std::io::Write as _;
+use std::io::{Read as _, Seek as _, SeekFrom, Write as _};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -73,6 +75,20 @@ pub(crate) enum Outcome<'reply> {
     Failed(&'reply str),
 }
 
+/// The most of the end of the log that `history` reads.
+const HISTORY_BYTES: u64 = 16 * 1024 * 1024;
+
+/// The lines `history` found.
+#[derive(Debug, Default)]
+pub(crate) struct History {
+    /// The lines that were kept, as written, oldest first.
+    pub(crate) lines: Vec<String>,
+    /// How many lines are not a JSON object with an `endpoint`, and were skipped.
+    pub(crate) unreadable: usize,
+    /// Whether the log is longer than what was read, so older lines were not looked at.
+    pub(crate) partial: bool,
+}
+
 /// The only part of a response the log reads: how many `errors` it has.
 #[derive(Deserialize)]
 struct Errors {
@@ -104,6 +120,60 @@ impl Audit {
             session,
             writing: Mutex::new(()),
         })
+    }
+
+    /// The log file, when there is one.
+    pub(crate) fn path(&self) -> Option<&Path> {
+        self.path.as_deref()
+    }
+
+    /// The ID this server writes in the `session` of each line.
+    pub(crate) fn session(&self) -> &str {
+        &self.session
+    }
+
+    /// Reads the lines of the log whose `endpoint` passes `keep`, oldest first. Only the last 16 MiB are read, and
+    /// a last line that is still being written is left out.
+    ///
+    /// # Errors
+    ///
+    /// Returns a message naming the file when it cannot be read. A log that is not there has no lines.
+    pub(crate) fn history(&self, keep: impl Fn(&str) -> bool) -> Result<History, String> {
+        let Some(path) = &self.path else {
+            return Ok(History::default());
+        };
+        let unreadable = |error: std::io::Error| format!("could not read the audit log {}: {error}", path.display());
+        let mut file = match std::fs::File::open(path) {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(History::default()),
+            Err(error) => return Err(unreadable(error)),
+        };
+        let length = file.metadata().map_err(unreadable)?.len();
+        let start = length.saturating_sub(HISTORY_BYTES);
+        file.seek(SeekFrom::Start(start)).map_err(unreadable)?;
+        let mut bytes = Vec::new();
+        file.take(HISTORY_BYTES).read_to_end(&mut bytes).map_err(unreadable)?;
+        let text = String::from_utf8_lossy(&bytes);
+        let mut lines = text.split_inclusive('\n').filter(|line| line.ends_with('\n'));
+        if start > 0 {
+            // The read began partway through a line.
+            lines.next();
+        }
+        let mut history = History {
+            partial: start > 0,
+            ..History::default()
+        };
+        for line in lines.map(str::trim).filter(|line| !line.is_empty()) {
+            let endpoint = serde_json::from_str::<Value>(line)
+                .ok()
+                .and_then(|entry| entry.get("endpoint").and_then(Value::as_str).map(str::to_owned));
+            match endpoint {
+                Some(endpoint) if keep(&endpoint) => history.lines.push(line.to_owned()),
+                Some(_) => {}
+                None => history.unreadable += 1,
+            }
+        }
+        Ok(history)
     }
 
     /// Appends one line for `attempt` on `endpoint`. A line that cannot be written is reported in the log on
