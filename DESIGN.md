@@ -23,7 +23,7 @@ in the user's config, out of the agent's sight and out of its control.
 | Tool | Input | Returns |
 | --- | --- | --- |
 | `list_endpoints` | none | Each endpoint's name, URL, schema source and header names |
-| `list_operations` | `endpoint`, `query?` | Saved operations: name, kind, description, variables, cost, text |
+| `list_operations` | `endpoint`, `query?`, `uses?`, `kind?`, `name?` | Saved operations: name, kind, description, variables, cost, text |
 | `introspect` | `endpoint`, `refresh?` | Overview: root types, counts, query and mutation names |
 | `search_schema` | `endpoint`, `query` | Ranked matches as one-line signatures |
 | `describe` | `endpoint`, `name` (`Type` or `Type.field`) | That definition as compact SDL |
@@ -217,3 +217,7 @@ Settled. To change one, ask the user, then add a new dated line instead of editi
 - 2026-11-14: Saved operations are checked whenever the schema loads, which for a schema file is at startup. `check`
   checks them against schema files only, since it sends nothing.
 - 2026-11-14: A saved operation is approved like any other. It carries no approval setting of its own.
+- 2026-11-14: `list_operations` filters by `uses`, written in the cost map's pattern language. A bare type name is
+  allowed there too, and matches a field on that type or one that returns it. Every pattern must match.
+- 2026-11-14: A library can hold hundreds of operations. Past five matches, `list_operations` gives one line each and
+  `name` shows one in full. `search_schema` lists at most ten saved operations.

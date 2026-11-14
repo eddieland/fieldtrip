@@ -237,7 +237,11 @@ fn search_schema_finds_saved_operations_by_name_and_description() {
     let reply = mcp.call("search_schema", &json!({ "endpoint": "store", "query": "user" }));
     assert!(!reply.is_error, "{}", reply.text);
     assert!(reply.text.starts_with("Saved operations that match"), "{}", reply.text);
-    assert!(reply.text.contains("UserById (query)"), "{}", reply.text);
+    assert!(
+        reply.text.contains("UserById (query, cost 1, $id: ID!)"),
+        "{}",
+        reply.text
+    );
     assert!(
         reply.text.contains("Query.user("),
         "schema matches follow: {}",
@@ -245,7 +249,11 @@ fn search_schema_finds_saved_operations_by_name_and_description() {
     );
 
     let reply = mcp.call("search_schema", &json!({ "endpoint": "store", "query": "order" }));
-    assert!(reply.text.contains("OrderById (query) BROKEN"), "{}", reply.text);
+    assert!(
+        reply.text.contains("OrderById (query, BROKEN: no longer valid"),
+        "{}",
+        reply.text
+    );
 
     let reply = mcp.call("search_schema", &json!({ "endpoint": "store", "query": "runbook" }));
     assert!(reply.text.contains("UserById"), "descriptions match: {}", reply.text);

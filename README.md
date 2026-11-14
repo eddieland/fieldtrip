@@ -188,7 +188,10 @@ query OrderById($id: ID!) {
 ```
 
 `list_operations` shows the agent each one with its description, variables, estimated cost and text, and
-`search_schema` lists matching ones first. The agent runs one with `execute` and `operation_name`. You approve it as
+`search_schema` lists matching ones first. A library can hold hundreds, so the agent can narrow the list: `query`
+matches words in the name or description, `kind` keeps queries or mutations, and `uses` keeps operations that select
+a type (`Order`) or a chain of fields written as in a [cost map](#cost-map) (`User.orders`, `Query.order.lineItems`,
+`*.payment`), following fragments. When more than five match, each gets one line, and `name` shows one in full. The agent runs one with `execute` and `operation_name`. You approve it as
 you would any other operation, and the prompt shows the full text that will be sent.
 
 Every operation is validated against the schema at startup (for a `schema` file) or when the schema is first loaded

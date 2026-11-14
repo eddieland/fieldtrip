@@ -8,7 +8,9 @@
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
+use apollo_compiler::ExecutableDocument;
 use apollo_compiler::ast::{Definition, Document, OperationType};
+use apollo_compiler::executable::{Selection, SelectionSet};
 
 use crate::config::Endpoint;
 use crate::plan::{Kind, Plan, Variables};
@@ -236,4 +238,182 @@ impl Saved {
 pub(crate) fn problems(error: &str) -> Vec<&str> {
     let listed: Vec<&str> = error.lines().filter_map(|line| line.strip_prefix("- ")).collect();
     if listed.is_empty() { vec![error.trim()] } else { listed }
+}
+
+/// A filter on what an operation selects: a type, or a chain of fields written as in a cost map.
+///
+/// `Order` matches an operation that selects a field of `Order` or a field that returns one. `User.orders` matches
+/// one that selects `orders` on a `User`, and `Query.user.orders` only that exact path from the root. `*` stands for
+/// any one name. Fragments are followed.
+#[derive(Debug)]
+pub(crate) struct Selector {
+    /// The type the chain starts on.
+    anchor: Part,
+    /// The field names, outermost first. Empty for a bare type.
+    fields: Vec<Part>,
+}
+
+/// One part of a [`Selector`].
+#[derive(Debug, PartialEq, Eq)]
+enum Part {
+    /// A type or field name.
+    Name(String),
+    /// `*`: any one name.
+    Any,
+}
+
+impl Part {
+    /// Reads one part, or `None` when it is neither a name nor `*`.
+    fn parse(text: &str) -> Option<Self> {
+        if text == "*" {
+            return Some(Self::Any);
+        }
+        let mut characters = text.chars();
+        let is_name = characters
+            .next()
+            .is_some_and(|first| first == '_' || first.is_ascii_alphabetic())
+            && characters.all(|character| character == '_' || character.is_ascii_alphanumeric());
+        is_name.then(|| Self::Name(text.to_owned()))
+    }
+
+    /// Whether this part stands for `name`.
+    fn is(&self, name: &str) -> bool {
+        match self {
+            Self::Name(own) => own == name,
+            Self::Any => true,
+        }
+    }
+}
+
+/// One field on the way from the root of an operation down to a selected field.
+#[derive(Debug, Clone, Copy)]
+struct Step<'doc> {
+    /// The type the field is selected on.
+    parent: &'doc str,
+    /// The field's name.
+    field: &'doc str,
+    /// The named type the field returns, without list or non-null wrappers.
+    returns: &'doc str,
+}
+
+impl Selector {
+    /// Reads `text` and checks its names against `loaded`.
+    ///
+    /// # Errors
+    ///
+    /// Returns a message for the calling agent when `text` is not a pattern, or names a type or a first field that
+    /// the schema does not have, with the nearest names.
+    pub(crate) fn parse(text: &str, loaded: &Loaded) -> Result<Self, String> {
+        let text = text.trim();
+        let not_a_pattern = || {
+            format!(
+                "`{text}` in `uses` is not a pattern. Give a type name, such as `Order`, or a type followed by field \
+                 names with dots between them, such as `Order.payment` or `Query.order.lineItems`. `*` stands for \
+                 any one name."
+            )
+        };
+        let mut parts = text.split('.').map(Part::parse);
+        let anchor = parts.next().flatten().ok_or_else(not_a_pattern)?;
+        let fields: Vec<Part> = parts.collect::<Option<_>>().ok_or_else(not_a_pattern)?;
+        if anchor == Part::Any && fields.is_empty() {
+            return Err(not_a_pattern());
+        }
+        if let Part::Name(type_name) = &anchor {
+            if !loaded.has_type(type_name) {
+                let near = nearest(type_name, loaded.type_names(), SUGGESTIONS);
+                let mut out =
+                    format!("`{text}` in `uses` names the type `{type_name}`, which the schema does not have.");
+                if !near.is_empty() {
+                    let _ = write!(out, " Nearest types: {}.", backticked(near));
+                }
+                return Err(out);
+            }
+            if let Some(Part::Name(field)) = fields.first() {
+                let names = loaded.field_names(type_name);
+                if !names.contains(&field.as_str()) {
+                    let near = nearest(field, names, SUGGESTIONS);
+                    let mut out = format!("`{text}` in `uses`: the type `{type_name}` has no field `{field}`.");
+                    if !near.is_empty() {
+                        let _ = write!(out, " Nearest fields: {}.", backticked(near));
+                    }
+                    return Err(out);
+                }
+            }
+        }
+        Ok(Self { anchor, fields })
+    }
+
+    /// Whether the field at the end of `path` is one this selector picks out.
+    fn matches(&self, path: &[Step<'_>]) -> bool {
+        let Some(last) = path.last() else { return false };
+        if self.fields.is_empty() {
+            return self.anchor.is(last.parent) || self.anchor.is(last.returns);
+        }
+        let Some(chain) = path
+            .len()
+            .checked_sub(self.fields.len())
+            .and_then(|start| path.get(start..))
+        else {
+            return false;
+        };
+        chain.first().is_some_and(|step| self.anchor.is(step.parent))
+            && chain.iter().zip(&self.fields).all(|(step, field)| field.is(step.field))
+    }
+}
+
+impl Saved {
+    /// Whether the operation matches every one of `selectors` against `loaded`. An operation that no longer
+    /// validates matches none, since its fields cannot be placed in the schema.
+    pub(crate) fn uses(&self, loaded: &Loaded, selectors: &[Selector]) -> bool {
+        if selectors.is_empty() {
+            return true;
+        }
+        let Ok(document) = ExecutableDocument::parse_and_validate(loaded.schema(), self.text.as_str(), &self.file)
+        else {
+            return false;
+        };
+        let Some(operation) = document.operations.iter().next() else {
+            return false;
+        };
+        let mut found = vec![false; selectors.len()];
+        walk(&document, &operation.selection_set, &mut Vec::new(), &mut |path| {
+            for (found, selector) in found.iter_mut().zip(selectors) {
+                *found = *found || selector.matches(path);
+            }
+        });
+        found.into_iter().all(|found| found)
+    }
+}
+
+/// Calls `visit` with the path to every field selected under `set`, following fragments. Introspection fields such
+/// as `__typename` are left out.
+fn walk<'doc>(
+    document: &'doc ExecutableDocument,
+    set: &'doc SelectionSet,
+    path: &mut Vec<Step<'doc>>,
+    visit: &mut dyn FnMut(&[Step<'doc>]),
+) {
+    for selection in &set.selections {
+        match selection {
+            Selection::Field(field) => {
+                if field.name.starts_with("__") {
+                    continue;
+                }
+                path.push(Step {
+                    parent: set.ty.as_str(),
+                    field: field.name.as_str(),
+                    returns: field.definition.ty.inner_named_type().as_str(),
+                });
+                visit(path);
+                walk(document, &field.selection_set, path, visit);
+                path.pop();
+            }
+            Selection::InlineFragment(inline) => walk(document, &inline.selection_set, path, visit),
+            Selection::FragmentSpread(spread) => {
+                if let Some(fragment) = spread.fragment_def(document) {
+                    walk(document, &fragment.selection_set, path, visit);
+                }
+            }
+        }
+    }
 }

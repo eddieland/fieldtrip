@@ -102,7 +102,35 @@ struct ListOperationsArguments {
                        out to list them all."
     )]
     query: Option<String>,
+    /// Patterns the operations must use.
+    #[schemars(
+        description = "Optional. Patterns that every listed operation must match, all of them. A type name, such as \
+                       `Order`, matches an operation that selects a field of that type or a field that returns it. A \
+                       type followed by field names, as in a cost map, matches an operation that selects that chain: \
+                       `User.orders` is `orders` selected on a `User`, `Query.order.lineItems` is that exact path \
+                       from the root, and `*` stands for any one name, as in `*.payment`. Fragments are followed."
+    )]
+    #[serde(default)]
+    uses: Vec<String>,
+    /// Query or mutation.
+    #[schemars(description = "Optional. `query` or `mutation`, to list only operations of that kind.")]
+    kind: Option<String>,
+    /// One operation to show in full.
+    #[schemars(
+        description = "Optional. The exact name of one saved operation, to show it in full with its text. Give it \
+                       alone, without the other filters."
+    )]
+    name: Option<String>,
 }
+
+/// How many operations `list_operations` shows in full. Past this, each gets one line.
+const FULL_LISTING: usize = 5;
+
+/// How many saved operations `search_schema` lists before the schema's own matches.
+const SEARCH_OPERATIONS: usize = 10;
+
+/// How many operation names a `list_operations` that matched nothing offers instead.
+const NAMES_OFFERED: usize = 20;
 
 /// Arguments of `estimate_cost`.
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -279,6 +307,141 @@ fn planned(
     })
 }
 
+/// One saved operation on one line: name, kind, cost or `BROKEN`, variables and the start of its description.
+fn summary(schema: &Loaded, name: &str, endpoint: &Endpoint, saved: &Saved) -> String {
+    let mut line = match saved.plan(schema, name, endpoint) {
+        Ok(plan) => format!("{} ({}, cost {}", saved.name, saved.kind.keyword(), plan.cost),
+        Err(_) => format!("{} ({}, BROKEN: no longer valid", saved.name, saved.kind.keyword()),
+    };
+    if !saved.variables.is_empty() {
+        let _ = write!(line, ", {}", saved.variables.join(", "));
+    }
+    line.push(')');
+    if let Some(description) = &saved.description {
+        let mut short: String = description.chars().take(DESCRIPTION_CHARS).collect();
+        if short.len() < description.len() {
+            short.push('…');
+        }
+        let _ = write!(line, "  \"{short}\"");
+    }
+    line
+}
+
+/// How much of a description [`summary`] shows.
+const DESCRIPTION_CHARS: usize = 100;
+
+/// The filters of a `list_operations` call, checked against the schema.
+struct Filters<'call> {
+    query: &'call str,
+    selectors: Vec<library::Selector>,
+    uses: &'call [String],
+    kind: Option<Kind>,
+}
+
+impl<'call> Filters<'call> {
+    /// Reads the filters of `arguments`.
+    fn new(arguments: &'call ListOperationsArguments, schema: &Loaded) -> Result<Self, String> {
+        let kind = match arguments.kind.as_deref().map(str::trim) {
+            None | Some("") => None,
+            Some("query") => Some(Kind::Query),
+            Some("mutation") => Some(Kind::Mutation),
+            Some(other) => return Err(format!("`kind` is `query` or `mutation`, not `{other}`.")),
+        };
+        let selectors = arguments
+            .uses
+            .iter()
+            .map(|text| library::Selector::parse(text, schema))
+            .collect::<Result<_, String>>()?;
+        Ok(Self {
+            query: arguments.query.as_deref().unwrap_or_default().trim(),
+            selectors,
+            uses: &arguments.uses,
+            kind,
+        })
+    }
+
+    /// Whether no filter was given.
+    const fn are_empty(&self) -> bool {
+        self.query.is_empty() && self.uses.is_empty() && self.kind.is_none()
+    }
+
+    /// The filters in words, such as `"order", using `Order.payment`, mutations only`.
+    fn described(&self) -> String {
+        let mut parts = Vec::new();
+        if !self.query.is_empty() {
+            parts.push(format!("\"{}\"", self.query));
+        }
+        if !self.uses.is_empty() {
+            parts.push(format!("using {}", backticked(self.uses.iter().map(String::as_str))));
+        }
+        if let Some(kind) = self.kind {
+            parts.push(format!("{}s only", kind.keyword()));
+        }
+        parts.join(", ")
+    }
+
+    /// The operations of `library` that pass every filter.
+    fn apply<'library>(&self, library: &'library library::Library, schema: &Loaded) -> Vec<&'library Saved> {
+        library
+            .matching(self.query)
+            .into_iter()
+            .filter(|saved| self.kind.is_none_or(|kind| saved.kind == kind))
+            .filter(|saved| saved.uses(schema, &self.selectors))
+            .collect()
+    }
+}
+
+/// The result of `list_operations` for the operations of `endpoint` that pass `filters`.
+fn operation_list(schema: &Loaded, name: &str, endpoint: &Endpoint, filters: &Filters<'_>) -> String {
+    let library = &endpoint.operations;
+    let total = library.operations.len();
+    let matching = filters.apply(library, schema);
+    let mut out = if filters.are_empty() {
+        let source = library.source.as_ref().map(|source| source.display().to_string());
+        format!(
+            "{total} saved operation{} for `{name}`, from {}.",
+            if total == 1 { "" } else { "s" },
+            source.unwrap_or_default()
+        )
+    } else if matching.is_empty() {
+        let mut out = format!("No saved operation for `{name}` matches {}.", filters.described());
+        if !filters.uses.is_empty() {
+            out.push_str(" An operation marked broken never matches `uses`.");
+        }
+        if total <= NAMES_OFFERED {
+            let names = library.operations.iter().map(|saved| saved.name.as_str());
+            let _ = write!(out, " Its saved operations: {}.", backticked(names));
+        } else {
+            let _ = write!(out, " It has {total}: loosen a filter.");
+        }
+        out.push('\n');
+        return out;
+    } else {
+        format!(
+            "{} of {total} saved operations for `{name}` match {}.",
+            matching.len(),
+            filters.described()
+        )
+    };
+    out.push_str(" Run one with `execute` and `operation_name`, passing the variables it declares.\n");
+    if matching.len() <= FULL_LISTING {
+        for saved in matching {
+            out.push('\n');
+            listing(&mut out, schema, name, endpoint, saved);
+        }
+        return out;
+    }
+    let _ = writeln!(
+        out,
+        "More than {FULL_LISTING} match, so each is on one line, without its text. Narrow the list with `query`, \
+         `uses` or `kind`, or pass `name` to see one in full.\n"
+    );
+    for saved in matching {
+        let _ = writeln!(out, "{}", summary(schema, name, endpoint, saved));
+    }
+    out
+}
+
 /// Writes one saved operation for `list_operations`.
 fn listing(out: &mut String, schema: &Loaded, name: &str, endpoint: &Endpoint, saved: &Saved) {
     let _ = writeln!(out, "{} ({})", saved.name, saved.kind.keyword());
@@ -424,8 +587,11 @@ impl Fieldtrip {
                        For each operation it returns the name, whether it is a query or a mutation, the user's \
                        description, the variables it declares, its estimated cost and its text, which is also a \
                        good model for an operation of your own. One that no longer validates against the schema is \
-                       marked BROKEN with what is wrong, and `execute` will not run it. Pass `query` to see only the \
-                       operations whose name or description holds those words.",
+                       marked BROKEN with what is wrong, and `execute` will not run it. A library can hold hundreds, \
+                       so narrow it: `query` matches words in the name or description, `uses` matches operations \
+                       that select a type or a chain of fields such as `Order.payment`, and `kind` keeps queries or \
+                       mutations. When more than five match, each gets one line without its text, and `name` shows \
+                       one in full.",
         annotations(read_only_hint = true, open_world_hint = true)
     )]
     async fn list_operations(&self, Parameters(arguments): Parameters<ListOperationsArguments>) -> ToolResult {
@@ -447,36 +613,31 @@ impl Fieldtrip {
             ));
         }
         let schema = self.schema(name, false).await?;
-        let total = library.operations.len();
-        let query = arguments.query.as_deref().unwrap_or_default().trim();
-        let matching = library.matching(query);
-        let mut out = if query.is_empty() {
-            format!(
-                "{total} saved operation{} for `{name}`, from {}.",
-                if total == 1 { "" } else { "s" },
-                source.display()
-            )
-        } else if matching.is_empty() {
-            let names = library.operations.iter().map(|saved| saved.name.as_str());
-            return Ok(format!(
-                "No saved operation for `{name}` matches \"{query}\". Its saved operations: {}.\n",
-                backticked(names)
-            ));
-        } else {
-            format!(
-                "{} of {total} saved operations for `{name}` match \"{query}\".",
-                matching.len()
-            )
-        };
-        out.push_str(" Run one with `execute` and `operation_name`, passing the variables it declares.\n");
-        for saved in matching {
-            out.push('\n');
+        if let Some(wanted) = &arguments.name {
+            if arguments.query.is_some() || !arguments.uses.is_empty() || arguments.kind.is_some() {
+                return Err(
+                    "Give `name` alone: it shows one operation, and `query`, `uses` and `kind` narrow a list."
+                        .to_owned(),
+                );
+            }
+            let saved = library.get(name, wanted)?;
+            let mut out = format!(
+                "Saved operation `{wanted}` for `{name}`, from {}. Run it with `execute` and `operation_name`, \
+                 passing the variables it declares.\n\n",
+                saved.file.display()
+            );
             listing(&mut out, &schema, name, endpoint, saved);
+            return Ok(capped(
+                out,
+                endpoint.max_output_chars,
+                "The operation is too long to show whole.",
+            ));
         }
+        let filters = Filters::new(&arguments, &schema)?;
         Ok(capped(
-            out,
+            operation_list(&schema, name, endpoint, &filters),
             endpoint.max_output_chars,
-            "Pass `query` to list fewer operations.",
+            "Narrow the list with `query`, `uses` or `kind`.",
         ))
     }
 
@@ -528,15 +689,15 @@ impl Fieldtrip {
         let mut out = "Saved operations that match, which `execute` runs by `operation_name` (`list_operations` \
                        shows them in full):\n"
             .to_owned();
-        for saved in saved {
-            let _ = write!(out, "{} ({})", saved.name, saved.kind.keyword());
-            if saved.plan(&schema, name, endpoint).is_err() {
-                out.push_str(" BROKEN: no longer valid");
-            }
-            if let Some(description) = &saved.description {
-                let _ = write!(out, "  \"{description}\"");
-            }
-            out.push('\n');
+        for saved in saved.iter().take(SEARCH_OPERATIONS) {
+            let _ = writeln!(out, "{}", summary(&schema, name, endpoint, saved));
+        }
+        if saved.len() > SEARCH_OPERATIONS {
+            let _ = writeln!(
+                out,
+                "And {} more. `list_operations` with the same `query` lists them all.",
+                saved.len() - SEARCH_OPERATIONS
+            );
         }
         out.push('\n');
         Ok(out + &found)

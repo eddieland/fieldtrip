@@ -174,3 +174,11 @@ cargo test --workspace --all-features
   warning in `fieldtrip check` and in the startup log. A file that does not hold one named query or mutation, two
   files with one name, or a missing directory stop the server at startup.
   Done when: `cargo test saved_operations`
+- [x] **37. Operation filters.** `list_operations` takes `uses`, patterns that every listed operation must match: a
+  type name matches an operation that selects a field of that type or one that returns it, and a type followed by
+  field names matches that chain as a cost map pattern does, `*` included, following fragments. `kind` keeps queries
+  or mutations, and all filters combine. A pattern with an unknown type or first field is an error that suggests the
+  nearest names, and a broken operation matches no pattern. Past five matches each operation is one line without its
+  text, and `name` shows one in full. `search_schema` lists at most ten saved operations, and a list that matches
+  nothing names the operations only when there are at most twenty.
+  Done when: `cargo test operation_filters`
