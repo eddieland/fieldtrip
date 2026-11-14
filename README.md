@@ -104,6 +104,7 @@ failed with a reason such as `exit 3`, or not run yet), without running it, so a
 | `max_response_bytes` | 8 MiB | Bytes of a response to `execute` that are read. A body cut off here cannot be parsed |
 | `max_output_chars` | `40000` | Characters in one tool result, which is what reaches the agent's context |
 | `audit_variables` | `true` | `false` leaves this endpoint's variables out of the audit log, below |
+| `schema_ttl` | `86400` | Seconds an introspected schema is kept on disk, across restarts. `0` keeps none |
 | `costs` | none | A cost map, below |
 
 ### Large schemas and responses
@@ -124,6 +125,14 @@ dropped, such as `"…(+412 more items)"`. The agent can also ask for less after
 
 When a connection in the response has `pageInfo.hasNextPage: true`, the result points it out with its cursor, so the
 agent pages through it instead of asking for a bigger page.
+
+### Schema cache
+
+An introspected schema is kept in `fieldtrip/schemas` under your cache directory, so a restart doesn't introspect a
+large API again. A copy is used for `schema_ttl` seconds, a day unless you set it, and `introspect` with `refresh`
+always loads a new one. When the endpoint can't be introspected, an older copy stands in, and the agent is told how
+old it is and that it may be out of date. Only you can read the files, and a key in the URL's query isn't written to
+them.
 
 ### Several instances of one service
 

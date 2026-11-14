@@ -46,6 +46,7 @@ max_schema_bytes  = 33554432                 # optional, default 32 MiB, read of
 max_response_bytes = 8388608                 # optional, default 8 MiB, read of a response to `execute`
 max_output_chars  = 40000                    # optional, default 40,000, characters in one tool result
 audit_variables   = false                    # optional, default true: leave variables out of the audit log
+schema_ttl        = 86400                    # optional, seconds a schema is cached, default 1 day
 
 [templates.acme.headers]
 X-Client      = "fieldtrip"
@@ -64,7 +65,7 @@ mutations         = "deny"                   # optional, default "prompt". A tem
 X-Api-Key = { env = "ACME_API_KEY" }
 ```
 
-An endpoint takes `schema`, `headers`, `costs`, `operations`, `assumed_list_size`, `timeout`,
+An endpoint takes `schema`, `schema_ttl`, `headers`, `costs`, `operations`, `assumed_list_size`, `timeout`,
 `response_headers`, the three `max_` limits and `audit_variables` from its template unless it sets them. Headers
 merge by name, ignoring case, and the endpoint's win.
 `url`, `description`, `approval` and `auto_approve_cost` are only ever set on the endpoint. `mutations` comes from the
@@ -243,3 +244,10 @@ Settled. To change one, ask the user, then add a new dated line instead of editi
 - 2026-11-14: When the retry after a 401 is refused with a 401 too, the result says both happened and names each
   header and program that ran again, so the user knows to sign in again rather than ask for a permission.
 - 2026-11-14: A command that fails when run again after a 401 is reported with that 401 as the reason it ran.
+- 2026-11-14: An introspected schema is kept as SDL under `fieldtrip/schemas` in the user's cache directory, per URL.
+- 2026-11-14: A kept schema is used instead of introspecting for `schema_ttl` seconds, a day unless set. 0 keeps none.
+- 2026-11-14: `introspect(refresh = true)` never reads the cache. It introspects, and keeps the result.
+- 2026-11-14: When introspection fails, a kept schema of any age stands in, except on a refresh. `introspect` says
+  how old it is and why, and every other tool that reads it says it may be out of date.
+- 2026-11-14: A kept schema's file is named by a hash of the URL and holds only the shown URL. Only the user can
+  read it.

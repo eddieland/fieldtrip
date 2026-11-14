@@ -13,7 +13,7 @@ fn url_alone_serves_one_introspected_endpoint() {
     assert_eq!(
         endpoints.text,
         format!(
-            "default\n  url: {}\n  schema: introspection\n  approval: the user is asked before every operation\n",
+            "default\n  url: {}\n  schema: introspection, cached for 1 day\n  approval: the user is asked before every operation\n",
             mock.url()
         ),
         "the endpoint is called `default`, has no headers, and keeps the default policy"

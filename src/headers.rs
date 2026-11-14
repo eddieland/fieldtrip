@@ -448,14 +448,9 @@ async fn run(name: &str, argv: &[Secret], directory: &Path) -> Result<String, Fa
     Ok(value.to_owned())
 }
 
-/// How long ago `at` was, roughly: `4 s ago`, `12 min ago` or `3 h ago`.
+/// How long ago `at` was, roughly: `4 s ago` or `12 min ago`.
 fn ago(at: Instant) -> String {
-    let seconds = at.elapsed().as_secs();
-    match seconds {
-        0..120 => format!("{seconds} s ago"),
-        120..7_200 => format!("{} min ago", seconds / 60),
-        _ => format!("{} h ago", seconds / 3_600),
-    }
+    format!("{} ago", crate::config::show_duration(at.elapsed()))
 }
 
 /// The error for a header that is not one of the plugs.

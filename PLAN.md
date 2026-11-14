@@ -210,3 +210,11 @@ cargo test --workspace --all-features
   has to sign in again, as distinct from a 403. `list_endpoints` shows the command's value as refused. A command that
   fails when run again says the 401 came first, and the retry is not sent. A retry that works adds nothing.
   Done when: `cargo test unauthorized_retry`
+- [x] **42. Schema cache.** An introspected schema is kept as SDL in `fieldtrip/schemas` under the user's cache
+  directory, keyed by URL, and a restart within `schema_ttl` (a day unless an endpoint or template sets it) reads it
+  instead of introspecting, saying so. `refresh` always introspects and renews the copy. When introspection fails, an
+  older copy stands in, labelled with its age and the error, and `describe`, `search_schema` and `estimate_cost` say
+  it may be out of date. A refresh that fails does not fall back. `schema_ttl = 0` keeps nothing, and an endpoint
+  with a `schema` file keeps nothing. The file shows no URL key and only the user can read it. `list_endpoints` and
+  `fieldtrip check` show the setting.
+  Done when: `cargo test schema_cache`

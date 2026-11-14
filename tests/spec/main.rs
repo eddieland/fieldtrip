@@ -79,6 +79,8 @@ mod response_summary;
 #[cfg(test)]
 mod saved_operations;
 #[cfg(test)]
+mod schema_cache;
+#[cfg(test)]
 mod search_schema;
 #[cfg(test)]
 mod templates;
