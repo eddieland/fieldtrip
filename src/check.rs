@@ -36,6 +36,9 @@ pub(crate) async fn check(config: &Config) -> Report {
             )
         },
     );
+    if let Some(log) = &config.audit_log {
+        let _ = writeln!(text, "Audit log: {}", log.display());
+    }
     let mut problems = 0;
     let mut warnings = 0;
     if config.endpoints.is_empty() {
@@ -99,6 +102,9 @@ async fn endpoint_report(out: &mut Out, name: &str, endpoint: &Endpoint) {
     out.line("approval", approval::policy(endpoint));
     if endpoint.mutations == Mutations::Deny {
         out.line("mutations", "denied");
+    }
+    if !endpoint.audit_variables {
+        out.line("audit variables", "not recorded");
     }
     out.line("timeout", format!("{}s", endpoint.timeout.as_secs()));
     out.line("assumed list size", endpoint.assumed_list_size);

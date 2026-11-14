@@ -4,6 +4,7 @@
 //! running them, and execute them only with the user's approval.
 
 mod approval;
+mod audit;
 mod check;
 mod cli;
 mod config;
@@ -41,6 +42,9 @@ enum Error {
     /// The HTTP client could not be set up.
     #[error("{0}")]
     Http(String),
+    /// The audit log could not be opened.
+    #[error("{0}")]
+    Audit(String),
     /// The report of `fieldtrip check` could not be written.
     #[error("could not write the report: {0}")]
     Output(#[source] std::io::Error),
@@ -141,7 +145,8 @@ fn start(args: &Args) -> Result<(), Error> {
 
 /// Serves MCP on stdio until the client disconnects.
 async fn serve(config: Config) -> Result<(), Error> {
-    let server = Fieldtrip::new(config, http::Client::new().map_err(Error::Http)?);
+    let audit = audit::Audit::open(config.audit_log.clone()).map_err(Error::Audit)?;
+    let server = Fieldtrip::new(config, http::Client::new().map_err(Error::Http)?, audit);
     server.check_saved_operations().await;
     let service = server
         .serve(rmcp::transport::stdio())

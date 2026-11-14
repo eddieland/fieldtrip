@@ -14,6 +14,7 @@ use serde_json::value::RawValue;
 use tokio::sync::Mutex;
 
 use crate::approval::{self, Operation, Outstanding, Round};
+use crate::audit::{self, Attempt, Audit, Outcome, Verdict};
 use crate::config::{Config, Endpoint, Mutations, show_bytes};
 use crate::http::Client;
 use crate::library::{self, Saved};
@@ -51,6 +52,8 @@ pub(crate) struct Fieldtrip {
     http: Client,
     /// Approval prompts that are waiting for an answer, on protocol revisions that ask by round trip.
     outstanding: Arc<Outstanding>,
+    /// Where each `execute` attempt is recorded.
+    audit: Arc<Audit>,
 }
 
 /// Arguments of `describe`.
@@ -502,13 +505,14 @@ struct IntrospectArguments {
 
 #[tool_router]
 impl Fieldtrip {
-    /// Creates a server for `config` that reaches endpoints through `http`.
-    pub(crate) fn new(config: Config, http: Client) -> Self {
+    /// Creates a server for `config` that reaches endpoints through `http` and records attempts in `audit`.
+    pub(crate) fn new(config: Config, http: Client, audit: Audit) -> Self {
         Self {
             config: Arc::new(config),
             schemas: Arc::default(),
             http,
             outstanding: Arc::default(),
+            audit: Arc::new(audit),
         }
     }
 
@@ -783,15 +787,44 @@ impl Fieldtrip {
             arguments.operation_name.as_deref(),
         )?;
         // Before the schema is loaded, so a denied mutation causes no request of any kind.
-        approval::refuse_denied_mutation(name, endpoint, text)?;
+        if let Err(refusal) = approval::refuse_denied_mutation(name, endpoint, text) {
+            let operation = audit::mutation_name(text);
+            let attempt = Attempt {
+                endpoint: name,
+                kind: Kind::Mutation,
+                operation: operation.as_deref(),
+                text,
+                variables: &arguments.variables,
+                cost: None,
+            };
+            let verdict = Verdict {
+                approval: "denied",
+                reason: Some("mutations are turned off for this endpoint by `mutations = \"deny\"`".to_owned()),
+            };
+            self.audit.record(endpoint, &attempt, &verdict, Outcome::NotSent).await;
+            return Err(refusal);
+        }
         let select = arguments.select.as_deref().map(select::Path::parse).transpose()?;
         let schema = self.schema(name, false).await?;
         let plan = planned(&schema, name, endpoint, text, saved, &arguments.variables)?;
         plan.check_variables(&schema, &arguments.variables)?;
+        let attempt = Attempt {
+            endpoint: name,
+            kind: plan.kind,
+            operation: plan.name.as_deref(),
+            text: &plan.text,
+            variables: &arguments.variables,
+            cost: Some(plan.cost),
+        };
 
         // Nothing below this point runs unless the human accepted, or the user's config waives the prompt.
-        let unasked = if let Some(reason) = approval::waiver(endpoint, &plan) {
-            format!(" The user was not asked: {reason}.")
+        let (verdict, unasked) = if let Some(waiver) = approval::waiver(endpoint, &plan) {
+            let unasked = format!(" The user was not asked: {}.", waiver.reason);
+            let verdict = Verdict {
+                approval: waiver.label,
+                reason: Some(waiver.reason),
+            };
+            (verdict, unasked)
         } else {
             let prompt = approval::prompt(name, &endpoint.shown_url, &plan, &arguments.variables);
             let decision = if approval::asks_by_round_trip(&context) {
@@ -810,18 +843,30 @@ impl Fieldtrip {
             } else {
                 approval::ask(&context.peer, prompt).await
             };
-            decision.into_result(name)?;
-            String::new()
+            let verdict = Verdict {
+                approval: decision.label(),
+                reason: decision.reason(),
+            };
+            if let Err(refusal) = decision.into_result(name) {
+                self.audit.record(endpoint, &attempt, &verdict, Outcome::NotSent).await;
+                return Err(refusal);
+            }
+            (verdict, String::new())
         };
 
-        let reply = self
+        let sent = self
             .http
             .post(
                 endpoint,
                 &plan.payload(&arguments.variables),
                 endpoint.max_response_bytes,
             )
-            .await?;
+            .await;
+        let outcome = sent
+            .as_ref()
+            .map_or_else(|error| Outcome::Failed(error), Outcome::Answered);
+        self.audit.record(endpoint, &attempt, &verdict, outcome).await;
+        let reply = sent?;
         let summary = format!(
             "Sent {} to `{name}`. Estimated cost: {}.{unasked}\n{}",
             plan.title(),

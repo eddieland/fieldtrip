@@ -9,6 +9,8 @@ mod support;
 #[cfg(test)]
 mod approval_policy;
 #[cfg(test)]
+mod audit_log;
+#[cfg(test)]
 mod check_command;
 #[cfg(test)]
 mod cli_flags;

@@ -75,6 +75,8 @@ pub(crate) struct Config {
     pub(crate) path: Option<PathBuf>,
     /// Endpoints by name, in name order.
     pub(crate) endpoints: BTreeMap<String, Endpoint>,
+    /// The file each `execute` attempt is recorded in, as an absolute path. `None` records nothing.
+    pub(crate) audit_log: Option<PathBuf>,
 }
 
 /// One GraphQL endpoint.
@@ -118,6 +120,8 @@ pub(crate) struct Endpoint {
     pub(crate) auto_approve_cost: Option<u64>,
     /// Whether `execute` may send mutations at all.
     pub(crate) mutations: Mutations,
+    /// Whether the audit log records the variables sent with each operation.
+    pub(crate) audit_variables: bool,
 }
 
 /// Whether `execute` may send mutations to an endpoint.
@@ -181,6 +185,7 @@ const HIDDEN: &str = "<redacted>";
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawConfig {
+    audit_log: Option<PathBuf>,
     #[serde(default)]
     endpoints: BTreeMap<String, RawEndpoint>,
     #[serde(default)]
@@ -208,6 +213,7 @@ struct RawEndpoint {
     max_schema_bytes: Option<u64>,
     max_response_bytes: Option<u64>,
     max_output_chars: Option<u64>,
+    audit_variables: Option<bool>,
 }
 
 /// One `[templates.NAME]` table as written.
@@ -234,6 +240,7 @@ struct RawTemplate {
     max_schema_bytes: Option<u64>,
     max_response_bytes: Option<u64>,
     max_output_chars: Option<u64>,
+    audit_variables: Option<bool>,
 }
 
 /// The settings an endpoint can take from a template. serde cannot flatten them into a table that denies
@@ -250,6 +257,7 @@ struct RawShared {
     max_schema_bytes: Option<u64>,
     max_response_bytes: Option<u64>,
     max_output_chars: Option<u64>,
+    audit_variables: Option<bool>,
 }
 
 /// Moves the shared settings out of a raw endpoint or template.
@@ -266,6 +274,7 @@ macro_rules! shared {
             max_schema_bytes: $raw.max_schema_bytes,
             max_response_bytes: $raw.max_response_bytes,
             max_output_chars: $raw.max_output_chars,
+            audit_variables: $raw.audit_variables,
         }
     };
 }
@@ -284,6 +293,7 @@ struct Template {
     max_schema_bytes: Option<usize>,
     max_response_bytes: Option<usize>,
     max_output_chars: Option<usize>,
+    audit_variables: Option<bool>,
 }
 
 impl Config {
@@ -329,6 +339,7 @@ impl Config {
         Ok(Self {
             path: None,
             endpoints: BTreeMap::from([(FLAG_ENDPOINT.to_owned(), endpoint)]),
+            audit_log: None,
         })
     }
 
@@ -370,6 +381,7 @@ impl Config {
         Ok(Self {
             path: Some(path.to_path_buf()),
             endpoints,
+            audit_log: raw.audit_log.map(|log| resolve(&log, base)),
         })
     }
 }
@@ -423,6 +435,7 @@ impl Template {
             max_schema_bytes: byte_limit("max_schema_bytes", shared.max_schema_bytes)?,
             max_response_bytes: byte_limit("max_response_bytes", shared.max_response_bytes)?,
             max_output_chars: output_limit(shared.max_output_chars)?,
+            audit_variables: shared.audit_variables,
         })
     }
 }
@@ -517,6 +530,7 @@ impl Endpoint {
             max_output_chars: output_limit(shared.max_output_chars)?
                 .or(template.max_output_chars)
                 .unwrap_or(DEFAULT_MAX_OUTPUT_CHARS),
+            audit_variables: shared.audit_variables.or(template.audit_variables).unwrap_or(true),
             approval,
             auto_approve_cost: raw.auto_approve_cost,
             mutations,

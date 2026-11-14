@@ -34,6 +34,28 @@ pub(crate) enum Decision {
 }
 
 impl Decision {
+    /// The word the audit log records for this decision.
+    pub(crate) const fn label(&self) -> &'static str {
+        match self {
+            Self::Approved => "accepted",
+            Self::Declined => "declined",
+            Self::Cancelled => "cancelled",
+            Self::Unavailable => "unavailable",
+            Self::Failed(_) => "failed",
+        }
+    }
+
+    /// Why nothing was sent, in a few words, for the audit log. `None` for an approval.
+    pub(crate) fn reason(&self) -> Option<String> {
+        match self {
+            Self::Approved => None,
+            Self::Declined => Some("the user declined".to_owned()),
+            Self::Cancelled => Some("the user dismissed the prompt without answering".to_owned()),
+            Self::Unavailable => Some("the MCP client cannot show approval prompts".to_owned()),
+            Self::Failed(reason) => Some(format!("the approval prompt failed: {reason}")),
+        }
+    }
+
     /// `Ok` for an approval. Anything else becomes the error the calling agent sees, which says that nothing was
     /// sent to `endpoint` and what to do next.
     pub(crate) fn into_result(self, endpoint: &str) -> Result<(), String> {
@@ -93,17 +115,32 @@ pub(crate) fn refuse_denied_mutation(name: &str, endpoint: &Endpoint, operation:
     Ok(())
 }
 
+/// Why an operation may be sent without asking.
+#[derive(Debug)]
+pub(crate) struct Waiver {
+    /// The word the audit log records: `client` or `auto`.
+    pub(crate) label: &'static str,
+    /// The reason, as a clause: `the cost is within ...`.
+    pub(crate) reason: String,
+}
+
 /// Why `plan` may be sent to `endpoint` without asking, when the user's config says so. `None` means ask.
 ///
 /// Both ways out are set by the user in the config file. Mutations are only ever waived by `approval = "client"`.
-pub(crate) fn waiver(endpoint: &Endpoint, plan: &Plan) -> Option<String> {
+pub(crate) fn waiver(endpoint: &Endpoint, plan: &Plan) -> Option<Waiver> {
     if endpoint.approval == Approval::Client {
-        return Some("approval is left to the MCP client for this endpoint".to_owned());
+        return Some(Waiver {
+            label: "client",
+            reason: "approval is left to the MCP client for this endpoint".to_owned(),
+        });
     }
     let threshold = endpoint
         .auto_approve_cost
         .filter(|threshold| plan.kind == Kind::Query && plan.cost <= *threshold)?;
-    Some(format!("the cost is within `auto_approve_cost` ({threshold})"))
+    Some(Waiver {
+        label: "auto",
+        reason: format!("the cost is within `auto_approve_cost` ({threshold})"),
+    })
 }
 
 /// One line saying who approves operations for `endpoint`, for `list_endpoints`.

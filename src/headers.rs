@@ -140,6 +140,20 @@ impl Header {
         matches!(self.source, Source::Command { .. })
     }
 
+    /// The value fieldtrip would remove from a response for this header, found without running anything: an `env`
+    /// variable's current value, or a command's last output, however old. A literal has none, as in
+    /// [`Resolved::secret`], and neither has a command that has not run yet.
+    pub(crate) async fn known_secret(&self) -> Option<Secret> {
+        match &self.source {
+            Source::Literal(_) => None,
+            Source::Env { variable, .. } => std::env::var(variable)
+                .ok()
+                .filter(|value| !value.is_empty())
+                .map(Secret),
+            Source::Command { cached, .. } => cached.lock().await.as_ref().map(|(_, secret)| secret.clone()),
+        }
+    }
+
     /// Produces the header to send. With `fresh`, a command runs again even if its last output is still in its
     /// `ttl`.
     ///
