@@ -64,7 +64,9 @@ Register it with your MCP client as a stdio server:
 }
 ```
 
-For a step-by-step setup in a specific client, see [docs/opencode.md](docs/opencode.md) for OpenCode.
+For a step-by-step setup in a specific client, see [docs/opencode.md](docs/opencode.md) for OpenCode. OpenCode accepts
+fieldtrip's approval prompts without showing them, so fieldtrip never asks it: use `approval = "client"` there, as the
+guide explains.
 
 Without `--config`, fieldtrip reads `~/.config/fieldtrip/config.toml`. For a single endpoint that needs no headers
 you can skip the file and pass `--url https://api.example.com/graphql`, optionally with `--schema schema.graphql`.
@@ -85,9 +87,12 @@ X-Api-Key     = { env = "ACME_API_KEY" }
 Authorization = { command = ["python", "-m", "acme_auth", "token"], format = "Bearer {}" }
 ```
 
-A header value is a literal, an environment variable, or the trimmed stdout of a command. `format` wraps the value, so
-a CLI that prints a bare token becomes `Authorization: Bearer <token>`. The command runs directly from the argument
-list, with no shell.
+A header value is a literal, an environment variable, or the trimmed stdout of a command. `format` wraps the value, so a
+CLI that prints a bare token becomes `Authorization: Bearer <token>`. The command runs directly from the argument list,
+with no shell. Its output is reused for `ttl` seconds (300 unless set), and when the endpoint answers 401 the command
+runs again and the request is retried once. If the retry is refused too, the agent is told that both were, and which
+program ran, so it can ask you to sign in again. `list_endpoints` tells the agent how each command's last run went (ok,
+failed with a reason such as `exit 3`, or not run yet), without running it, so an expired login is reported as one.
 
 | Setting | Default | What it does |
 | --- | --- | --- |
@@ -101,6 +106,7 @@ list, with no shell.
 | `max_response_bytes` | 8 MiB | Bytes of a response to `execute` that are read. A body cut off here cannot be parsed |
 | `max_output_chars` | `40000` | Characters in one tool result, which is what reaches the agent's context |
 | `audit_variables` | `true` | `false` leaves this endpoint's variables out of the audit log, below |
+| `schema_ttl` | `86400` | Seconds an introspected schema is kept on disk, across restarts. `0` keeps none |
 | `costs` | none | A cost map, below |
 
 ### Large schemas and responses
@@ -121,6 +127,14 @@ dropped, such as `"…(+412 more items)"`. The agent can also ask for less after
 
 When a connection in the response has `pageInfo.hasNextPage: true`, the result points it out with its cursor, so the
 agent pages through it instead of asking for a bigger page.
+
+### Schema cache
+
+An introspected schema is kept in `fieldtrip/schemas` under your cache directory, so a restart doesn't introspect a
+large API again. A copy is used for `schema_ttl` seconds, a day unless you set it, and `introspect` with `refresh`
+always loads a new one. When the endpoint can't be introspected, an older copy stands in, and the agent is told how
+old it is and that it may be out of date. Only you can read the files, and a key in the URL's query isn't written to
+them.
 
 ### Several instances of one service
 

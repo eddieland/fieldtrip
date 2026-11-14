@@ -7,7 +7,7 @@
 use std::fmt::Write as _;
 use std::path::Path;
 
-use crate::config::{Config, Endpoint, Mutations, show_bytes};
+use crate::config::{Config, Endpoint, Mutations, show_bytes, show_duration};
 use crate::schema::Loaded;
 use crate::{approval, library};
 
@@ -117,6 +117,11 @@ async fn endpoint_report(out: &mut Out, name: &str, endpoint: &Endpoint) {
     let schema = match &endpoint.schema {
         None => {
             out.line("max schema bytes", show_bytes(endpoint.max_schema_bytes));
+            if endpoint.schema_ttl.is_zero() {
+                out.line("schema ttl", "0, not cached");
+            } else {
+                out.line("schema ttl", show_duration(endpoint.schema_ttl));
+            }
             out.line(
                 "schema",
                 "introspection, not checked: check sends nothing to the endpoint",

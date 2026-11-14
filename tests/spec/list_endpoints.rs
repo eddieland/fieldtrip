@@ -40,10 +40,11 @@ fn lists_each_endpoint_with_its_url_and_schema_source() {
            url: https://api.acme.example/graphql\n  \
            schema: file {}\n  \
            approval: the user is asked before every operation\n  \
-           headers: Authorization, X-Client\n\
+           headers: Authorization, X-Client\n  \
+           header Authorization: command not run yet\n\
          public\n  \
            url: http://localhost:9/graphql\n  \
-           schema: introspection\n  \
+           schema: introspection, cached for 1 day\n  \
            approval: the user is asked before every operation\n",
         schema_path.display()
     );

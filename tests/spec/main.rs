@@ -11,6 +11,8 @@ mod approval_policy;
 #[cfg(test)]
 mod audit_log;
 #[cfg(test)]
+mod auto_accept;
+#[cfg(test)]
 mod check_command;
 #[cfg(test)]
 mod cli_flags;
@@ -24,6 +26,8 @@ mod cost_checks;
 mod cost_map;
 #[cfg(test)]
 mod cost_patterns;
+#[cfg(test)]
+mod credential_status;
 #[cfg(test)]
 mod describe;
 #[cfg(test)]
@@ -77,10 +81,14 @@ mod response_summary;
 #[cfg(test)]
 mod saved_operations;
 #[cfg(test)]
+mod schema_cache;
+#[cfg(test)]
 mod search_schema;
 #[cfg(test)]
 mod templates;
 #[cfg(test)]
 mod tool_descriptions;
+#[cfg(test)]
+mod unauthorized_retry;
 #[cfg(test)]
 mod url_secrets;

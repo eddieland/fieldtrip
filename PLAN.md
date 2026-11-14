@@ -200,3 +200,28 @@ cargo test --workspace --all-features
   lines do not fit in `max_output_chars`, the oldest are left out and the result says so. Without `audit_log` the
   tool is not offered and the instructions do not mention it.
   Done when: `cargo test history`
+- [x] **40. Credential status.** `list_endpoints` shows, for each header that comes from a command, how its last run
+  went: `ok` and when, `failed` with when and a short reason such as `exit 3` or `printed nothing`, or `not run yet`.
+  Listing runs nothing and sends nothing, and shows neither stdout nor stderr. A template's command reports the same
+  run for every endpoint that shares it. Literal and `env` headers have no such line.
+  Done when: `cargo test credential_status`
+- [x] **41. The 401 retry is reported.** When a 401 makes the header commands run again and the retry is refused
+  with a 401 too, `introspect` and `execute` say both happened, name each header and its program, and say the user
+  has to sign in again, as distinct from a 403. `list_endpoints` shows the command's value as refused. A command that
+  fails when run again says the 401 came first, and the retry is not sent. A retry that works adds nothing.
+  Done when: `cargo test unauthorized_retry`
+- [x] **42. Schema cache.** An introspected schema is kept as SDL in `fieldtrip/schemas` under the user's cache
+  directory, keyed by URL, and a restart within `schema_ttl` (a day unless an endpoint or template sets it) reads it
+  instead of introspecting, saying so. `refresh` always introspects and renews the copy. When introspection fails, an
+  older copy stands in, labelled with its age and the error, and `describe`, `search_schema` and `estimate_cost` say
+  it may be out of date. A refresh that fails does not fall back. `schema_ttl = 0` keeps nothing, and an endpoint
+  with a `schema` file keeps nothing. The file shows no URL key and only the user can read it. `list_endpoints` and
+  `fieldtrip check` show the setting.
+  Done when: `cargo test schema_cache`
+- [x] **43. Clients that accept prompts unseen.** A client whose `clientInfo.name` is `opencode`, in any case, is never
+  sent an approval prompt. Where `execute` would ask, it refuses, with no prompt and no request, on both protocol
+  revisions, and the refusal names the client, `approval = "client"` and the `fieldtrip_execute` permission rule.
+  `approval = "client"` and queries within `auto_approve_cost` still run, and a mutation is still refused.
+  `list_endpoints` says so on each endpoint that prompts, a warning is logged when such a client connects, and other
+  clients are asked as before. With `audit_log` set, the refusal is recorded as `unavailable`, naming the client.
+  Done when: `cargo test auto_accept`
