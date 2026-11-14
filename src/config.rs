@@ -18,6 +18,7 @@ use serde::Deserialize;
 use crate::cli::Args;
 use crate::costs::CostMap;
 use crate::headers::Header;
+use crate::library::Library;
 
 /// Why the configuration could not be loaded.
 #[derive(Debug, thiserror::Error)]
@@ -97,6 +98,8 @@ pub(crate) struct Endpoint {
     pub(crate) assumed_list_size: u64,
     /// The rules that replace the built-in costs for this endpoint. Empty when it has no cost map.
     pub(crate) costs: Arc<CostMap>,
+    /// The operations the user saved for this endpoint. Empty when it names no `operations` directory.
+    pub(crate) operations: Arc<Library>,
     /// How long a request to this endpoint may take.
     pub(crate) timeout: Duration,
     /// The response headers `execute` shows, as written in the config. Only the user chooses them, because some
@@ -199,6 +202,7 @@ struct RawEndpoint {
     headers: BTreeMap<String, toml::Value>,
     assumed_list_size: Option<u64>,
     costs: Option<PathBuf>,
+    operations: Option<PathBuf>,
     timeout: Option<u64>,
     response_headers: Option<Vec<String>>,
     max_schema_bytes: Option<u64>,
@@ -224,6 +228,7 @@ struct RawTemplate {
     headers: BTreeMap<String, toml::Value>,
     assumed_list_size: Option<u64>,
     costs: Option<PathBuf>,
+    operations: Option<PathBuf>,
     timeout: Option<u64>,
     response_headers: Option<Vec<String>>,
     max_schema_bytes: Option<u64>,
@@ -239,6 +244,7 @@ struct RawShared {
     headers: BTreeMap<String, toml::Value>,
     assumed_list_size: Option<u64>,
     costs: Option<PathBuf>,
+    operations: Option<PathBuf>,
     timeout: Option<u64>,
     response_headers: Option<Vec<String>>,
     max_schema_bytes: Option<u64>,
@@ -254,6 +260,7 @@ macro_rules! shared {
             headers: $raw.headers,
             assumed_list_size: $raw.assumed_list_size,
             costs: $raw.costs,
+            operations: $raw.operations,
             timeout: $raw.timeout,
             response_headers: $raw.response_headers,
             max_schema_bytes: $raw.max_schema_bytes,
@@ -270,6 +277,7 @@ struct Template {
     headers: Vec<Arc<Header>>,
     assumed_list_size: Option<u64>,
     costs: Option<Arc<CostMap>>,
+    operations: Option<Arc<Library>>,
     timeout: Option<Duration>,
     response_headers: Option<Vec<String>>,
     mutations: Option<Mutations>,
@@ -405,6 +413,10 @@ impl Template {
                 .costs
                 .map(|costs| CostMap::load(&resolve(&costs, base)).map(Arc::new))
                 .transpose()?,
+            operations: shared
+                .operations
+                .map(|operations| Library::load(&resolve(&operations, base)).map(Arc::new))
+                .transpose()?,
             timeout: timeout(shared.timeout)?,
             response_headers: response_headers(shared.response_headers)?,
             mutations,
@@ -477,6 +489,10 @@ impl Endpoint {
             Some(path) => Arc::new(CostMap::load(&resolve(path, base))?),
             None => template.costs.clone().unwrap_or_default(),
         };
+        let operations = match &shared.operations {
+            Some(path) => Arc::new(Library::load(&resolve(path, base))?),
+            None => template.operations.clone().unwrap_or_default(),
+        };
         Ok(Self {
             shown_url,
             description: raw.description.as_deref().map(one_line).filter(|text| !text.is_empty()),
@@ -487,6 +503,7 @@ impl Endpoint {
                 .or(template.assumed_list_size)
                 .unwrap_or(DEFAULT_ASSUMED_LIST_SIZE),
             costs,
+            operations,
             timeout: timeout(shared.timeout)?.or(template.timeout).unwrap_or(DEFAULT_TIMEOUT),
             response_headers: response_headers(shared.response_headers)?
                 .or_else(|| template.response_headers.clone())

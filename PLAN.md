@@ -165,3 +165,20 @@ cargo test --workspace --all-features
   raise `first`. A connection inside a list is counted across its items. At most five are named. The hints come with
   a summary and with a selection too.
   Done when: `cargo test pagination_hints`
+- [x] **36. Saved operations.** An endpoint or a template names a directory of `.graphql` files with `operations`,
+  one named query or mutation each, whose leading comment is its description. `list_operations` lists each with its
+  kind, description, variables, estimated cost and canonical text, and `query` narrows the list by name and
+  description. `search_schema` lists the matching ones first, and `list_endpoints` says how many there are. `execute`
+  and `estimate_cost` take `operation_name` instead of `operation`, and the prompt and the request carry the saved
+  operation's canonical text. One that no longer validates is marked broken, is never sent or prompted for, and is a
+  warning in `fieldtrip check` and in the startup log. A file that does not hold one named query or mutation, two
+  files with one name, or a missing directory stop the server at startup.
+  Done when: `cargo test saved_operations`
+- [x] **37. Operation filters.** `list_operations` takes `uses`, patterns that every listed operation must match: a
+  type name matches an operation that selects a field of that type or one that returns it, and a type followed by
+  field names matches that chain as a cost map pattern does, `*` included, following fragments. `kind` keeps queries
+  or mutations, and all filters combine. A pattern with an unknown type or first field is an error that suggests the
+  nearest names, and a broken operation matches no pattern. Past five matches each operation is one line without its
+  text, and `name` shows one in full. `search_schema` lists at most ten saved operations, and a list that matches
+  nothing names the operations only when there are at most twenty.
+  Done when: `cargo test operation_filters`

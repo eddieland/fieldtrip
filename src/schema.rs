@@ -48,6 +48,20 @@ impl Loaded {
         &self.schema
     }
 
+    /// Whether the schema defines a type called `name`.
+    pub(crate) fn has_type(&self, name: &str) -> bool {
+        self.schema.types.contains_key(name)
+    }
+
+    /// The names of the types the schema defines, leaving out the built-in ones.
+    pub(crate) fn type_names(&self) -> impl Iterator<Item = &str> {
+        self.schema
+            .types
+            .iter()
+            .filter(|(_, ty)| !ty.is_built_in())
+            .map(|(name, _)| name.as_str())
+    }
+
     /// The names of the fields of the object or interface called `type_name`. Empty for anything else.
     pub(crate) fn field_names(&self, type_name: &str) -> Vec<&str> {
         match self.schema.types.get(type_name) {

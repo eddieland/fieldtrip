@@ -10,6 +10,7 @@ mod config;
 mod costs;
 mod headers;
 mod http;
+mod library;
 mod plan;
 mod response;
 mod saved;
@@ -140,7 +141,9 @@ fn start(args: &Args) -> Result<(), Error> {
 
 /// Serves MCP on stdio until the client disconnects.
 async fn serve(config: Config) -> Result<(), Error> {
-    let service = Fieldtrip::new(config, http::Client::new().map_err(Error::Http)?)
+    let server = Fieldtrip::new(config, http::Client::new().map_err(Error::Http)?);
+    server.check_saved_operations().await;
+    let service = server
         .serve(rmcp::transport::stdio())
         .await
         .map_err(|error| Error::Session(error.to_string()))?;

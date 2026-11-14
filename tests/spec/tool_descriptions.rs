@@ -15,8 +15,9 @@ schema = "schema.graphql"
 "#;
 
 /// The tools in the order a calling agent uses them.
-const WORKFLOW: [&str; 6] = [
+const WORKFLOW: [&str; 7] = [
     "list_endpoints",
+    "list_operations",
     "introspect",
     "search_schema",
     "describe",

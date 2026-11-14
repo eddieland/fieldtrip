@@ -16,6 +16,7 @@ use tokio::sync::Mutex;
 use crate::approval::{self, Operation, Outstanding, Round};
 use crate::config::{Config, Endpoint, Mutations, show_bytes};
 use crate::http::Client;
+use crate::library::{self, Saved};
 use crate::plan::{Kind, Plan, Variables};
 use crate::schema::{Loaded, introspection};
 use crate::suggest::backticked;
@@ -25,10 +26,13 @@ use crate::{response, saved, select};
 const INSTRUCTIONS: &str = "fieldtrip lets you use GraphQL APIs the user has configured, reading the real schema \
      instead of guessing it. Work in this order:\n\
      1. `list_endpoints` gives the endpoint names. Every other tool takes one.\n\
-     2. `introspect` once per endpoint shows its query and mutation fields, the API's entry points.\n\
-     3. `search_schema` finds a type or field by a word. `describe` shows its exact arguments and return type.\n\
-     4. Write one operation and check it with `estimate_cost` until it is valid and cheap. Nothing is sent.\n\
-     5. `execute` sends it. The user approves each request unless their config says otherwise.\n\
+     2. `list_operations` shows the operations the user has saved and trusts for an endpoint. When one does what you \
+     need, run it by its name instead of writing your own, and skip to step 6.\n\
+     3. `introspect` once per endpoint shows its query and mutation fields, the API's entry points.\n\
+     4. `search_schema` finds a type, field or saved operation by a word. `describe` shows a field's exact \
+     arguments and return type.\n\
+     5. Write one operation and check it with `estimate_cost` until it is valid and cheap. Nothing is sent.\n\
+     6. `execute` sends it, or a saved operation named by `operation_name`. The user approves each request unless their config says otherwise.\n\
      GraphQL habits that matter here: take every field and argument name from the schema, never from memory. \
      Select only the fields you need, since there is no wildcard. Name the operation and pass inputs as \
      variables, not as values pasted into the text: the user reads both when approving. Give lists a page size, \
@@ -78,7 +82,55 @@ struct SearchArguments {
 /// How `estimate_cost` and `execute` describe their `operation` argument to the calling agent.
 const OPERATION: &str = "A GraphQL document holding exactly one query or mutation, plus any fragments it uses. \
      Name the operation and declare its inputs as variables, such as \
-     `query UserName($id: ID!) { user(id: $id) { name } }`. Subscriptions are not supported.";
+     `query UserName($id: ID!) { user(id: $id) { name } }`. Subscriptions are not supported. Leave it out when you \
+     give `operation_name`.";
+
+/// How `estimate_cost` and `execute` describe their `operation_name` argument to the calling agent.
+const OPERATION_NAME: &str = "The name of an operation the user saved for this endpoint, as `list_operations` shows \
+     it, such as `OrderById`. Use it instead of `operation`, and pass the variables it declares. Its saved text is \
+     what is costed, shown and sent.";
+
+/// Arguments of `list_operations`.
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+struct ListOperationsArguments {
+    /// The endpoint name, as listed by `list_endpoints`.
+    endpoint: String,
+    /// Words to filter by.
+    #[schemars(
+        description = "Optional. One or more words separated by spaces, such as `order` or `refund payment`. Only \
+                       operations whose name or description holds every word are listed. Case is ignored. Leave it \
+                       out to list them all."
+    )]
+    query: Option<String>,
+    /// Patterns the operations must use.
+    #[schemars(
+        description = "Optional. Patterns that every listed operation must match, all of them. A type name, such as \
+                       `Order`, matches an operation that selects a field of that type or a field that returns it. A \
+                       type followed by field names, as in a cost map, matches an operation that selects that chain: \
+                       `User.orders` is `orders` selected on a `User`, `Query.order.lineItems` is that exact path \
+                       from the root, and `*` stands for any one name, as in `*.payment`. Fragments are followed."
+    )]
+    #[serde(default)]
+    uses: Vec<String>,
+    /// Query or mutation.
+    #[schemars(description = "Optional. `query` or `mutation`, to list only operations of that kind.")]
+    kind: Option<String>,
+    /// One operation to show in full.
+    #[schemars(
+        description = "Optional. The exact name of one saved operation, to show it in full with its text. Give it \
+                       alone, without the other filters."
+    )]
+    name: Option<String>,
+}
+
+/// How many operations `list_operations` shows in full. Past this, each gets one line.
+const FULL_LISTING: usize = 5;
+
+/// How many saved operations `search_schema` lists before the schema's own matches.
+const SEARCH_OPERATIONS: usize = 10;
+
+/// How many operation names a `list_operations` that matched nothing offers instead.
+const NAMES_OFFERED: usize = 20;
 
 /// Arguments of `estimate_cost`.
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -87,7 +139,10 @@ struct EstimateArguments {
     endpoint: String,
     /// The GraphQL document.
     #[schemars(description = OPERATION)]
-    operation: String,
+    operation: Option<String>,
+    /// The name of a saved operation.
+    #[schemars(description = OPERATION_NAME)]
+    operation_name: Option<String>,
     /// The variables, used to size lists.
     #[schemars(
         description = "Values for the variables the operation declares, as a JSON object keyed by name without \
@@ -105,7 +160,10 @@ struct ExecuteArguments {
     endpoint: String,
     /// The GraphQL document.
     #[schemars(description = OPERATION)]
-    operation: String,
+    operation: Option<String>,
+    /// The name of a saved operation.
+    #[schemars(description = OPERATION_NAME)]
+    operation_name: Option<String>,
     /// The variables sent with the operation.
     #[schemars(
         description = "Values for the variables the operation declares, as a JSON object keyed by name without \
@@ -207,6 +265,224 @@ fn finished(text: String) -> CallToolResponse {
     CallToolResult::success(vec![ContentBlock::text(text)]).into()
 }
 
+/// The text of the operation a call names: `operation` as given, or the saved operation called `operation_name`,
+/// which the second item is then.
+fn chosen<'call>(
+    name: &str,
+    endpoint: &'call Endpoint,
+    operation: Option<&'call str>,
+    operation_name: Option<&str>,
+) -> Result<(&'call str, Option<&'call Saved>), String> {
+    match (operation, operation_name) {
+        (Some(_), Some(_)) => Err(
+            "Give either `operation`, the GraphQL text, or `operation_name`, the name of a saved operation, not both."
+                .to_owned(),
+        ),
+        (Some(text), None) => Ok((text, None)),
+        (None, Some(wanted)) => {
+            let saved = endpoint.operations.get(name, wanted)?;
+            Ok((&saved.text, Some(saved)))
+        }
+        (None, None) => Err(
+            "Give `operation`, the GraphQL text, or `operation_name`, the name of an operation from \
+             `list_operations`."
+                .to_owned(),
+        ),
+    }
+}
+
+/// Plans `text` for the endpoint called `name`. When it is the `saved` operation, an invalid one is reported as
+/// broken, since the calling agent did not write it.
+fn planned(
+    schema: &Loaded,
+    name: &str,
+    endpoint: &Endpoint,
+    text: &str,
+    saved: Option<&Saved>,
+    variables: &Variables,
+) -> Result<Plan, String> {
+    Plan::new(schema, name, endpoint, text, variables).map_err(|error| match saved {
+        Some(saved) => saved.broken(name, &error),
+        None => error,
+    })
+}
+
+/// One saved operation on one line: name, kind, cost or `BROKEN`, variables and the start of its description.
+fn summary(schema: &Loaded, name: &str, endpoint: &Endpoint, saved: &Saved) -> String {
+    let mut line = match saved.plan(schema, name, endpoint) {
+        Ok(plan) => format!("{} ({}, cost {}", saved.name, saved.kind.keyword(), plan.cost),
+        Err(_) => format!("{} ({}, BROKEN: no longer valid", saved.name, saved.kind.keyword()),
+    };
+    if !saved.variables.is_empty() {
+        let _ = write!(line, ", {}", saved.variables.join(", "));
+    }
+    line.push(')');
+    if let Some(description) = &saved.description {
+        let mut short: String = description.chars().take(DESCRIPTION_CHARS).collect();
+        if short.len() < description.len() {
+            short.push('…');
+        }
+        let _ = write!(line, "  \"{short}\"");
+    }
+    line
+}
+
+/// How much of a description [`summary`] shows.
+const DESCRIPTION_CHARS: usize = 100;
+
+/// The filters of a `list_operations` call, checked against the schema.
+struct Filters<'call> {
+    query: &'call str,
+    selectors: Vec<library::Selector>,
+    uses: &'call [String],
+    kind: Option<Kind>,
+}
+
+impl<'call> Filters<'call> {
+    /// Reads the filters of `arguments`.
+    fn new(arguments: &'call ListOperationsArguments, schema: &Loaded) -> Result<Self, String> {
+        let kind = match arguments.kind.as_deref().map(str::trim) {
+            None | Some("") => None,
+            Some("query") => Some(Kind::Query),
+            Some("mutation") => Some(Kind::Mutation),
+            Some(other) => return Err(format!("`kind` is `query` or `mutation`, not `{other}`.")),
+        };
+        let selectors = arguments
+            .uses
+            .iter()
+            .map(|text| library::Selector::parse(text, schema))
+            .collect::<Result<_, String>>()?;
+        Ok(Self {
+            query: arguments.query.as_deref().unwrap_or_default().trim(),
+            selectors,
+            uses: &arguments.uses,
+            kind,
+        })
+    }
+
+    /// Whether no filter was given.
+    const fn are_empty(&self) -> bool {
+        self.query.is_empty() && self.uses.is_empty() && self.kind.is_none()
+    }
+
+    /// The filters in words, such as `"order", using `Order.payment`, mutations only`.
+    fn described(&self) -> String {
+        let mut parts = Vec::new();
+        if !self.query.is_empty() {
+            parts.push(format!("\"{}\"", self.query));
+        }
+        if !self.uses.is_empty() {
+            parts.push(format!("using {}", backticked(self.uses.iter().map(String::as_str))));
+        }
+        if let Some(kind) = self.kind {
+            parts.push(format!("{}s only", kind.keyword()));
+        }
+        parts.join(", ")
+    }
+
+    /// The operations of `library` that pass every filter.
+    fn apply<'library>(&self, library: &'library library::Library, schema: &Loaded) -> Vec<&'library Saved> {
+        library
+            .matching(self.query)
+            .into_iter()
+            .filter(|saved| self.kind.is_none_or(|kind| saved.kind == kind))
+            .filter(|saved| saved.uses(schema, &self.selectors))
+            .collect()
+    }
+}
+
+/// The result of `list_operations` for the operations of `endpoint` that pass `filters`.
+fn operation_list(schema: &Loaded, name: &str, endpoint: &Endpoint, filters: &Filters<'_>) -> String {
+    let library = &endpoint.operations;
+    let total = library.operations.len();
+    let matching = filters.apply(library, schema);
+    let mut out = if filters.are_empty() {
+        let source = library.source.as_ref().map(|source| source.display().to_string());
+        format!(
+            "{total} saved operation{} for `{name}`, from {}.",
+            if total == 1 { "" } else { "s" },
+            source.unwrap_or_default()
+        )
+    } else if matching.is_empty() {
+        let mut out = format!("No saved operation for `{name}` matches {}.", filters.described());
+        if !filters.uses.is_empty() {
+            out.push_str(" An operation marked broken never matches `uses`.");
+        }
+        if total <= NAMES_OFFERED {
+            let names = library.operations.iter().map(|saved| saved.name.as_str());
+            let _ = write!(out, " Its saved operations: {}.", backticked(names));
+        } else {
+            let _ = write!(out, " It has {total}: loosen a filter.");
+        }
+        out.push('\n');
+        return out;
+    } else {
+        format!(
+            "{} of {total} saved operations for `{name}` match {}.",
+            matching.len(),
+            filters.described()
+        )
+    };
+    out.push_str(" Run one with `execute` and `operation_name`, passing the variables it declares.\n");
+    if matching.len() <= FULL_LISTING {
+        for saved in matching {
+            out.push('\n');
+            listing(&mut out, schema, name, endpoint, saved);
+        }
+        return out;
+    }
+    let _ = writeln!(
+        out,
+        "More than {FULL_LISTING} match, so each is on one line, without its text. Narrow the list with `query`, \
+         `uses` or `kind`, or pass `name` to see one in full.\n"
+    );
+    for saved in matching {
+        let _ = writeln!(out, "{}", summary(schema, name, endpoint, saved));
+    }
+    out
+}
+
+/// Writes one saved operation for `list_operations`.
+fn listing(out: &mut String, schema: &Loaded, name: &str, endpoint: &Endpoint, saved: &Saved) {
+    let _ = writeln!(out, "{} ({})", saved.name, saved.kind.keyword());
+    if let Some(description) = &saved.description {
+        let _ = writeln!(out, "  description: {description}");
+    }
+    let variables = if saved.variables.is_empty() {
+        "none".to_owned()
+    } else {
+        saved.variables.join(", ")
+    };
+    let _ = writeln!(out, "  variables: {variables}");
+    match saved.plan(schema, name, endpoint) {
+        Ok(plan) => {
+            let note = if plan.assumptions.is_empty() {
+                ""
+            } else {
+                ", with sizes assumed: `estimate_cost` with `operation_name` and your variables gives a closer figure"
+            };
+            let _ = writeln!(out, "  estimated cost: {}{note}", plan.cost);
+            if saved.kind == Kind::Mutation && endpoint.mutations == Mutations::Deny {
+                out.push_str("  `execute` refuses it here: the user's config denies mutations for this endpoint.\n");
+            }
+            for line in plan.text.lines() {
+                let _ = writeln!(out, "  {line}");
+            }
+        }
+        Err(error) => {
+            let _ = writeln!(
+                out,
+                "  BROKEN: it no longer validates against the schema, so `execute` will not run it. Tell the user, \
+                 who can fix {}.",
+                saved.file.display()
+            );
+            for problem in library::problems(&error) {
+                let _ = writeln!(out, "  - {problem}");
+            }
+        }
+    }
+}
+
 /// How much of a response that is not JSON to quote in an error.
 const EXCERPT: usize = 300;
 
@@ -242,7 +518,8 @@ impl Fieldtrip {
                        one of these endpoint names, and fieldtrip talks to no other host. For each endpoint it \
                        returns the user's description of it when there is one, the URL, where the schema comes \
                        from (a file or introspection), who approves `execute` requests, `mutations: denied` when \
-                       `execute` refuses every mutation there, the cost map if there is one, and the names of the headers sent with each request, so you can tell whether \
+                       `execute` refuses every mutation there, the cost map if there is one, how many operations \
+                       the user has saved for `list_operations`, and the names of the headers sent with each request, so you can tell whether \
                        authentication is set up. Header values are never shown. When several endpoints are \
                        instances of one service, such as dev and prod, prefer the one the description or the user \
                        points to, and ask when it is unclear. Endpoints and headers come only from the user's \
@@ -278,6 +555,14 @@ impl Fieldtrip {
                 let plural = if rules == 1 { "" } else { "s" };
                 let _ = writeln!(out, "  cost map: {} ({rules} rule{plural})", source.display());
             }
+            if let Some(source) = &endpoint.operations.source {
+                let count = endpoint.operations.operations.len();
+                let _ = writeln!(
+                    out,
+                    "  saved operations: {count} in {} (see `list_operations`)",
+                    source.display()
+                );
+            }
             if !endpoint.headers.is_empty() {
                 let names: Vec<&str> = endpoint.headers.iter().map(|header| header.name.as_str()).collect();
                 let _ = writeln!(out, "  headers: {}", names.join(", "));
@@ -291,6 +576,69 @@ impl Fieldtrip {
             }
         }
         out
+    }
+
+    #[tool(
+        title = "List saved GraphQL operations",
+        description = "List the operations the user has saved for an endpoint: named queries and mutations they \
+                       already trust, kept as `.graphql` files. Call it after `list_endpoints` shows saved \
+                       operations, before writing your own. When one does what you need, run it with `execute` and \
+                       `operation_name` rather than writing it again: it is known to work, and its cost is known. \
+                       For each operation it returns the name, whether it is a query or a mutation, the user's \
+                       description, the variables it declares, its estimated cost and its text, which is also a \
+                       good model for an operation of your own. One that no longer validates against the schema is \
+                       marked BROKEN with what is wrong, and `execute` will not run it. A library can hold hundreds, \
+                       so narrow it: `query` matches words in the name or description, `uses` matches operations \
+                       that select a type or a chain of fields such as `Order.payment`, and `kind` keeps queries or \
+                       mutations. When more than five match, each gets one line without its text, and `name` shows \
+                       one in full.",
+        annotations(read_only_hint = true, open_world_hint = true)
+    )]
+    async fn list_operations(&self, Parameters(arguments): Parameters<ListOperationsArguments>) -> ToolResult {
+        let name = &arguments.endpoint;
+        let endpoint = self.endpoint(name)?;
+        let library = &endpoint.operations;
+        let Some(source) = &library.source else {
+            return Ok(format!(
+                "`{name}` has no saved operations. The user can add a directory of `.graphql` files, one named \
+                 operation each, with `operations` in the fieldtrip config. Meanwhile write the operation yourself, \
+                 starting from `introspect`.\n"
+            ));
+        };
+        if library.is_empty() {
+            return Ok(format!(
+                "`{name}` has no saved operations: {} holds no `.graphql` files. Write the operation yourself, \
+                 starting from `introspect`.\n",
+                source.display()
+            ));
+        }
+        let schema = self.schema(name, false).await?;
+        if let Some(wanted) = &arguments.name {
+            if arguments.query.is_some() || !arguments.uses.is_empty() || arguments.kind.is_some() {
+                return Err(
+                    "Give `name` alone: it shows one operation, and `query`, `uses` and `kind` narrow a list."
+                        .to_owned(),
+                );
+            }
+            let saved = library.get(name, wanted)?;
+            let mut out = format!(
+                "Saved operation `{wanted}` for `{name}`, from {}. Run it with `execute` and `operation_name`, \
+                 passing the variables it declares.\n\n",
+                saved.file.display()
+            );
+            listing(&mut out, &schema, name, endpoint, saved);
+            return Ok(capped(
+                out,
+                endpoint.max_output_chars,
+                "The operation is too long to show whole.",
+            ));
+        }
+        let filters = Filters::new(&arguments, &schema)?;
+        Ok(capped(
+            operation_list(&schema, name, endpoint, &filters),
+            endpoint.max_output_chars,
+            "Narrow the list with `query`, `uses` or `kind`.",
+        ))
     }
 
     #[tool(
@@ -325,18 +673,41 @@ impl Fieldtrip {
                        `describe` accepts, and says how many more there were. Search for words from the domain \
                        (`invoice`, `refund`), not GraphQL words such as `query` or `list`. To look inside one type, \
                        add its name as a second word: `user orders`, not `User.orders`. When nothing matches, the \
-                       nearest names are suggested.",
+                       nearest names are suggested. Operations the user saved whose name or description matches \
+                       every word are listed first: prefer one of those when it does what you need.",
         annotations(read_only_hint = true, open_world_hint = true)
     )]
     async fn search_schema(&self, Parameters(arguments): Parameters<SearchArguments>) -> ToolResult {
-        let schema = self.schema(&arguments.endpoint, false).await?;
-        schema.search(&arguments.endpoint, &arguments.query)
+        let name = &arguments.endpoint;
+        let endpoint = self.endpoint(name)?;
+        let schema = self.schema(name, false).await?;
+        let found = schema.search(name, &arguments.query)?;
+        let saved = endpoint.operations.matching(&arguments.query);
+        if saved.is_empty() {
+            return Ok(found);
+        }
+        let mut out = "Saved operations that match, which `execute` runs by `operation_name` (`list_operations` \
+                       shows them in full):\n"
+            .to_owned();
+        for saved in saved.iter().take(SEARCH_OPERATIONS) {
+            let _ = writeln!(out, "{}", summary(&schema, name, endpoint, saved));
+        }
+        if saved.len() > SEARCH_OPERATIONS {
+            let _ = writeln!(
+                out,
+                "And {} more. `list_operations` with the same `query` lists them all.",
+                saved.len() - SEARCH_OPERATIONS
+            );
+        }
+        out.push('\n');
+        Ok(out + &found)
     }
 
     #[tool(
         title = "Validate and cost a GraphQL operation",
         description = "Validate one query or mutation against the schema and estimate its cost, without sending \
-                       anything to the endpoint. Run it after each change while you write an operation, and before \
+                       anything to the endpoint. Pass the GraphQL text as `operation`, or the name of a saved \
+                       operation as `operation_name`. Run it after each change while you write an operation, and before \
                        `execute`. An invalid operation returns every error with its line and column, and the nearest \
                        field names for a misspelled one. A valid operation returns the estimated cost, the depth, the \
                        cost of each top-level field, the cost-map rules used, and every assumption made. Lists drive \
@@ -348,8 +719,14 @@ impl Fieldtrip {
     async fn estimate_cost(&self, Parameters(arguments): Parameters<EstimateArguments>) -> ToolResult {
         let name = &arguments.endpoint;
         let endpoint = self.endpoint(name)?;
+        let (text, saved) = chosen(
+            name,
+            endpoint,
+            arguments.operation.as_deref(),
+            arguments.operation_name.as_deref(),
+        )?;
         let schema = self.schema(name, false).await?;
-        let plan = Plan::new(&schema, name, endpoint, &arguments.operation, &arguments.variables)?;
+        let plan = planned(&schema, name, endpoint, text, saved, &arguments.variables)?;
         let mut out = format!("Valid {} for `{name}`.\n{}", plan.title(), plan.estimate());
         if plan.kind == Kind::Mutation && endpoint.mutations == Mutations::Deny {
             out.push_str(
@@ -362,8 +739,9 @@ impl Fieldtrip {
 
     #[tool(
         title = "Execute a GraphQL operation (the user approves)",
-        description = "Send one query or mutation to the endpoint and return the response. Make it valid with \
-                       `estimate_cost` first, and use `describe` rather than this tool to explore. The user \
+        description = "Send one query or mutation to the endpoint and return the response. Pass the GraphQL text \
+                       as `operation`, or the name of an operation the user saved as `operation_name`. Make it valid \
+                       with `estimate_cost` first, and use `describe` rather than this tool to explore. The user \
                        approves each request in a prompt that shows the operation exactly as it will be sent, its \
                        variables and its cost, unless their config says otherwise (`list_endpoints` shows who \
                        approves). Write for that reader: name the operation, pass inputs as variables, and select \
@@ -398,11 +776,17 @@ impl Fieldtrip {
     ) -> Result<CallToolResponse, String> {
         let name = &arguments.endpoint;
         let endpoint = self.endpoint(name)?;
+        let (text, saved) = chosen(
+            name,
+            endpoint,
+            arguments.operation.as_deref(),
+            arguments.operation_name.as_deref(),
+        )?;
         // Before the schema is loaded, so a denied mutation causes no request of any kind.
-        approval::refuse_denied_mutation(name, endpoint, &arguments.operation)?;
+        approval::refuse_denied_mutation(name, endpoint, text)?;
         let select = arguments.select.as_deref().map(select::Path::parse).transpose()?;
         let schema = self.schema(name, false).await?;
-        let plan = Plan::new(&schema, name, endpoint, &arguments.operation, &arguments.variables)?;
+        let plan = planned(&schema, name, endpoint, text, saved, &arguments.variables)?;
         plan.check_variables(&schema, &arguments.variables)?;
 
         // Nothing below this point runs unless the human accepted, or the user's config waives the prompt.
@@ -581,8 +965,38 @@ impl Fieldtrip {
         Ok(loaded)
     }
 
-    /// Loads the schema for `endpoint` from its file, or by introspection when it has none.
+    /// Loads the schema for `endpoint`, and warns about each saved operation that no longer validates against it.
     async fn load(&self, name: &str, endpoint: &Endpoint) -> Result<Loaded, String> {
+        let loaded = self.read_schema(name, endpoint).await?;
+        for saved in &endpoint.operations.operations {
+            if let Err(error) = saved.plan(&loaded, name, endpoint) {
+                tracing::warn!(
+                    "the saved operation `{}` for endpoint `{name}` ({}) no longer validates against the schema: {}",
+                    saved.name,
+                    saved.file.display(),
+                    library::problems(&error).join("; ")
+                );
+            }
+        }
+        Ok(loaded)
+    }
+
+    /// Checks the saved operations of every endpoint whose schema is a file, so that one broken by a change to the
+    /// schema is reported at startup. Endpoints that load their schema by introspection are checked on first use,
+    /// because startup sends nothing.
+    pub(crate) async fn check_saved_operations(&self) {
+        for (name, endpoint) in &self.config.endpoints {
+            if endpoint.schema.is_none() || endpoint.operations.is_empty() {
+                continue;
+            }
+            if let Err(error) = self.schema(name, false).await {
+                tracing::warn!("the saved operations for endpoint `{name}` could not be checked: {error}");
+            }
+        }
+    }
+
+    /// Reads the schema for `endpoint` from its file, or by introspection when it has none.
+    async fn read_schema(&self, name: &str, endpoint: &Endpoint) -> Result<Loaded, String> {
         let Some(path) = &endpoint.schema else {
             let sdl = introspection::fetch(&self.http, endpoint).await?;
             return Loaded::from_sdl(&sdl, &format!("The introspection result from {}", endpoint.shown_url));

@@ -57,6 +57,8 @@ mod list_endpoints;
 #[cfg(test)]
 mod mutations_denied;
 #[cfg(test)]
+mod operation_filters;
+#[cfg(test)]
 mod pagination_hints;
 #[cfg(test)]
 mod protocol_2026;
@@ -68,6 +70,8 @@ mod response_limits;
 mod response_metadata;
 #[cfg(test)]
 mod response_summary;
+#[cfg(test)]
+mod saved_operations;
 #[cfg(test)]
 mod search_schema;
 #[cfg(test)]
