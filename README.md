@@ -64,7 +64,9 @@ Register it with your MCP client as a stdio server:
 }
 ```
 
-For a step-by-step setup in a specific client, see [docs/opencode.md](docs/opencode.md) for OpenCode.
+For a step-by-step setup in a specific client, see [docs/opencode.md](docs/opencode.md) for OpenCode. OpenCode accepts
+fieldtrip's approval prompts without showing them, so fieldtrip never asks it: use `approval = "client"` there, as the
+guide explains.
 
 Without `--config`, fieldtrip reads `~/.config/fieldtrip/config.toml`. For a single endpoint that needs no headers
 you can skip the file and pass `--url https://api.example.com/graphql`, optionally with `--schema schema.graphql`.

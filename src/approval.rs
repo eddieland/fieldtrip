@@ -9,8 +9,8 @@ use std::hash::{BuildHasher as _, RandomState};
 use std::sync::Mutex;
 
 use rmcp::model::{
-    ElicitRequest, ElicitRequestParams, ElicitationAction, ElicitationSchema, InputRequest, InputRequiredResult,
-    InputResponses, ProtocolVersion,
+    ElicitRequest, ElicitRequestParams, ElicitationAction, ElicitationSchema, Implementation, InputRequest,
+    InputRequiredResult, InputResponses, ProtocolVersion,
 };
 use rmcp::service::{ElicitationMode, RequestContext};
 use rmcp::{Peer, RoleServer};
@@ -115,6 +115,33 @@ pub(crate) fn refuse_denied_mutation(name: &str, endpoint: &Endpoint, operation:
     Ok(())
 }
 
+/// The MCP clients known to accept a prompt with no fields without showing it to anyone, by the `clientInfo.name`
+/// they give, in lowercase, and the name to show. fieldtrip's prompt has no fields, so asking one of these would
+/// approve the operation unseen.
+const AUTO_ACCEPTING: [(&str, &str); 1] = [("opencode", "OpenCode")];
+
+/// The name of the client, when `client` is one that accepts fieldtrip's prompts without showing them.
+pub(crate) fn auto_accepting(client: Option<&Implementation>) -> Option<&'static str> {
+    let name = client?.name.to_lowercase();
+    AUTO_ACCEPTING
+        .iter()
+        .find(|(known, _)| *known == name)
+        .map(|(_, shown)| *shown)
+}
+
+/// The refusal for an operation on the endpoint called `name` that would have to be approved by asking `client`,
+/// which accepts without showing the prompt.
+pub(crate) fn unseen(name: &str, client: &str) -> String {
+    format!(
+        "Nothing was sent to `{name}`. This MCP client, {client}, accepts fieldtrip's approval prompts without showing \
+         them to the user, so asking it would approve the operation unseen, and fieldtrip does not ask it. Tell the \
+         user. To run operations here from {client}, the user sets `approval = \"client\"` for this endpoint in the \
+         fieldtrip config and adds a {client} permission rule that asks before `fieldtrip_execute`, so that \
+         {client}'s own prompt approves each one. fieldtrip's guide for {client} has the steps. Do not try to get \
+         around this."
+    )
+}
+
 /// Why an operation may be sent without asking.
 #[derive(Debug)]
 pub(crate) struct Waiver {
@@ -143,7 +170,20 @@ pub(crate) fn waiver(endpoint: &Endpoint, plan: &Plan) -> Option<Waiver> {
     })
 }
 
-/// One line saying who approves operations for `endpoint`, for `list_endpoints`.
+/// One line saying who approves operations for `endpoint`, for `list_endpoints`. `unseen` is the name of a client
+/// that would accept fieldtrip's prompts without showing them, when the caller is one.
+pub(crate) fn policy_for(endpoint: &Endpoint, unseen: Option<&str>) -> String {
+    let policy = policy(endpoint);
+    match unseen {
+        Some(client) if endpoint.approval == Approval::Elicit => format!(
+            "{policy}, but this client, {client}, accepts those prompts unseen, so `execute` refuses every operation \
+             that would need one"
+        ),
+        _ => policy,
+    }
+}
+
+/// One line saying who approves operations for `endpoint`, for `fieldtrip check` and `list_endpoints`.
 pub(crate) fn policy(endpoint: &Endpoint) -> String {
     match (endpoint.approval, endpoint.auto_approve_cost) {
         (Approval::Client, _) => "left to the MCP client".to_owned(),

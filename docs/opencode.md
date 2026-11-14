@@ -10,9 +10,11 @@ binary, registering it, and making sure nothing runs against your API until you 
 
 ## Read this first: approval in OpenCode
 
-fieldtrip normally asks you to approve each operation through an MCP elicitation prompt. Its prompt is a plain
-accept or decline, with no fields to fill in. **OpenCode accepts a prompt like that automatically, without showing
-it to you.** If you use fieldtrip's default approval in OpenCode, every operation runs unseen, mutations included.
+fieldtrip normally asks you to approve each operation through an MCP elicitation prompt. Its prompt is a plain accept or
+decline, with no fields to fill in. **OpenCode accepts a prompt like that automatically, without showing it to you.**
+fieldtrip recognizes OpenCode by the name it gives when it connects, and never asks it: on an endpoint that uses
+fieldtrip's own prompt, `execute` refuses every operation that would need one, and fieldtrip logs a warning when
+OpenCode connects.
 
 So in OpenCode, approval has to come from OpenCode itself: set `approval = "client"` on every endpoint, and add an
 OpenCode permission rule that asks before `fieldtrip_execute`. Steps 2 and 4 below do both. Don't skip either one.
@@ -46,8 +48,9 @@ given without prompting, and OpenCode's permission prompt from step 4 is what st
 
 If you have several instances of one service, such as dev and prod, a `[templates.NAME]` table can hold the headers,
 cost map and other settings they share. A template can't hold `approval`, so write `approval = "client"` on each
-endpoint even when it uses a template. An endpoint that leaves it out falls back to fieldtrip's own prompt, which
-OpenCode accepts unseen. The [README](../README.md#several-instances-of-one-service) shows a template.
+endpoint even when it uses a template. An endpoint that leaves it out falls back to fieldtrip's own prompt, so in
+OpenCode `execute` refuses to run anything there that would need it. The
+[README](../README.md#several-instances-of-one-service) shows a template.
 
 For an endpoint the agent should only read, such as production, also set `mutations = "deny"`. `execute` then refuses
 every mutation there before anything is asked or sent, so a write doesn't depend on a permission rule. Unlike
@@ -61,8 +64,8 @@ fieldtrip check --config ~/.config/fieldtrip/config.toml
 ```
 
 It prints what each endpoint resolves to, including `approval: left to the MCP client` for each one, and checks that
-every header can be produced, without printing a value or sending anything. Look for an endpoint that says
-`approval: the user is asked before every operation`: in OpenCode, that one would run unseen. Run `check` from the
+every header can be produced, without printing a value or sending anything. Look for an endpoint that says `approval:
+the user is asked before every operation`: in OpenCode, `execute` refuses to run anything there. Run `check` from the
 shell you will start OpenCode from, so it sees the same environment variables.
 
 You can't use the `--url` flag from OpenCode, because an endpoint defined by `--url` uses fieldtrip's own prompt.

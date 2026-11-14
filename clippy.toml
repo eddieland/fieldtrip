@@ -11,4 +11,4 @@ allow-print-in-tests = true
 allow-unwrap-in-tests = true
 
 # Words that `clippy::doc_markdown` should not demand backticks around. `..` keeps the defaults.
-doc-valid-idents = ["GraphQL", ".."]
+doc-valid-idents = ["GraphQL", "OpenCode", ".."]

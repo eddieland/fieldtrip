@@ -218,3 +218,10 @@ cargo test --workspace --all-features
   with a `schema` file keeps nothing. The file shows no URL key and only the user can read it. `list_endpoints` and
   `fieldtrip check` show the setting.
   Done when: `cargo test schema_cache`
+- [x] **43. Clients that accept prompts unseen.** A client whose `clientInfo.name` is `opencode`, in any case, is never
+  sent an approval prompt. Where `execute` would ask, it refuses, with no prompt and no request, on both protocol
+  revisions, and the refusal names the client, `approval = "client"` and the `fieldtrip_execute` permission rule.
+  `approval = "client"` and queries within `auto_approve_cost` still run, and a mutation is still refused.
+  `list_endpoints` says so on each endpoint that prompts, a warning is logged when such a client connects, and other
+  clients are asked as before. With `audit_log` set, the refusal is recorded as `unavailable`, naming the client.
+  Done when: `cargo test auto_accept`

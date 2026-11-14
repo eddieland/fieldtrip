@@ -116,6 +116,7 @@ prompt is a request from the server. From 2026-07-28 it is an "input required" r
 | Query with cost at or below `auto_approve_cost` | Sent without a prompt |
 | Endpoint sets `approval = "client"` | Sent without a prompt, mutations included |
 | Mutation, and the endpoint or its template sets `mutations = "deny"` | Not sent, and no prompt is shown |
+| A prompt is needed, and the client is known to accept prompts unseen | Not sent, and no prompt is shown |
 
 ## Decisions
 
@@ -251,3 +252,10 @@ Settled. To change one, ask the user, then add a new dated line instead of editi
   how old it is and why, and every other tool that reads it says it may be out of date.
 - 2026-11-14: A kept schema's file is named by a hash of the URL and holds only the shown URL. Only the user can
   read it.
+- 2026-11-14: A client known to accept a prompt with no fields without showing it is never asked. Where a prompt is
+  needed, `execute` refuses, on both protocol revisions. The client is known by its `clientInfo.name`.
+- 2026-11-14: OpenCode (`opencode`, any case) is such a client. The list is a constant in the code, not config.
+- 2026-11-14: `approval = "client"` and `auto_approve_cost` still apply to such a client: neither depends on a prompt.
+- 2026-11-14: When such a client connects with the `initialize` handshake, a warning names the endpoints affected.
+  `list_endpoints` says so on each of them.
+- 2026-11-14: The audit log records that refusal as `unavailable`, with a reason that names the client.

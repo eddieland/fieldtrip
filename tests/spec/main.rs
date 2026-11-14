@@ -11,6 +11,8 @@ mod approval_policy;
 #[cfg(test)]
 mod audit_log;
 #[cfg(test)]
+mod auto_accept;
+#[cfg(test)]
 mod check_command;
 #[cfg(test)]
 mod cli_flags;

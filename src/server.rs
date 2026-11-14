@@ -8,7 +8,7 @@ use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::tool::{InputResponses, RequestState};
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{CallToolResponse, CallToolResult, ContentBlock, Implementation, ServerCapabilities, ServerConfig};
-use rmcp::service::RequestContext;
+use rmcp::service::{NotificationContext, RequestContext};
 use rmcp::{RoleServer, ServerHandler, schemars, tool, tool_handler, tool_router};
 use serde::Deserialize;
 use serde_json::value::RawValue;
@@ -16,7 +16,7 @@ use tokio::sync::Mutex;
 
 use crate::approval::{self, Operation, Outstanding, Round};
 use crate::audit::{self, Attempt, Audit, Outcome, Verdict};
-use crate::config::{Config, Endpoint, Mutations, show_bytes, show_duration};
+use crate::config::{Approval, Config, Endpoint, Mutations, show_bytes, show_duration};
 use crate::http::Client;
 use crate::library::{self, Saved};
 use crate::plan::{Kind, Plan, Variables};
@@ -613,7 +613,12 @@ impl Fieldtrip {
                        config: if one is missing, ask the user to add it.",
         annotations(read_only_hint = true, open_world_hint = false)
     )]
-    fn list_endpoints(&self) -> String {
+    #[expect(
+        clippy::needless_pass_by_value,
+        reason = "rmcp's `tool` macro hands the request context over by value"
+    )]
+    fn list_endpoints(&self, context: RequestContext<RoleServer>) -> String {
+        let unseen = approval::auto_accepting(context.client_info().as_ref());
         let endpoints = &self.config.endpoints;
         if endpoints.is_empty() {
             return "No endpoints are configured. The user adds them to the fieldtrip config file.".to_owned();
@@ -640,7 +645,7 @@ impl Fieldtrip {
                     );
                 }
             }
-            let _ = writeln!(out, "  approval: {}", approval::policy(endpoint));
+            let _ = writeln!(out, "  approval: {}", approval::policy_for(endpoint, unseen));
             if endpoint.mutations == Mutations::Deny {
                 let _ = writeln!(out, "  mutations: denied");
             }
@@ -922,6 +927,15 @@ impl Fieldtrip {
             };
             (verdict, unasked)
         } else {
+            if let Some(client) = approval::auto_accepting(context.client_info().as_ref()) {
+                tracing::warn!("refused an operation on `{name}`: {client} would accept the prompt unseen");
+                let verdict = Verdict {
+                    approval: "unavailable",
+                    reason: Some(format!("{client} accepts approval prompts without showing them")),
+                };
+                self.audit.record(endpoint, &attempt, &verdict, Outcome::NotSent).await;
+                return Err(approval::unseen(name, client));
+            }
             let prompt = approval::prompt(name, &endpoint.shown_url, &plan, &arguments.variables);
             let decision = if approval::asks_by_round_trip(&context) {
                 let operation = Operation {
@@ -1331,5 +1345,27 @@ impl ServerHandler for Fieldtrip {
         ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(Implementation::new(env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION")))
             .with_instructions(self.instructions())
+    }
+
+    async fn on_initialized(&self, context: NotificationContext<RoleServer>) {
+        let client = context.peer.peer_info().map(|info| info.client_info.clone());
+        let Some(client) = approval::auto_accepting(client.as_ref()) else {
+            return;
+        };
+        let asking: Vec<&str> = self
+            .config
+            .endpoints
+            .iter()
+            .filter(|(_, endpoint)| endpoint.approval == Approval::Elicit)
+            .map(|(name, _)| name.as_str())
+            .collect();
+        if !asking.is_empty() {
+            tracing::warn!(
+                "{client} accepts fieldtrip's approval prompts without showing them, so `execute` will refuse every \
+                 operation that needs one on {}. Set `approval = \"client\"` on those endpoints and add a {client} \
+                 permission rule that asks before `fieldtrip_execute`.",
+                backticked(asking.into_iter())
+            );
+        }
     }
 }
