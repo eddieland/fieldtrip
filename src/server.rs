@@ -1362,8 +1362,8 @@ impl ServerHandler for Fieldtrip {
         if !asking.is_empty() {
             tracing::warn!(
                 "{client} accepts fieldtrip's approval prompts without showing them, so `execute` will refuse every \
-                 operation that needs one on {}. Set `approval = \"client\"` on those endpoints and add a {client} \
-                 permission rule that asks before `fieldtrip_execute`.",
+                 operation that needs one on {}. Set `approval = \"client\"` on those endpoints and add a permission \
+                 rule in {client} that asks before `fieldtrip_execute`.",
                 backticked(asking.into_iter())
             );
         }

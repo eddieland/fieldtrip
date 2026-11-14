@@ -3,10 +3,11 @@
 This guide sets fieldtrip up as a local MCP server in [OpenCode](https://opencode.ai) V2. It covers installing the
 binary, registering it, and making sure nothing runs against your API until you approve it.
 
-> fieldtrip has not yet been tested end to end in OpenCode. The steps follow OpenCode 2.2.7's documentation for
-> [MCP servers](https://opencode.ai/docs/mcp-servers/) and [permissions](https://opencode.ai/docs/permissions/), and
-> its source. If a step doesn't match what your version does, please open an issue. OpenCode V1 uses a different
-> config shape, and this guide doesn't cover it.
+> This guide was checked against OpenCode 2.3.0, the release build, driven by `opencode run` with a scripted model and
+> a mock GraphQL endpoint. That covered registering fieldtrip, the tool names, the permission rule, `--auto`, and the
+> refusal described below, on both MCP protocol revisions. The interactive permission prompt in the TUI was not
+> exercised. If a step doesn't match what your version does, please open an issue. OpenCode V1 uses a different config
+> shape, and this guide doesn't cover it.
 
 ## Read this first: approval in OpenCode
 
@@ -111,7 +112,9 @@ To write the config by hand, add fieldtrip under `mcp.servers` in `opencode.json
 - Keep secrets out of OpenCode's config, especially a config committed to a project. fieldtrip inherits OpenCode's
   environment, so export `ACME_API_KEY` in the shell you start `opencode` from.
 
-Run `opencode mcp list` and check that fieldtrip shows as connected. Its tools are named `<server>_<tool>`:
+Run `opencode debug config` and check that fieldtrip appears under `mcp.servers`. `opencode mcp list` shows
+`✓ fieldtrip connected` only once a session in that project has started the server; before that it says "No MCP
+servers configured" even when the config is right. fieldtrip's tools are named `<server>_<tool>`:
 
 | Tool | What it's for |
 | --- | --- |
@@ -126,8 +129,8 @@ Run `opencode mcp list` and check that fieldtrip shows as connected. Its tools a
 
 ## 4. Make OpenCode ask before every execute
 
-OpenCode V2 allows every action unless a rule says otherwise, so add a rule that asks before `fieldtrip_execute`. Put
-it in the same OpenCode config file as the server:
+OpenCode V2's default agent allows every action that no rule covers, so `fieldtrip_execute` runs without asking until
+you add a rule that asks before it. Put the rule in the same OpenCode config file as the server:
 
 ```jsonc
 {
@@ -143,8 +146,10 @@ operation before you answer, and choose **Allow once**.
 - **Never choose Allow always** for `fieldtrip_execute`. It saves a rule that lets every later `execute` run
   without asking, on that project, from then on. If you chose it by mistake, remove the saved approval.
 - **Don't run `opencode run` with `--auto`** (or its hidden variants) in a project that has fieldtrip. That flag
-  approves every permission that isn't explicitly denied, `fieldtrip_execute` included.
-- The other five tools only read the schema or cost an operation, and never send it, so they don't need a rule.
+  approves every permission that isn't explicitly denied, `fieldtrip_execute` included. Without `--auto`,
+  `opencode run` can't ask you, so it rejects the permission and nothing is sent.
+- The other tools only read the schema, saved operations or history, or cost an operation, and never send it, so they
+  don't need a rule.
 
 ## 5. Check that approval reaches you
 
@@ -175,6 +180,8 @@ also speaks MCP revision 2026-07-28, so `"protocol": "auto"` on the server works
 
 ## Troubleshooting
 
+- **The agent says fieldtrip's tools aren't available.** Right after OpenCode's background service starts, the first
+  message can arrive before the MCP server is connected. Send it again, or check `opencode mcp list`.
 - **fieldtrip doesn't connect.** Run `fieldtrip check` with the same `--config` in a terminal. A config or cost map
   that isn't valid stops fieldtrip at startup, and `check` prints why. Use `/mcps` in OpenCode to reconnect after
   fixing it.

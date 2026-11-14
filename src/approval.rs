@@ -136,8 +136,8 @@ pub(crate) fn unseen(name: &str, client: &str) -> String {
         "Nothing was sent to `{name}`. This MCP client, {client}, accepts fieldtrip's approval prompts without showing \
          them to the user, so asking it would approve the operation unseen, and fieldtrip does not ask it. Tell the \
          user. To run operations here from {client}, the user sets `approval = \"client\"` for this endpoint in the \
-         fieldtrip config and adds a {client} permission rule that asks before `fieldtrip_execute`, so that \
-         {client}'s own prompt approves each one. fieldtrip's guide for {client} has the steps. Do not try to get \
+         fieldtrip config and adds a permission rule in {client} that asks before `fieldtrip_execute`, so \
+         that {client}'s own prompt approves each one. fieldtrip's guide for {client} has the steps. Do not try to get \
          around this."
     )
 }
