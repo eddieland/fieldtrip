@@ -182,3 +182,21 @@ cargo test --workspace --all-features
   text, and `name` shows one in full. `search_schema` lists at most ten saved operations, and a list that matches
   nothing names the operations only when there are at most twenty.
   Done when: `cargo test operation_filters`
+- [x] **38. Audit log.** With `audit_log` set at the top of the config, each `execute` attempt appends one JSON line
+  to that file: the time, the session, the endpoint, the kind, the operation's name, text and SHA-256, the variables,
+  the approval and its reason, the cost, and for a request that was sent the status, the time taken, the number of
+  `errors` and the chosen response headers, or the error when no answer came. Accepted, waived (`auto`, `client`),
+  declined, cancelled, unavailable, failed and denied attempts each get their own word. An operation that is not
+  valid writes nothing. Header values never appear, an `env` or `command` value pasted into the operation or its
+  variables is redacted, and `audit_variables = false` on an endpoint or template leaves the variables out. On
+  revision 2026-07-28 only the answered retry is written. The file and its folders are created at startup, readable
+  by the user alone, and a log that cannot be opened stops the server. Without the setting no file is created.
+  `fieldtrip check` shows the path.
+  Done when: `cargo test audit_log`
+- [x] **39. `history`.** With `audit_log` set, a read-only `history` tool, taking an optional `endpoint` and `limit`
+  (20, at most 100), returns the most recent attempts as the JSON lines the log holds, oldest first, after a line
+  that names this session, so attempts from earlier sessions can be told apart. Only configured endpoints are shown,
+  an unknown `endpoint` is an error that lists them, and lines that are not readable are counted and skipped. When the
+  lines do not fit in `max_output_chars`, the oldest are left out and the result says so. Without `audit_log` the
+  tool is not offered and the instructions do not mention it.
+  Done when: `cargo test history`

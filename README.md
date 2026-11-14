@@ -100,6 +100,7 @@ list, with no shell.
 | `max_schema_bytes` | 32 MiB | Bytes of an introspection response that are read. Raise it for a larger schema |
 | `max_response_bytes` | 8 MiB | Bytes of a response to `execute` that are read. A body cut off here cannot be parsed |
 | `max_output_chars` | `40000` | Characters in one tool result, which is what reaches the agent's context |
+| `audit_variables` | `true` | `false` leaves this endpoint's variables out of the audit log, below |
 | `costs` | none | A cost map, below |
 
 ### Large schemas and responses
@@ -145,13 +146,44 @@ schema      = "schemas/acme-prod.graphql"
 mutations   = "deny"
 ```
 
-An endpoint takes `schema`, `headers`, `costs`, `assumed_list_size`, `timeout`, `response_headers` and
-the three `max_` limits from its template unless it sets them itself. Headers merge by name, and the endpoint's win.
+An endpoint takes `schema`, `headers`, `costs`, `assumed_list_size`, `timeout`, `response_headers`,
+the three `max_` limits and `audit_variables` from its template unless it sets them itself. Headers merge by name, and the endpoint's win.
 `approval`, `auto_approve_cost`, `url` and `description` are never taken from a template, so an endpoint that forgets
 them asks before every operation. `mutations` is the other way round: a template can set `mutations = "deny"`, and an
 endpoint that names it can't set it back to `"prompt"`, so forgetting the setting on one endpoint never opens writes.
 A shared cost map is checked against each endpoint's own schema, so a rule for a field that only dev has shows up in
 prod's `introspect`.
+
+### Audit log
+
+To keep a record of what agents ran, name a file at the top of the config, before any table:
+
+```toml
+audit_log = "~/.local/state/fieldtrip/audit.jsonl"
+```
+
+fieldtrip then appends one JSON line per `execute` attempt, including the ones that were not sent:
+
+```json
+{"at":"2026-11-13T14:02:11Z","session":"5f0c9a1e7d2b4c36","endpoint":"acme-prod","kind":"query",
+ "operation":"OrderById","hash":"sha256:…","text":"query OrderById($id: ID!) { … }","variables":{"id":"123"},
+ "approval":"accepted","cost":12,"status":200,"ms":812,"errors":0,"headers":{"x-request-id":"abc123"}}
+```
+
+`approval` says who let it through, `accepted`, `auto` (within `auto_approve_cost`) or `client`
+(`approval = "client"`), or why it was not sent: `declined`, `cancelled`, `unavailable` (the client cannot show a
+prompt), `failed` (the prompt did) or `denied` (`mutations = "deny"`). Anything but `accepted` comes with a `reason`.
+A request that got no answer has an `error` instead of a `status`. An operation that is not valid is not recorded,
+since nothing could have been sent. `session` is different for each run of the server.
+
+The log never holds a header value, and a value from an `env` or `command` header that turns up in the operation or
+its variables is replaced with `<redacted>`. For an API whose variables are sensitive in themselves, set
+`audit_variables = false` on its endpoint or template to leave them out. The file and its folders are created
+readable by you alone, fieldtrip never rotates or deletes it, and a log that cannot be opened stops the server.
+
+With an audit log, the agent also gets a read-only `history` tool. It returns the latest attempts from the log, for
+the endpoints in your config, so an agent starting a new session can see what was already run or declined before it
+repeats anything. Responses are never in the log, only what was sent and how it went.
 
 ### Checking a config
 

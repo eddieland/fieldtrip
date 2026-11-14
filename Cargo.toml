@@ -127,6 +127,7 @@ reqwest = { version = "0.13.5", default-features = false, features = ["rustls", 
 rmcp = { version = "3.10.0", features = ["elicitation", "transport-io"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = { version = "1.0.154", features = ["preserve_order", "raw_value"] }
+sha2 = "0.11.1"
 thiserror = "2.0.21"
 tokio = { version = "1.54.1", features = ["macros", "process", "rt-multi-thread", "sync", "time"] }
 toml = "1.2.1"

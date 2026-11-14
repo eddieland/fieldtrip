@@ -29,10 +29,13 @@ in the user's config, out of the agent's sight and out of its control.
 | `describe` | `endpoint`, `name` (`Type` or `Type.field`) | That definition as compact SDL |
 | `estimate_cost` | `endpoint`, `operation` or `operation_name`, `variables?` | Validation errors, or cost, depth, breakdown, assumptions |
 | `execute` | `endpoint`, `operation` or `operation_name`, `variables?`, `select?`, `save?` | Status, `errors`, then the rest or a summary |
+| `history` | `endpoint?`, `limit?` | The latest `execute` attempts from the audit log. Only offered with `audit_log` |
 
 ## Config shape
 
 ```toml
+audit_log = "~/.local/state/fieldtrip/audit.jsonl"   # optional: one JSON line per `execute` attempt
+
 [templates.acme]                             # optional: settings that several endpoints share
 costs             = "acme.costs.toml"        # optional cost map, relative to this file
 operations        = "operations/acme/"       # optional directory of saved operations, one per .graphql file
@@ -42,6 +45,7 @@ response_headers  = ["x-request-id", "traceparent"]   # optional, shown by `exec
 max_schema_bytes  = 33554432                 # optional, default 32 MiB, read of an introspection response
 max_response_bytes = 8388608                 # optional, default 8 MiB, read of a response to `execute`
 max_output_chars  = 40000                    # optional, default 40,000, characters in one tool result
+audit_variables   = false                    # optional, default true: leave variables out of the audit log
 
 [templates.acme.headers]
 X-Client      = "fieldtrip"
@@ -60,8 +64,9 @@ mutations         = "deny"                   # optional, default "prompt". A tem
 X-Api-Key = { env = "ACME_API_KEY" }
 ```
 
-An endpoint takes `schema`, `headers`, `costs`, `operations`, `assumed_list_size`, `timeout`, `response_headers` and the three
-`max_` limits from its template unless it sets them. Headers merge by name, ignoring case, and the endpoint's win.
+An endpoint takes `schema`, `headers`, `costs`, `operations`, `assumed_list_size`, `timeout`,
+`response_headers`, the three `max_` limits and `audit_variables` from its template unless it sets them. Headers
+merge by name, ignoring case, and the endpoint's win.
 `url`, `description`, `approval` and `auto_approve_cost` are only ever set on the endpoint. `mutations` comes from the
 template too, but an endpoint can only make it stricter. A path may start with `~/`.
 
@@ -221,3 +226,14 @@ Settled. To change one, ask the user, then add a new dated line instead of editi
   allowed there too, and matches a field on that type or one that returns it. Every pattern must match.
 - 2026-11-14: A library can hold hundreds of operations. Past five matches, `list_operations` gives one line each and
   `name` shows one in full. `search_schema` lists at most ten saved operations.
+- 2026-11-14: `audit_log`, set once at the top of the config, appends one JSON line per `execute` attempt. Off unless
+  set. It is opened at startup, and a log that cannot be opened stops the server.
+- 2026-11-14: An attempt is a call that reached the approval step, or a mutation refused by `mutations = "deny"`. An
+  operation that is not valid is not one. A prompt that is never answered is not one either.
+- 2026-11-14: A line records the operation's text and SHA-256, its variables, who approved it (`accepted`, `auto`,
+  `client`) or why it was not sent (`declined`, `cancelled`, `unavailable`, `failed`, `denied`), and what came back.
+- 2026-11-14: The log never holds a header value. `env` and `command` values in a line are removed, as from a body,
+  using values already known: no command runs for the log. `audit_variables = false` leaves the variables out.
+- 2026-11-14: A line that cannot be written is logged to stderr. The attempt has happened, so the call is not failed.
+- 2026-11-14: `history` reads the log back as it is written, newest last, and is offered only when `audit_log` is set.
+- 2026-11-14: `history` shows only endpoints in the current config, since several configs can share one log.

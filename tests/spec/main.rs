@@ -9,6 +9,8 @@ mod support;
 #[cfg(test)]
 mod approval_policy;
 #[cfg(test)]
+mod audit_log;
+#[cfg(test)]
 mod check_command;
 #[cfg(test)]
 mod cli_flags;
@@ -44,6 +46,8 @@ mod headers_command;
 mod headers_refresh;
 #[cfg(test)]
 mod headers_static;
+#[cfg(test)]
+mod history;
 #[cfg(test)]
 mod introspect_file;
 #[cfg(test)]
