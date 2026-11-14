@@ -22,7 +22,7 @@ in the user's config, out of the agent's sight and out of its control.
 
 | Tool | Input | Returns |
 | --- | --- | --- |
-| `list_endpoints` | none | Each endpoint's name, URL, schema source and header names |
+| `list_endpoints` | none | Each endpoint's name, URL, schema source, header names and header commands' last run |
 | `list_operations` | `endpoint`, `query?`, `uses?`, `kind?`, `name?` | Saved operations: name, kind, description, variables, cost, text |
 | `introspect` | `endpoint`, `refresh?` | Overview: root types, counts, query and mutation names |
 | `search_schema` | `endpoint`, `query` | Ranked matches as one-line signatures |
@@ -237,3 +237,6 @@ Settled. To change one, ask the user, then add a new dated line instead of editi
 - 2026-11-14: A line that cannot be written is logged to stderr. The attempt has happened, so the call is not failed.
 - 2026-11-14: `history` reads the log back as it is written, newest last, and is offered only when `audit_log` is set.
 - 2026-11-14: `history` shows only endpoints in the current config, since several configs can share one log.
+- 2026-11-14: `list_endpoints` shows how each header command's last run went: ok, failed and why, or not run yet.
+- 2026-11-14: That status is only read, never produced: listing endpoints runs no command and sends nothing.
+- 2026-11-14: A failure is shown by a short reason, such as `exit 3`. Stdout and stderr are not shown there.

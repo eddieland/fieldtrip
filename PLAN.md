@@ -200,3 +200,8 @@ cargo test --workspace --all-features
   lines do not fit in `max_output_chars`, the oldest are left out and the result says so. Without `audit_log` the
   tool is not offered and the instructions do not mention it.
   Done when: `cargo test history`
+- [x] **40. Credential status.** `list_endpoints` shows, for each header that comes from a command, how its last run
+  went: `ok` and when, `failed` with when and a short reason such as `exit 3` or `printed nothing`, or `not run yet`.
+  Listing runs nothing and sends nothing, and shows neither stdout nor stderr. A template's command reports the same
+  run for every endpoint that shares it. Literal and `env` headers have no such line.
+  Done when: `cargo test credential_status`

@@ -6,6 +6,7 @@
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::sync::{Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use reqwest::header::{HeaderName, HeaderValue};
@@ -82,7 +83,38 @@ enum Source {
         /// The last output and when it was produced. The lock is held while the command runs, so that
         /// concurrent requests share one run.
         cached: tokio::sync::Mutex<Option<(Instant, Secret)>>,
+        /// How the last run went and when it ended, for `list_endpoints`. It is apart from `cached`, so it can be
+        /// read while the command runs.
+        last_run: Mutex<Option<(Instant, Outcome)>>,
     },
+}
+
+/// How a run of a header command went. It never holds the output.
+#[derive(Debug, Clone)]
+enum Outcome {
+    /// It printed a value.
+    Ok,
+    /// It failed, for the short reason given, such as `exit 3`.
+    Failed(String),
+}
+
+/// A header command that did not produce a value.
+#[derive(Debug)]
+struct Failure {
+    /// A few words for `list_endpoints`, such as `exit 3`.
+    short: String,
+    /// The full message, which names the header and the program and quotes stderr.
+    message: String,
+}
+
+impl Failure {
+    /// A failure with a short reason and a full message.
+    fn new(short: impl Into<String>, message: String) -> Self {
+        Self {
+            short: short.into(),
+            message,
+        }
+    }
 }
 
 /// How long a command's output is reused when the config sets no `ttl`.
@@ -154,6 +186,23 @@ impl Header {
         }
     }
 
+    /// How the last run of the header's command went, as in `command failed, last run 4 s ago: exit 3.`, without
+    /// running it. `None` for a header that does not come from a command.
+    pub(crate) fn status(&self) -> Option<String> {
+        let Source::Command { last_run, .. } = &self.source else {
+            return None;
+        };
+        let last_run = last_run.lock().unwrap_or_else(PoisonError::into_inner).clone();
+        Some(match last_run {
+            None => "command not run yet".to_owned(),
+            Some((at, Outcome::Ok)) => format!("command ok, last run {}", ago(at)),
+            Some((at, Outcome::Failed(reason))) => format!(
+                "command failed, last run {}: {reason}. The user has to fix it, usually by signing in again.",
+                ago(at)
+            ),
+        })
+    }
+
     /// Produces the header to send. With `fresh`, a command runs again even if its last output is still in its
     /// `ttl`.
     ///
@@ -180,13 +229,20 @@ impl Header {
                     format,
                     ttl,
                     cached,
+                    last_run,
                 } => {
                     let mut cached = cached.lock().await;
                     let reusable = cached.as_ref().filter(|(at, _)| !fresh && at.elapsed() < *ttl);
                     let output = if let Some((_, Secret(output))) = reusable {
                         output.clone()
                     } else {
-                        let output = run(name, argv, directory).await?;
+                        let ran = run(name, argv, directory).await;
+                        let outcome = match &ran {
+                            Ok(_) => Outcome::Ok,
+                            Err(failure) => Outcome::Failed(failure.short.clone()),
+                        };
+                        *last_run.lock().unwrap_or_else(PoisonError::into_inner) = Some((Instant::now(), outcome));
+                        let output = ran.map_err(|failure| failure.message)?;
                         *cached = Some((Instant::now(), Secret(output.clone())));
                         output
                     };
@@ -249,6 +305,7 @@ fn source_from_table(name: &str, mut table: toml::Table, directory: &Path) -> Re
                 format,
                 ttl: ttl.unwrap_or(DEFAULT_TTL),
                 cached: tokio::sync::Mutex::new(None),
+                last_run: Mutex::new(None),
             })
         }
         (Some(_), Some(_)) => Err(format!(
@@ -286,9 +343,12 @@ fn argv(name: &str, command: toml::Value) -> Result<Vec<Secret>, String> {
 ///
 /// Errors name the header, the program, the exit status and stderr. They never include stdout or the arguments,
 /// either of which can hold a secret.
-async fn run(name: &str, argv: &[Secret], directory: &Path) -> Result<String, String> {
+async fn run(name: &str, argv: &[Secret], directory: &Path) -> Result<String, Failure> {
     let Some((Secret(program), arguments)) = argv.split_first() else {
-        return Err(format!("The header `{name}` has an empty command."));
+        return Err(Failure::new(
+            "empty command",
+            format!("The header `{name}` has an empty command."),
+        ));
     };
     let child = tokio::process::Command::new(program)
         .args(arguments.iter().map(|Secret(argument)| argument))
@@ -298,17 +358,28 @@ async fn run(name: &str, argv: &[Secret], directory: &Path) -> Result<String, St
         .stderr(Stdio::piped())
         .kill_on_drop(true)
         .spawn()
-        .map_err(|error| format!("The command for the header `{name}` could not be started: `{program}`: {error}"))?;
+        .map_err(|error| {
+            Failure::new(
+                "could not be started",
+                format!("The command for the header `{name}` could not be started: `{program}`: {error}"),
+            )
+        })?;
     let output = tokio::time::timeout(COMMAND_TIMEOUT, child.wait_with_output())
         .await
         .map_err(|_elapsed| {
-            format!(
-                "The command for the header `{name}` (`{program}`) did not finish within {} seconds.",
-                COMMAND_TIMEOUT.as_secs()
+            Failure::new(
+                format!("did not finish within {} s", COMMAND_TIMEOUT.as_secs()),
+                format!(
+                    "The command for the header `{name}` (`{program}`) did not finish within {} seconds.",
+                    COMMAND_TIMEOUT.as_secs()
+                ),
             )
         })?
         .map_err(|error| {
-            format!("The command for the header `{name}` (`{program}`) could not be waited for: {error}")
+            Failure::new(
+                "could not be waited for",
+                format!("The command for the header `{name}` (`{program}`) could not be waited for: {error}"),
+            )
         })?;
 
     if !output.status.success() {
@@ -319,23 +390,46 @@ async fn run(name: &str, argv: &[Secret], directory: &Path) -> Result<String, St
         } else {
             format!("Its stderr: {stderr}")
         };
-        return Err(format!(
-            "The command for the header `{name}` (`{program}`) failed with {}. {detail}\nThe user has to fix this. \
-             It usually means signing in again.",
-            output.status
+        let short = output
+            .status
+            .code()
+            .map_or_else(|| "stopped by a signal".to_owned(), |code| format!("exit {code}"));
+        return Err(Failure::new(
+            short,
+            format!(
+                "The command for the header `{name}` (`{program}`) failed with {}. {detail}\nThe user has to fix \
+                 this. It usually means signing in again.",
+                output.status
+            ),
         ));
     }
     let stdout = String::from_utf8(output.stdout).map_err(|_error| {
-        format!("The command for the header `{name}` (`{program}`) printed something that is not text.")
+        Failure::new(
+            "printed something that is not text",
+            format!("The command for the header `{name}` (`{program}`) printed something that is not text."),
+        )
     })?;
     let value = stdout.trim();
     if value.is_empty() {
-        return Err(format!(
-            "The command for the header `{name}` (`{program}`) succeeded but printed nothing. It has to print the \
-             header's value on stdout."
+        return Err(Failure::new(
+            "printed nothing",
+            format!(
+                "The command for the header `{name}` (`{program}`) succeeded but printed nothing. It has to print \
+                 the header's value on stdout."
+            ),
         ));
     }
     Ok(value.to_owned())
+}
+
+/// How long ago `at` was, roughly: `4 s ago`, `12 min ago` or `3 h ago`.
+fn ago(at: Instant) -> String {
+    let seconds = at.elapsed().as_secs();
+    match seconds {
+        0..120 => format!("{seconds} s ago"),
+        120..7_200 => format!("{} min ago", seconds / 60),
+        _ => format!("{} h ago", seconds / 3_600),
+    }
 }
 
 /// The error for a header that is not one of the plugs.

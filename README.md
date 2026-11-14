@@ -87,7 +87,9 @@ Authorization = { command = ["python", "-m", "acme_auth", "token"], format = "Be
 
 A header value is a literal, an environment variable, or the trimmed stdout of a command. `format` wraps the value, so
 a CLI that prints a bare token becomes `Authorization: Bearer <token>`. The command runs directly from the argument
-list, with no shell.
+list, with no shell. Its output is reused for `ttl` seconds (300 unless set), and when the endpoint answers 401 the
+command runs again and the request is retried once. `list_endpoints` tells the agent how each command's last run went
+(ok, failed with a reason such as `exit 3`, or not run yet), without running it, so an expired login is reported as one.
 
 | Setting | Default | What it does |
 | --- | --- | --- |

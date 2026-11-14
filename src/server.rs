@@ -559,7 +559,10 @@ impl Fieldtrip {
                        from (a file or introspection), who approves `execute` requests, `mutations: denied` when \
                        `execute` refuses every mutation there, the cost map if there is one, how many operations \
                        the user has saved for `list_operations`, and the names of the headers sent with each request, so you can tell whether \
-                       authentication is set up. Header values are never shown. When several endpoints are \
+                       authentication is set up. For a header produced by a command, such as a login helper, it says \
+                       how the command's last run went: ok, failed with its exit status, or not run yet. It runs \
+                       nothing to find out. A failed command usually means the user's login expired: tell them to \
+                       sign in again rather than retrying. Header values are never shown. When several endpoints are \
                        instances of one service, such as dev and prod, prefer the one the description or the user \
                        points to, and ask when it is unclear. Endpoints and headers come only from the user's \
                        config: if one is missing, ask the user to add it.",
@@ -605,6 +608,11 @@ impl Fieldtrip {
             if !endpoint.headers.is_empty() {
                 let names: Vec<&str> = endpoint.headers.iter().map(|header| header.name.as_str()).collect();
                 let _ = writeln!(out, "  headers: {}", names.join(", "));
+            }
+            for header in &endpoint.headers {
+                if let Some(status) = header.status() {
+                    let _ = writeln!(out, "  header {}: {status}", header.name);
+                }
             }
             if !endpoint.response_headers.is_empty() {
                 let _ = writeln!(

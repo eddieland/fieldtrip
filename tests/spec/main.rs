@@ -25,6 +25,8 @@ mod cost_map;
 #[cfg(test)]
 mod cost_patterns;
 #[cfg(test)]
+mod credential_status;
+#[cfg(test)]
 mod describe;
 #[cfg(test)]
 mod descriptions;
