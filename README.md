@@ -16,7 +16,8 @@ Rust, that sits between an agent and a GraphQL API and gives the agent four step
 
 1. **Load the schema** by introspecting the endpoint, or from a `schema.graphql` file when introspection is turned
    off.
-2. **Discover** queries, mutations, types and fields by searching the schema and reading only the parts it needs.
+2. **Discover** queries, mutations, types and fields by searching the schema and reading only the parts it needs,
+   or start from the [operations your team has saved](#saved-operations).
 3. **Estimate** by validating an operation against the schema and costing it before anything is sent.
 4. **Execute with approval.** You see the exact operation, its variables and its estimated cost, and nothing is sent
    until you approve.
@@ -159,12 +160,41 @@ fieldtrip check --config /path/to/fieldtrip.toml
 ```
 
 This prints what each endpoint resolves to, runs every header command, reads every schema file, and checks each
-cost map against its schema, without printing a header value or sending anything to an endpoint. It exits non-zero
+cost map and saved operation against its schema, without printing a header value or sending anything to an endpoint. It exits non-zero
 when something is wrong. MCP clients often show only "server failed to start", so run it after any config change.
 
 Set `FIELDTRIP_LOG=debug` for more detail on stderr.
 
 [DESIGN.md](DESIGN.md) has the full config shape, the tools, and the approval rules.
+
+## Saved operations
+
+An agent writes better GraphQL when it starts from an operation that is known to work. If your team already has the
+operations it trusts, in client code or runbooks, give an endpoint (or a template) a directory of them:
+
+```toml
+[templates.acme]
+operations = "operations/acme/"   # relative to the config file
+```
+
+Each `.graphql` or `.gql` file holds one named query or mutation, plus any fragments it uses. The comment lines at the
+top are its description:
+
+```graphql
+# Find an order by ID with its line items and payment state.
+query OrderById($id: ID!) {
+  order(id: $id) { id status lineItems(first: 50) { nodes { sku quantity } } payment { state } }
+}
+```
+
+`list_operations` shows the agent each one with its description, variables, estimated cost and text, and
+`search_schema` lists matching ones first. The agent runs one with `execute` and `operation_name`. You approve it as
+you would any other operation, and the prompt shows the full text that will be sent.
+
+Every operation is validated against the schema at startup (for a `schema` file) or when the schema is first loaded
+(by introspection). One that no longer validates is logged as a warning, listed as broken, and never sent, so a
+change to the API shows up instead of failing quietly. `fieldtrip check` warns about them too. A file that is not one
+named query or mutation, or two files with the same operation name, stop the server at startup.
 
 ## Cost map
 

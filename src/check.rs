@@ -1,15 +1,15 @@
 //! `fieldtrip check`: the configuration as each endpoint resolves it, for the user to read.
 //!
 //! It answers what an MCP client hides: whether the config loads, what an endpoint takes from its template,
-//! whether every header can be produced, and whether a cost map fits the schema. It never prints a header value,
-//! and it sends nothing to any endpoint.
+//! whether every header can be produced, and whether a cost map and the saved operations fit the schema. It never
+//! prints a header value, and it sends nothing to any endpoint.
 
 use std::fmt::Write as _;
 use std::path::Path;
 
-use crate::approval;
 use crate::config::{Config, Endpoint, Mutations, show_bytes};
 use crate::schema::Loaded;
+use crate::{approval, library};
 
 /// What the check found.
 #[derive(Debug)]
@@ -155,12 +155,49 @@ async fn endpoint_report(out: &mut Out, name: &str, endpoint: &Endpoint) {
         }
     }
 
+    operations_report(out, name, endpoint, schema.as_ref());
+
     for header in &endpoint.headers {
         let label = format!("header {}", header.name);
         let what = header.source();
         match header.resolve(false).await {
             Ok(_resolved) => out.line(&label, format!("{what}: ok")),
             Err(problem) => out.problem(&label, &what, &problem),
+        }
+    }
+}
+
+/// Writes whether each of the endpoint's saved operations still validates against its schema, when both are there.
+fn operations_report(out: &mut Out, name: &str, endpoint: &Endpoint, schema: Option<&Loaded>) {
+    if let Some(source) = &endpoint.operations.source {
+        let count = endpoint.operations.operations.len();
+        let what = format!(
+            "{} ({count} operation{})",
+            source.display(),
+            if count == 1 { "" } else { "s" }
+        );
+        match schema {
+            None => out.line("operations", format!("{what}: not checked against a schema")),
+            Some(loaded) => {
+                let mut broken = 0;
+                // An operation broken by a change to the schema is a warning, as an unmatched cost rule is: the
+                // endpoint still works, and only that operation is refused.
+                for saved in &endpoint.operations.operations {
+                    if let Err(error) = saved.plan(loaded, name, endpoint) {
+                        let problems = library::problems(&error).join("; ");
+                        let warning = format!(
+                            "`{}` in {} no longer validates: {problems}",
+                            saved.name,
+                            saved.file.display()
+                        );
+                        out.warning("operations", &what, &warning);
+                        broken += 1;
+                    }
+                }
+                if broken == 0 {
+                    out.line("operations", format!("{what}: ok"));
+                }
+            }
         }
     }
 }

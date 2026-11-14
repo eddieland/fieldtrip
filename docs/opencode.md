@@ -113,6 +113,7 @@ Run `opencode mcp list` and check that fieldtrip shows as connected. Its tools a
 | Tool | What it's for |
 | --- | --- |
 | `fieldtrip_list_endpoints` | The endpoints in your config, their descriptions, and which headers each one has |
+| `fieldtrip_list_operations` | The operations you saved for an endpoint, ready to run by name |
 | `fieldtrip_introspect` | Load an endpoint's schema and get an overview of it |
 | `fieldtrip_search_schema` | Find queries, mutations, types and fields by name |
 | `fieldtrip_describe` | Read one type or field as SDL |

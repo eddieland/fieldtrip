@@ -23,17 +23,19 @@ in the user's config, out of the agent's sight and out of its control.
 | Tool | Input | Returns |
 | --- | --- | --- |
 | `list_endpoints` | none | Each endpoint's name, URL, schema source and header names |
+| `list_operations` | `endpoint`, `query?` | Saved operations: name, kind, description, variables, cost, text |
 | `introspect` | `endpoint`, `refresh?` | Overview: root types, counts, query and mutation names |
 | `search_schema` | `endpoint`, `query` | Ranked matches as one-line signatures |
 | `describe` | `endpoint`, `name` (`Type` or `Type.field`) | That definition as compact SDL |
-| `estimate_cost` | `endpoint`, `operation`, `variables?` | Validation errors, or cost, depth, breakdown, assumptions |
-| `execute` | `endpoint`, `operation`, `variables?`, `select?`, `save?` | Status, `errors`, then the rest or a summary |
+| `estimate_cost` | `endpoint`, `operation` or `operation_name`, `variables?` | Validation errors, or cost, depth, breakdown, assumptions |
+| `execute` | `endpoint`, `operation` or `operation_name`, `variables?`, `select?`, `save?` | Status, `errors`, then the rest or a summary |
 
 ## Config shape
 
 ```toml
 [templates.acme]                             # optional: settings that several endpoints share
 costs             = "acme.costs.toml"        # optional cost map, relative to this file
+operations        = "operations/acme/"       # optional directory of saved operations, one per .graphql file
 assumed_list_size = 20                       # optional, default 10
 timeout           = 30                       # optional, seconds, default 30
 response_headers  = ["x-request-id", "traceparent"]   # optional, shown by `execute`
@@ -58,7 +60,7 @@ mutations         = "deny"                   # optional, default "prompt". A tem
 X-Api-Key = { env = "ACME_API_KEY" }
 ```
 
-An endpoint takes `schema`, `headers`, `costs`, `assumed_list_size`, `timeout`, `response_headers` and the three
+An endpoint takes `schema`, `headers`, `costs`, `operations`, `assumed_list_size`, `timeout`, `response_headers` and the three
 `max_` limits from its template unless it sets them. Headers merge by name, ignoring case, and the endpoint's win.
 `url`, `description`, `approval` and `auto_approve_cost` are only ever set on the endpoint. `mutations` comes from the
 template too, but an endpoint can only make it stricter. A path may start with `~/`.
@@ -205,3 +207,13 @@ Settled. To change one, ask the user, then add a new dated line instead of editi
 - 2026-11-13: `save` writes the whole response to a new file in fieldtrip's cache directory. The agent cannot name it.
 - 2026-11-13: A saved response has header values removed, as any response does. Only the user can read the file.
 - 2026-11-13: A connection whose `pageInfo` says `hasNextPage: true` is pointed out in the result, with its cursor.
+- 2026-11-14: `operations` names a directory of `.graphql` and `.gql` files, each one named query or mutation. It is
+  config: read once, at startup, and no tool can change it. An endpoint takes it from its template unless it sets it.
+- 2026-11-14: A saved operation's leading `#` comment lines are its description. Its name is how tools refer to it.
+- 2026-11-14: A file that is not one named query or mutation, two files with one name, or a missing directory stop
+  the server. An operation that no longer validates against the schema is only a warning, and is listed as broken.
+- 2026-11-14: `execute` and `estimate_cost` take `operation_name` instead of `operation`. Approval does not change:
+  the prompt shows the saved operation's canonical text, and that is what is sent.
+- 2026-11-14: Saved operations are checked whenever the schema loads, which for a schema file is at startup. `check`
+  checks them against schema files only, since it sends nothing.
+- 2026-11-14: A saved operation is approved like any other. It carries no approval setting of its own.

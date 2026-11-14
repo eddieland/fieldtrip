@@ -124,7 +124,8 @@ impl Launch {
         self
     }
 
-    /// Writes a file called `name` with `contents` next to the config file, as a cost map for instance.
+    /// Writes a file called `name` with `contents` next to the config file, as a cost map for instance. A `name`
+    /// such as `operations/user.graphql` creates the folder too.
     pub(crate) fn file(mut self, name: &str, contents: &str) -> Self {
         self.files.push((name.to_owned(), contents.to_owned()));
         self
@@ -196,7 +197,11 @@ impl Launch {
         let dir = tempfile::tempdir().expect("create a temp dir");
         copy_fixtures(dir.path());
         for (name, contents) in &self.files {
-            std::fs::write(dir.path().join(name), contents).expect("write an extra file");
+            let path = dir.path().join(name);
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent).expect("create the folder of an extra file");
+            }
+            std::fs::write(path, contents).expect("write an extra file");
         }
         let config_home = dir.path().join("config-home");
         let cache_home = dir.path().join("cache-home");
