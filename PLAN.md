@@ -243,3 +243,11 @@ cargo test --workspace --all-features
   `generated (uuid)`, and a `generate` that is not `uuid` or `traceparent`, or that comes with `format`, `ttl`, `env`
   or `command`, stops the server.
   Done when: `cargo test generated_headers`
+- [x] **46. A bad file is left out.** A file in `operations` that does not hold one named query or mutation is left
+  out and the rest load. When several files use one operation name, all of them are left out, and `execute` with that
+  name says which files clash, sending nothing. In `fragments`, a file that holds anything but fragments is left out,
+  and a fragment name defined twice is left out with every operation that spreads it. `list_operations` lists what
+  was left out and why, or counts it under a filter, `list_endpoints` counts the operation files left out, and
+  `fieldtrip check` and the startup log warn about each. A missing directory still stops the server. This replaces
+  the startup errors of slices 36 and 44.
+  Done when: `cargo test skipped_files`

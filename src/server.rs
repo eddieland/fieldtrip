@@ -446,8 +446,43 @@ impl<'call> Filters<'call> {
     }
 }
 
-/// The result of `list_operations` for the operations of `endpoint` that pass `filters`.
+/// The result of `list_operations` for the operations of `endpoint` that pass `filters`, followed by the files left
+/// out of the library: in full with no filter, and as a count with one.
 fn operation_list(schema: &Loaded, name: &str, endpoint: &Endpoint, filters: &Filters<'_>) -> String {
+    let mut out = matching_operations(schema, name, endpoint, filters);
+    let library = &endpoint.operations;
+    let operations = library.operation_files_left_out();
+    let fragments = library.fragment_files_left_out();
+    if operations + fragments == 0 {
+        return out;
+    }
+    if filters.are_empty() {
+        out.push_str(
+            "\nLeft out because something is wrong with them, so `execute` cannot run them. Tell the user, who can \
+             fix these files:\n",
+        );
+        for left_out in library.rejected.iter().chain(library.left_out_fragments()) {
+            let _ = writeln!(out, "- {}", left_out.problem);
+        }
+        return out;
+    }
+    let plural = |count: usize, what: &str| format!("{count} {what} file{}", if count == 1 { "" } else { "s" });
+    let counted: Vec<String> = [(operations, "operation"), (fragments, "shared fragment")]
+        .into_iter()
+        .filter(|(count, _)| *count > 0)
+        .map(|(count, what)| plural(count, what))
+        .collect();
+    let _ = writeln!(
+        out,
+        "\n{} {} left out, because something is wrong with them. `list_operations` with no filter lists them.",
+        counted.join(" and "),
+        if operations + fragments == 1 { "was" } else { "were" }
+    );
+    out
+}
+
+/// The part of [`operation_list`] about the operations that pass `filters`.
+fn matching_operations(schema: &Loaded, name: &str, endpoint: &Endpoint, filters: &Filters<'_>) -> String {
     let library = &endpoint.operations;
     let total = library.operations.len();
     let matching = filters.apply(library, schema);
@@ -657,9 +692,14 @@ impl Fieldtrip {
             }
             if let Some(source) = &endpoint.operations.source {
                 let count = endpoint.operations.operations.len();
+                let left_out = match endpoint.operations.operation_files_left_out() {
+                    0 => String::new(),
+                    1 => ", 1 file left out".to_owned(),
+                    many => format!(", {many} files left out"),
+                };
                 let _ = writeln!(
                     out,
-                    "  saved operations: {count} in {} (see `list_operations`)",
+                    "  saved operations: {count} in {}{left_out} (see `list_operations`)",
                     source.display()
                 );
             }
@@ -692,7 +732,9 @@ impl Fieldtrip {
                        For each operation it returns the name, whether it is a query or a mutation, the user's \
                        description, the variables it declares, its estimated cost and its text, which is also a \
                        good model for an operation of your own. One that no longer validates against the schema is \
-                       marked BROKEN with what is wrong, and `execute` will not run it. A library can hold hundreds, \
+                       marked BROKEN with what is wrong, and `execute` will not run it. Files that could not be \
+                       loaded at all, such as two with one name, are listed at the end as left out. A library can \
+                       hold hundreds, \
                        so narrow it: `query` matches words in the name or description, `uses` matches operations \
                        that select a type or a chain of fields such as `Order.payment`, and `kind` keeps queries or \
                        mutations. When more than five match, each gets one line without its text, and `name` shows \
@@ -1258,11 +1300,18 @@ impl Fieldtrip {
         Ok(held)
     }
 
-    /// Checks the saved operations of every endpoint whose schema is a file, so that one broken by a change to the
-    /// schema is reported at startup. Endpoints that load their schema by introspection are checked on first use,
-    /// because startup sends nothing.
+    /// Logs each file left out of a library, and checks the saved operations of every endpoint whose schema is a
+    /// file, so that one broken by a change to the schema is reported at startup. Endpoints that load their schema by
+    /// introspection are checked on first use, because startup sends nothing.
     pub(crate) async fn check_saved_operations(&self) {
         for (name, endpoint) in &self.config.endpoints {
+            let library = &endpoint.operations;
+            for left_out in library.rejected.iter().chain(library.left_out_fragments()) {
+                tracing::warn!(
+                    "left out of the saved operations for endpoint `{name}`: {}",
+                    left_out.problem
+                );
+            }
             if endpoint.schema.is_none() || endpoint.operations.is_empty() {
                 continue;
             }

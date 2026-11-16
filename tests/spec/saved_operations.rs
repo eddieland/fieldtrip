@@ -349,42 +349,9 @@ fn startup_logs_the_stale_operation() {
 }
 
 #[test]
-fn a_library_that_cannot_be_read_stops_the_server() {
-    let mock = MockServer::unreachable();
-    let cases = [
-        (Launch::new(&config(&mock, "")), "is not a directory"),
-        (
-            Launch::new(&config(&mock, "")).file("operations/anonymous.graphql", "{ viewer { name } }"),
-            "has no name",
-        ),
-        (
-            Launch::new(&config(&mock, ""))
-                .file("operations/a.graphql", VALID)
-                .file("operations/b.graphql", VALID),
-            "is used in both",
-        ),
-        (
-            Launch::new(&config(&mock, "")).file(
-                "operations/two.graphql",
-                "query A { viewer { name } }\nquery B { viewer { name } }",
-            ),
-            "more than one operation",
-        ),
-        (
-            Launch::new(&config(&mock, "")).file("operations/bad.graphql", "query Broken {"),
-            "is not valid GraphQL",
-        ),
-        (
-            Launch::new(&config(&mock, "")).file(
-                "operations/live.graphql",
-                "subscription Live { orderUpdated(id: \"1\") { id } }",
-            ),
-            "subscription",
-        ),
-    ];
-    for (launch, expected) in cases {
-        let stderr = launch.fails_to_start();
-        assert!(stderr.contains("endpoint `store`"), "{stderr}");
-        assert!(stderr.contains(expected), "expected {expected:?} in: {stderr}");
-    }
+fn a_missing_library_stops_the_server() {
+    // A bad file in the directory is left out instead: see `skipped_files`.
+    let stderr = Launch::new(&config(&MockServer::unreachable(), "")).fails_to_start();
+    assert!(stderr.contains("endpoint `store`"), "{stderr}");
+    assert!(stderr.contains("is not a directory"), "{stderr}");
 }
