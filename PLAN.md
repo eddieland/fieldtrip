@@ -225,3 +225,11 @@ cargo test --workspace --all-features
   `list_endpoints` says so on each endpoint that prompts, a warning is logged when such a client connects, and other
   clients are asked as before. With `audit_log` set, the refusal is recorded as `unavailable`, naming the client.
   Done when: `cargo test auto_accept`
+- [x] **44. Shared fragments.** An endpoint or a template names a directory of fragment files with `fragments`. Each
+  saved operation gets the shared fragments it spreads and does not define, and the ones they spread, appended once
+  each, so validation, `estimate_cost`, `list_operations`, `uses`, the prompt and the request all see the full text.
+  A fragment in the operation's own file wins. One found nowhere marks the operation broken, naming it. An operation
+  the agent writes for `execute` gets nothing appended. A fragment name defined twice, a file that holds anything but
+  fragments, a missing directory, or `fragments` on an endpoint with no `operations` stop the server at startup.
+  `fieldtrip check` counts the fragments and warns about each one no operation uses.
+  Done when: `cargo test shared_fragments`

@@ -233,6 +233,20 @@ query OrderById($id: ID!) {
 }
 ```
 
+Generated clients often keep fragments in files of their own and reuse them across operations. Point `fragments` at
+that directory and each operation gets the shared fragments it spreads appended to it, so the files can stay as the
+client keeps them:
+
+```toml
+[templates.acme]
+operations = "client/queries/"
+fragments  = "client/queries/fragments/"   # only fragment definitions in these files
+```
+
+A fragment defined in an operation's own file wins over a shared one with the same name. The prompt shows the full
+text, fragments included, since that is what is sent. `fieldtrip check` counts the fragments and warns about any that
+no operation uses.
+
 `list_operations` shows the agent each one with its description, variables, estimated cost and text, and
 `search_schema` lists matching ones first. A library can hold hundreds, so the agent can narrow the list: `query`
 matches words in the name or description, `kind` keeps queries or mutations, and `uses` keeps operations that select
@@ -243,7 +257,8 @@ you would any other operation, and the prompt shows the full text that will be s
 Every operation is validated against the schema at startup (for a `schema` file) or when the schema is first loaded
 (by introspection). One that no longer validates is logged as a warning, listed as broken, and never sent, so a
 change to the API shows up instead of failing quietly. `fieldtrip check` warns about them too. A file that is not one
-named query or mutation, or two files with the same operation name, stop the server at startup.
+named query or mutation, two files with the same operation name, or two shared fragments with the same name stop the
+server at startup.
 
 ## Cost map
 

@@ -197,9 +197,10 @@ fn operations_report(out: &mut Out, name: &str, endpoint: &Endpoint, schema: Opt
                     if let Err(error) = saved.plan(loaded, name, endpoint) {
                         let problems = library::problems(&error).join("; ");
                         let warning = format!(
-                            "`{}` in {} no longer validates: {problems}",
+                            "`{}` in {}{} no longer validates: {problems}",
                             saved.name,
-                            saved.file.display()
+                            saved.file.display(),
+                            saved.with_fragments()
                         );
                         out.warning("operations", &what, &warning);
                         broken += 1;
@@ -209,6 +210,24 @@ fn operations_report(out: &mut Out, name: &str, endpoint: &Endpoint, schema: Opt
                     out.line("operations", format!("{what}: ok"));
                 }
             }
+        }
+    }
+    if let Some(shelf) = &endpoint.operations.fragments {
+        let count = shelf.fragments.len();
+        let what = format!(
+            "{} ({count} fragment{})",
+            shelf.source.display(),
+            if count == 1 { "" } else { "s" }
+        );
+        let mut unused = 0;
+        // A fragment no operation spreads does no harm, but it may be one an operation misspells.
+        for shared in shelf.fragments.iter().filter(|shared| !shared.used) {
+            let warning = format!("`{}` in {} is used by no operation", shared.name, shared.file.display());
+            out.warning("fragments", &what, &warning);
+            unused += 1;
+        }
+        if unused == 0 {
+            out.line("fragments", format!("{what}: ok"));
         }
     }
 }

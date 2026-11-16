@@ -85,6 +85,8 @@ mod schema_cache;
 #[cfg(test)]
 mod search_schema;
 #[cfg(test)]
+mod shared_fragments;
+#[cfg(test)]
 mod templates;
 #[cfg(test)]
 mod tool_descriptions;

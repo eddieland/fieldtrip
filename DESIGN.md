@@ -39,6 +39,7 @@ audit_log = "~/.local/state/fieldtrip/audit.jsonl"   # optional: one JSON line p
 [templates.acme]                             # optional: settings that several endpoints share
 costs             = "acme.costs.toml"        # optional cost map, relative to this file
 operations        = "operations/acme/"       # optional directory of saved operations, one per .graphql file
+fragments         = "operations/acme/fragments/"   # optional directory of fragments the saved operations share
 assumed_list_size = 20                       # optional, default 10
 timeout           = 30                       # optional, seconds, default 30
 response_headers  = ["x-request-id", "traceparent"]   # optional, shown by `execute`
@@ -65,9 +66,9 @@ mutations         = "deny"                   # optional, default "prompt". A tem
 X-Api-Key = { env = "ACME_API_KEY" }
 ```
 
-An endpoint takes `schema`, `schema_ttl`, `headers`, `costs`, `operations`, `assumed_list_size`, `timeout`,
-`response_headers`, the three `max_` limits and `audit_variables` from its template unless it sets them. Headers
-merge by name, ignoring case, and the endpoint's win.
+An endpoint takes `schema`, `schema_ttl`, `headers`, `costs`, `operations`, `fragments`, `assumed_list_size`,
+`timeout`, `response_headers`, the three `max_` limits and `audit_variables` from its template unless it sets them.
+Headers merge by name, ignoring case, and the endpoint's win.
 `url`, `description`, `approval` and `auto_approve_cost` are only ever set on the endpoint. `mutations` comes from the
 template too, but an endpoint can only make it stricter. A path may start with `~/`.
 
@@ -259,3 +260,12 @@ Settled. To change one, ask the user, then add a new dated line instead of editi
 - 2026-11-14: When such a client connects with the `initialize` handshake, a warning names the endpoints affected.
   `list_endpoints` says so on each of them.
 - 2026-11-14: The audit log records that refusal as `unavailable`, with a reason that names the client.
+- 2026-11-16: `fragments` names a directory of `.graphql` and `.gql` files holding only fragment definitions, shared by
+  the saved operations of an endpoint or template. It is config like `operations`: read once, at startup.
+- 2026-11-16: A saved operation gets each shared fragment it spreads and does not define, following spreads, appended
+  to its text once. From then on it is as if its file held them. A fragment in the operation's own file wins.
+- 2026-11-16: The prompt and the request carry the full text, shared fragments included, as for any saved operation.
+- 2026-11-16: Only saved operations use shared fragments. An operation the calling agent writes stays self-contained.
+- 2026-11-16: A fragment name defined twice in `fragments`, a file there holding anything else, a missing directory,
+  or `fragments` on an endpoint with no `operations` stop the server. A fragment found nowhere breaks only the
+  operation that spreads it. `check` warns about a shared fragment no operation uses.
