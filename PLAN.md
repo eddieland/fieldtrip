@@ -233,3 +233,13 @@ cargo test --workspace --all-features
   fragments, a missing directory, or `fragments` on an endpoint with no `operations` stop the server at startup.
   `fieldtrip check` counts the fragments and warns about each one no operation uses.
   Done when: `cargo test shared_fragments`
+- [x] **45. Generated headers.** A header set to `{ generate = "uuid" }` carries a new UUID v4 on each request, and
+  `{ generate = "traceparent" }` a new W3C trace context, `00-<trace id>-<span id>-01`, so a request can be found in
+  the endpoint's logs when the endpoint returns no ID of its own or never answers. `execute` shows each value sent,
+  as `sent <name> <value>`, next to the response headers, and a request that times out or fails after leaving gives
+  it in the error. The audit log records them under `sent`, answered or not. The retry after a 401 repeats the same
+  values, and the next call gets new ones. Introspection carries them too. The values are not secrets and are never
+  removed from a response. `list_endpoints` says which headers are generated, `fieldtrip check` shows
+  `generated (uuid)`, and a `generate` that is not `uuid` or `traceparent`, or that comes with `format`, `ttl`, `env`
+  or `command`, stops the server.
+  Done when: `cargo test generated_headers`

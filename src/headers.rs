@@ -1,9 +1,10 @@
 //! The header plugs: where the value of each configured header comes from.
 //!
-//! There are three: a literal, an environment variable, and a command. Values are secrets. They are resolved when
-//! a request is made and never shown to the calling agent, the approval prompt or the log.
+//! There are four: a literal, an environment variable, a command, and a value fieldtrip generates for each request.
+//! The first three are resolved when a request is made and never shown to the calling agent, the approval prompt or
+//! the log. A generated value is an ID, not a secret: it is shown, so the request can be found in the server's logs.
 
-use std::fmt;
+use std::fmt::{self, Write as _};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::{Mutex, PoisonError};
@@ -30,6 +31,16 @@ pub(crate) struct Header {
     wire_name: HeaderName,
     /// Where the value comes from.
     source: Source,
+}
+
+/// A value fieldtrip generated for one request, such as a correlation ID. It is not a secret: `execute` shows it and
+/// the audit log records it, so the request can be found in the endpoint's logs.
+#[derive(Debug, Clone)]
+pub(crate) struct Generated {
+    /// The header's name as written in the config.
+    pub(crate) name: String,
+    /// The value sent.
+    pub(crate) value: String,
 }
 
 /// A header that is ready to send.
@@ -87,6 +98,71 @@ enum Source {
         /// read while the command runs.
         last_run: Mutex<Option<(Instant, Outcome)>>,
     },
+    /// A new value for each request, made by fieldtrip.
+    Generated(Generator),
+}
+
+/// What kind of value a `generate` header carries.
+#[derive(Debug, Clone, Copy)]
+enum Generator {
+    /// A random UUID, version 4.
+    Uuid,
+    /// A W3C `traceparent`: `00-<trace id>-<span id>-01`, both IDs random.
+    Traceparent,
+}
+
+impl Generator {
+    /// The name written after `generate =`.
+    const fn keyword(self) -> &'static str {
+        match self {
+            Self::Uuid => "uuid",
+            Self::Traceparent => "traceparent",
+        }
+    }
+
+    /// Makes a new value.
+    fn make(self, name: &str) -> Result<String, String> {
+        let mut bytes = [0_u8; 24];
+        getrandom::fill(&mut bytes).map_err(|error| {
+            format!("fieldtrip could not get random bytes to generate the header `{name}`: {error}")
+        })?;
+        Ok(match self {
+            Self::Uuid => {
+                let mut uuid = [0_u8; 16];
+                uuid.copy_from_slice(bytes.get(..16).unwrap_or_default());
+                // Version 4, variant 1, as RFC 9562 sets out.
+                uuid[6] = (uuid[6] & 0x0f) | 0x40;
+                uuid[8] = (uuid[8] & 0x3f) | 0x80;
+                let hex = hex(&uuid);
+                format!(
+                    "{}-{}-{}-{}-{}",
+                    hex.get(..8).unwrap_or_default(),
+                    hex.get(8..12).unwrap_or_default(),
+                    hex.get(12..16).unwrap_or_default(),
+                    hex.get(16..20).unwrap_or_default(),
+                    hex.get(20..).unwrap_or_default()
+                )
+            }
+            Self::Traceparent => {
+                // An ID of all zeros is not valid. Random bytes make one about never, but it costs nothing to rule out.
+                bytes[15] |= 1;
+                bytes[23] |= 1;
+                let trace = hex(bytes.get(..16).unwrap_or_default());
+                let span = hex(bytes.get(16..).unwrap_or_default());
+                format!("00-{trace}-{span}-01")
+            }
+        })
+    }
+}
+
+/// `bytes` in lowercase hex.
+fn hex(bytes: &[u8]) -> String {
+    bytes
+        .iter()
+        .fold(String::with_capacity(bytes.len() * 2), |mut out, byte| {
+            let _ = write!(out, "{byte:02x}");
+            out
+        })
 }
 
 /// How a run of a header command went. It never holds the output.
@@ -131,7 +207,7 @@ impl Header {
     ///
     /// # Errors
     ///
-    /// Returns a message when the entry is not one of the three plugs. The message never quotes a value.
+    /// Returns a message when the entry is not one of the plugs. The message never quotes a value.
     pub(crate) fn from_config(name: String, value: toml::Value, directory: &Path) -> Result<Self, String> {
         let wire_name = HeaderName::from_bytes(name.as_bytes())
             .map_err(|_error| format!("`{name}` is not a valid HTTP header name"))?;
@@ -166,7 +242,23 @@ impl Header {
                 let formatted = if format.is_some() { ", formatted" } else { "" };
                 format!("command `{program}`{formatted}, reused for {}s", ttl.as_secs())
             }
+            Source::Generated(generator) => format!("generated ({})", generator.keyword()),
         }
+    }
+
+    /// A new value for this header, when fieldtrip generates it. `None` for the other plugs.
+    ///
+    /// # Errors
+    ///
+    /// Returns a message when the system has no random bytes to give.
+    pub(crate) fn generate(&self) -> Result<Option<Generated>, String> {
+        let Source::Generated(generator) = self.source else {
+            return Ok(None);
+        };
+        Ok(Some(Generated {
+            name: self.name.clone(),
+            value: generator.make(&self.name)?,
+        }))
     }
 
     /// Whether the header comes from a command, whose output can go stale and be produced again.
@@ -179,7 +271,7 @@ impl Header {
     /// [`Resolved::secret`], and neither has a command that has not run yet.
     pub(crate) async fn known_secret(&self) -> Option<Secret> {
         match &self.source {
-            Source::Literal(_) => None,
+            Source::Literal(_) | Source::Generated(_) => None,
             Source::Env { variable, .. } => std::env::var(variable)
                 .ok()
                 .filter(|value| !value.is_empty())
@@ -191,6 +283,12 @@ impl Header {
     /// How the last run of the header's command went, as in `command failed, last run 4 s ago: exit 3.`, without
     /// running it. `None` for a header that does not come from a command.
     pub(crate) fn status(&self) -> Option<String> {
+        if let Source::Generated(generator) = self.source {
+            return Some(format!(
+                "a new {} for each request, which `execute` shows so the request can be found in the server's logs",
+                generator.keyword()
+            ));
+        }
         let Source::Command { last_run, .. } = &self.source else {
             return None;
         };
@@ -230,16 +328,24 @@ impl Header {
     }
 
     /// Produces the header to send. With `fresh`, a command runs again even if its last output is still in its
-    /// `ttl`.
+    /// `ttl`. A generated header takes its value from `generated`, so that a retry repeats it, or gets a new one
+    /// when it is not there.
     ///
     /// # Errors
     ///
     /// Returns a message that names the header and what it is waiting for, never a value.
-    pub(crate) async fn resolve(&self, fresh: bool) -> Result<Resolved, String> {
+    pub(crate) async fn resolve(&self, fresh: bool, generated: &[Generated]) -> Result<Resolved, String> {
         let name = &self.name;
         let (value, secret) =
             match &self.source {
                 Source::Literal(Secret(literal)) => (literal.clone(), None),
+                Source::Generated(generator) => {
+                    let value = generated
+                        .iter()
+                        .find(|made| made.name == *name)
+                        .map_or_else(|| generator.make(name), |made| Ok(made.value.clone()))?;
+                    (value, None)
+                }
                 Source::Env { variable, format } => {
                     let value = std::env::var(variable).ok().filter(|value| !value.is_empty()).ok_or_else(|| {
                     format!(
@@ -279,7 +385,8 @@ impl Header {
         let mut value = HeaderValue::from_str(&value).map_err(|_error| {
             format!("The value of the header `{name}` has characters an HTTP header cannot carry.")
         })?;
-        value.set_sensitive(true);
+        // A generated ID is no secret, and is easier to debug when the HTTP client may print it.
+        value.set_sensitive(!matches!(self.source, Source::Generated(_)));
         Ok(Resolved {
             name: self.wire_name.clone(),
             value,
@@ -315,8 +422,23 @@ fn source_from_table(name: &str, mut table: toml::Table, directory: &Path) -> Re
     };
     let env = table.remove("env");
     let command = table.remove("command");
+    let generate = table.remove("generate");
     if let Some(unknown) = table.keys().next() {
         return Err(format!("header `{name}` has an unknown key `{unknown}`. {PLUGS}"));
+    }
+    if let Some(generate) = generate {
+        if env.is_some() || command.is_some() {
+            return Err(format!(
+                "header `{name}` sets `generate` and also `env` or `command`. Use one of them."
+            ));
+        }
+        if format.is_some() || ttl.is_some() {
+            return Err(format!(
+                "header `{name}` sets `generate`, which takes neither `format` nor `ttl`: the value is new for each \
+                 request and sent as it is"
+            ));
+        }
+        return generator(name, &generate).map(Source::Generated);
     }
     match (env, command) {
         (Some(toml::Value::String(_)), None) if ttl.is_some() => {
@@ -338,6 +460,18 @@ fn source_from_table(name: &str, mut table: toml::Table, directory: &Path) -> Re
             "header `{name}` sets both `env` and `command`. Use one of them."
         )),
         _ => Err(expected_a_plug(name)),
+    }
+}
+
+/// Reads `generate`: `"uuid"` or `"traceparent"`.
+fn generator(name: &str, generate: &toml::Value) -> Result<Generator, String> {
+    match generate.as_str() {
+        Some("uuid") => Ok(Generator::Uuid),
+        Some("traceparent") => Ok(Generator::Traceparent),
+        _ => Err(format!(
+            "the `generate` of header `{name}` must be \"uuid\" (a new UUID for each request) or \"traceparent\" (a \
+             new W3C trace context for each request)"
+        )),
     }
 }
 
@@ -458,9 +592,9 @@ fn expected_a_plug(name: &str) -> String {
     format!("header `{name}` is not one of the header plugs. {PLUGS}")
 }
 
-/// One sentence naming the three plugs.
-const PLUGS: &str = "A header is a string, `{ env = \"NAME\" }` or `{ command = [\"program\", \"argument\"] }`, and \
-     the last two take an optional `format`.";
+/// One sentence naming the plugs.
+const PLUGS: &str = "A header is a string, `{ env = \"NAME\" }`, `{ command = [\"program\", \"argument\"] }` or \
+     `{ generate = \"uuid\" }` (or `\"traceparent\"`), and `env` and `command` take an optional `format`.";
 
 /// Places `value` into `format`, or returns it as it is when there is no format.
 fn apply(format: Option<&Secret>, value: &str) -> String {

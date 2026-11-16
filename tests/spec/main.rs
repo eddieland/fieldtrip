@@ -43,6 +43,8 @@ mod execute_save;
 #[cfg(test)]
 mod execute_select;
 #[cfg(test)]
+mod generated_headers;
+#[cfg(test)]
 mod header_names;
 #[cfg(test)]
 mod headers_command;

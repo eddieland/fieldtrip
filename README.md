@@ -85,14 +85,31 @@ schema      = "schemas/acme.graphql"  # optional: read SDL from this file instea
 X-Client      = "fieldtrip"
 X-Api-Key     = { env = "ACME_API_KEY" }
 Authorization = { command = ["python", "-m", "acme_auth", "token"], format = "Bearer {}" }
+X-Correlation-Id = { generate = "uuid" }   # a new UUID for each request
 ```
 
-A header value is a literal, an environment variable, or the trimmed stdout of a command. `format` wraps the value, so a
-CLI that prints a bare token becomes `Authorization: Bearer <token>`. The command runs directly from the argument list,
-with no shell. Its output is reused for `ttl` seconds (300 unless set), and when the endpoint answers 401 the command
-runs again and the request is retried once. If the retry is refused too, the agent is told that both were, and which
-program ran, so it can ask you to sign in again. `list_endpoints` tells the agent how each command's last run went (ok,
-failed with a reason such as `exit 3`, or not run yet), without running it, so an expired login is reported as one.
+A header value is a literal, an environment variable, the trimmed stdout of a command, or an ID fieldtrip generates.
+`format` wraps the value, so a CLI that prints a bare token becomes `Authorization: Bearer <token>`. The command runs
+directly from the argument list, with no shell. Its output is reused for `ttl` seconds (300 unless set), and when the
+endpoint answers 401 the command runs again and the request is retried once. If the retry is refused too, the agent is
+told that both were, and which program ran, so it can ask you to sign in again. `list_endpoints` tells the agent how
+each command's last run went (ok, failed with a reason such as `exit 3`, or not run yet), without running it, so an
+expired login is reported as one.
+
+`response_headers` shows an ID the server sends back, but some servers never return one, and a request that times out
+gets no response at all. For those, have fieldtrip generate an ID for each request:
+
+```toml
+X-Correlation-Id = { generate = "uuid" }        # a new UUID v4 per request
+traceparent      = { generate = "traceparent" } # 00-<trace id>-<span id>-01, new per request
+```
+
+`execute` shows each value it sent (`sent X-Correlation-Id 1b4e…`), the error shows it when no answer came, and the
+audit log records it under `sent`. The retry after a 401 sends the same value, so both attempts share an ID. These
+values are not secrets, so they are shown and never redacted. Check which ID your server actually logs before relying
+on a generated one: some edge proxies replace an incoming ID with their own (Envoy does with `X-Request-Id` unless told
+to trust the client), so use a header name the proxy passes through, and list the server's own ID in
+`response_headers` to see the one it used.
 
 | Setting | Default | What it does |
 | --- | --- | --- |
@@ -181,14 +198,15 @@ fieldtrip then appends one JSON line per `execute` attempt, including the ones t
 ```json
 {"at":"2026-11-13T14:02:11Z","session":"5f0c9a1e7d2b4c36","endpoint":"acme-prod","kind":"query",
  "operation":"OrderById","hash":"sha256:…","text":"query OrderById($id: ID!) { … }","variables":{"id":"123"},
- "approval":"accepted","cost":12,"status":200,"ms":812,"errors":0,"headers":{"x-request-id":"abc123"}}
+ "approval":"accepted","cost":12,"status":200,"ms":812,"errors":0,"sent":{"X-Correlation-Id":"1b4e…"},
+ "headers":{"x-request-id":"abc123"}}
 ```
 
-`approval` says who let it through, `accepted`, `auto` (within `auto_approve_cost`) or `client`
-(`approval = "client"`), or why it was not sent: `declined`, `cancelled`, `unavailable` (the client cannot show a
-prompt), `failed` (the prompt did) or `denied` (`mutations = "deny"`). Anything but `accepted` comes with a `reason`.
-A request that got no answer has an `error` instead of a `status`. An operation that is not valid is not recorded,
-since nothing could have been sent. `session` is different for each run of the server.
+`approval` says who let it through, `accepted`, `auto` (within `auto_approve_cost`) or `client` (`approval = "client"`),
+or why it was not sent: `declined`, `cancelled`, `unavailable` (the client cannot show a prompt), `failed` (the prompt
+did) or `denied` (`mutations = "deny"`). Anything but `accepted` comes with a `reason`. A request that got no answer has
+an `error` instead of a `status`, and still has its generated IDs under `sent`. An operation that is not valid is not
+recorded, since nothing could have been sent. `session` is different for each run of the server.
 
 The log never holds a header value, and a value from an `env` or `command` header that turns up in the operation or
 its variables is replaced with `<redacted>`. For an API whose variables are sensitive in themselves, set
