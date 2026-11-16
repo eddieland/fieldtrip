@@ -279,3 +279,11 @@ Settled. To change one, ask the user, then add a new dated line instead of editi
   records it under `sent`, for a request that got no answer too. It is never removed from a response.
 - 2026-11-16: A value is generated once per call. The retry after a 401 repeats it, so both attempts share an ID.
 - 2026-11-16: A request that never left, because a header could not be resolved, reports no generated value.
+- 2026-11-16: A bad file in `operations` or `fragments` is left out and reported, and the rest load. This replaces
+  the 2026-11-14 line that stopped the server for such a file, and the matching part of the 2026-11-16 line for
+  fragments. A missing directory, and `fragments` with no `operations`, still stop it.
+- 2026-11-16: When several files use one operation name, all of them are left out, so a name never runs a file the
+  user didn't mean. `execute` with that name says which files clash.
+- 2026-11-16: A fragment name defined twice in `fragments` is left out, and so is every operation that spreads it.
+- 2026-11-16: `list_operations` lists the files left out and what is wrong with each, `list_endpoints` counts them,
+  and `check` and the startup log give a warning for each. A file left out is a warning, as a broken operation is.

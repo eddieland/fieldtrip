@@ -274,9 +274,13 @@ you would any other operation, and the prompt shows the full text that will be s
 
 Every operation is validated against the schema at startup (for a `schema` file) or when the schema is first loaded
 (by introspection). One that no longer validates is logged as a warning, listed as broken, and never sent, so a
-change to the API shows up instead of failing quietly. `fieldtrip check` warns about them too. A file that is not one
-named query or mutation, two files with the same operation name, or two shared fragments with the same name stop the
-server at startup.
+change to the API shows up instead of failing quietly. `fieldtrip check` warns about them too.
+
+A bad file doesn't stop the server, since the directory may belong to another codebase. A file that is not one named
+query or mutation is left out, and so is every file that uses an operation name another file uses too, so a name never
+runs a file you didn't mean. In `fragments`, a file that holds anything but fragments is left out, and a fragment
+name defined twice is left out with every operation that spreads it. `list_operations` lists what was left out and
+why, and `fieldtrip check` and the startup log warn about each. Only a missing directory stops the server.
 
 ## Cost map
 

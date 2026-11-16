@@ -35,6 +35,20 @@ pub(crate) struct Library {
     pub(crate) operations: Vec<Saved>,
     /// The shared fragments, when `fragments` names a directory.
     pub(crate) fragments: Option<Shelf>,
+    /// The operation files left out because something is wrong with them, in file order.
+    pub(crate) rejected: Vec<Rejected>,
+}
+
+/// A file, or a name several files share, left out of the library because something is wrong with it. The rest of the
+/// library loads without it, since the directory may belong to another codebase.
+#[derive(Debug)]
+pub(crate) struct Rejected {
+    /// The file, or every file that uses a name more than one may not.
+    pub(crate) files: Vec<PathBuf>,
+    /// The operation's name, when it has one, so that a call naming it can say why it is missing.
+    pub(crate) name: Option<String>,
+    /// What is wrong, naming the file.
+    pub(crate) problem: String,
 }
 
 /// The shared fragments of a library, as `fieldtrip check` reports them.
@@ -42,8 +56,12 @@ pub(crate) struct Library {
 pub(crate) struct Shelf {
     /// The directory the fragments were read from.
     pub(crate) source: PathBuf,
-    /// Each fragment, in name order.
+    /// Each fragment, in name order. Names are unique.
     pub(crate) fragments: Vec<Shared>,
+    /// The files, or the fragments in them, left out because something is wrong with them, in file order.
+    pub(crate) rejected: Vec<Rejected>,
+    /// The fragment names defined more than once, with the files that define each. None of them is used.
+    conflicts: BTreeMap<String, Vec<PathBuf>>,
 }
 
 /// One shared fragment.
@@ -78,43 +96,88 @@ pub(crate) struct Saved {
     pub(crate) file: PathBuf,
     /// The files of the shared fragments appended to its text, each once, in the order first used.
     pub(crate) fragment_files: Vec<PathBuf>,
+    /// The names of the shared fragments appended to its text.
+    shared: Vec<String>,
 }
 
 impl Library {
     /// Reads every `.graphql` and `.gql` file directly in `directory`, and the shared fragments in `fragments`,
     /// when it is given.
     ///
+    /// A file that does not hold exactly one named query or mutation is left out, as is every file that uses an
+    /// operation name another file uses too, and every operation that spreads a shared fragment defined twice.
+    ///
     /// # Errors
     ///
-    /// Returns a message naming the directory or the file when a directory cannot be read, a file does not hold
-    /// exactly one named query or mutation, two files use the same operation name, a file in `fragments` holds
-    /// anything but fragments, or two of them define the same fragment.
+    /// Returns a message naming the directory when one cannot be read.
     pub(crate) fn load(directory: &Path, fragments: Option<&Path>) -> Result<Self, String> {
         let mut shelf = fragments.map(Shelf::load).transpose()?;
-        let mut operations: Vec<Saved> = Vec::new();
+        let mut rejected = Vec::new();
+        let mut by_name: BTreeMap<String, Vec<Saved>> = BTreeMap::new();
         for file in graphql_files("operations", directory)? {
-            let saved = Saved::read(&file, shelf.as_mut())?;
-            if let Some(earlier) = operations.iter().find(|earlier| earlier.name == saved.name) {
-                return Err(format!(
-                    "the operation name `{}` is used in both {} and {}. Each saved operation needs its own name.",
-                    saved.name,
-                    earlier.file.display(),
-                    file.display()
-                ));
+            match Saved::read(&file, shelf.as_ref()) {
+                Ok(saved) => by_name.entry(saved.name.clone()).or_default().push(saved),
+                Err(left_out) => rejected.push(left_out),
             }
-            operations.push(saved);
         }
-        operations.sort_by(|left, right| left.name.cmp(&right.name));
+        let mut operations = Vec::with_capacity(by_name.len());
+        for (name, mut group) in by_name {
+            if group.len() == 1 {
+                operations.append(&mut group);
+                continue;
+            }
+            // Running either file could run the one the user did not mean, so neither runs.
+            let files: Vec<PathBuf> = group.into_iter().map(|saved| saved.file).collect();
+            let problem = format!(
+                "the operation name `{name}` is used in {}, so {} loaded. Each saved operation needs its own name.",
+                listed(&files),
+                if files.len() == 2 {
+                    "neither is"
+                } else {
+                    "none of them is"
+                }
+            );
+            rejected.push(Rejected {
+                files,
+                name: Some(name),
+                problem,
+            });
+        }
+        rejected.sort_by(|left, right| left.files.cmp(&right.files));
+        if let Some(shelf) = &mut shelf {
+            for shared in &mut shelf.fragments {
+                shared.used = operations.iter().any(|saved| saved.shared.contains(&shared.name));
+            }
+        }
         Ok(Self {
             source: Some(directory.to_path_buf()),
             operations,
             fragments: shelf,
+            rejected,
         })
     }
 
-    /// Whether the endpoint has no saved operations.
-    pub(crate) const fn is_empty(&self) -> bool {
-        self.operations.is_empty()
+    /// Whether the endpoint has no saved operations, and no files that were left out either.
+    pub(crate) fn is_empty(&self) -> bool {
+        self.operations.is_empty() && self.rejected.is_empty() && self.left_out_fragments().is_empty()
+    }
+
+    /// How many operation files were left out.
+    pub(crate) fn operation_files_left_out(&self) -> usize {
+        self.rejected.iter().map(|left_out| left_out.files.len()).sum()
+    }
+
+    /// How many shared fragment files were left out, whole or in part.
+    pub(crate) fn fragment_files_left_out(&self) -> usize {
+        self.left_out_fragments()
+            .iter()
+            .map(|left_out| left_out.files.len())
+            .sum()
+    }
+
+    /// The problems in the shared fragments.
+    pub(crate) fn left_out_fragments(&self) -> &[Rejected] {
+        self.fragments.as_ref().map_or(&[], |shelf| shelf.rejected.as_slice())
     }
 
     /// The operation called `name`.
@@ -125,6 +188,18 @@ impl Library {
     pub(crate) fn get(&self, endpoint: &str, name: &str) -> Result<&Saved, String> {
         if let Some(saved) = self.operations.iter().find(|saved| saved.name == name) {
             return Ok(saved);
+        }
+        if let Some(left_out) = self
+            .rejected
+            .iter()
+            .find(|left_out| left_out.name.as_deref() == Some(name))
+        {
+            return Err(format!(
+                "`{endpoint}` has a saved operation called `{name}`, but it was left out, so it cannot be run: {}. Tell \
+                 the user, who can fix it. Meanwhile you can write the operation yourself, checking it with \
+                 `estimate_cost`.",
+                left_out.problem
+            ));
         }
         if self.operations.is_empty() {
             return Err(format!(
@@ -210,63 +285,121 @@ fn spreads(selections: &[ast::Selection], out: &mut Vec<String>) {
     }
 }
 
+/// `files` in words: `both A and B` for two, `A, B and C` for more.
+fn listed(files: &[PathBuf]) -> String {
+    let shown: Vec<String> = files.iter().map(|file| file.display().to_string()).collect();
+    match shown.as_slice() {
+        [first, second] => format!("both {first} and {second}"),
+        [rest @ .., last] if !rest.is_empty() => format!("{} and {last}", rest.join(", ")),
+        _ => shown.join(""),
+    }
+}
+
 impl Shelf {
-    /// Reads every `.graphql` and `.gql` file directly in `directory`, each holding only fragment definitions.
+    /// Reads every `.graphql` and `.gql` file directly in `directory`, each holding only fragment definitions. A
+    /// file that does not is left out, and so is a fragment whose name more than one definition uses.
     fn load(directory: &Path) -> Result<Self, String> {
-        let mut fragments: BTreeMap<String, Shared> = BTreeMap::new();
+        let mut by_name: BTreeMap<String, Vec<Shared>> = BTreeMap::new();
+        let mut rejected = Vec::new();
         for file in graphql_files("fragments", directory)? {
             let problem = |what: &str| format!("the shared fragment file {} {what}", file.display());
-            let (_, document) = parse(&file, problem)?;
-            for definition in &document.definitions {
-                let Definition::FragmentDefinition(fragment) = definition else {
-                    return Err(problem(
-                        "holds a definition that is not a fragment. A file in `fragments` holds only fragment \
-                         definitions. An operation goes in `operations`, one per file.",
-                    ));
-                };
-                let name = fragment.name.to_string();
-                if let Some(earlier) = fragments.get(&name) {
-                    return Err(format!(
-                        "the fragment name `{name}` is defined in both {} and {}. Each shared fragment needs its own \
-                         name.",
-                        earlier.file.display(),
-                        file.display()
-                    ));
+            let left_out = |problem: String| Rejected {
+                files: vec![file.clone()],
+                name: None,
+                problem,
+            };
+            let document = match parse(&file, problem) {
+                Ok((_, document)) => document,
+                Err(error) => {
+                    rejected.push(left_out(error));
+                    continue;
                 }
+            };
+            let fragments: Option<Vec<&ast::FragmentDefinition>> = document
+                .definitions
+                .iter()
+                .map(|definition| match definition {
+                    Definition::FragmentDefinition(fragment) => Some(&**fragment),
+                    _ => None,
+                })
+                .collect();
+            let Some(fragments) = fragments else {
+                rejected.push(left_out(problem(
+                    "holds a definition that is not a fragment, so it is left out. A file in `fragments` holds only \
+                     fragment definitions. An operation goes in `operations`, one per file.",
+                )));
+                continue;
+            };
+            for fragment in fragments {
                 let mut spread = Vec::new();
                 spreads(&fragment.selection_set, &mut spread);
-                fragments.insert(
-                    name.clone(),
-                    Shared {
-                        name,
-                        file: file.clone(),
-                        used: false,
-                        text: fragment.to_string(),
-                        spreads: spread,
-                    },
-                );
+                by_name.entry(fragment.name.to_string()).or_default().push(Shared {
+                    name: fragment.name.to_string(),
+                    file: file.clone(),
+                    used: false,
+                    text: fragment.to_string(),
+                    spreads: spread,
+                });
             }
         }
+        let mut fragments = Vec::with_capacity(by_name.len());
+        let mut conflicts = BTreeMap::new();
+        for (name, mut group) in by_name {
+            if group.len() == 1 {
+                fragments.append(&mut group);
+                continue;
+            }
+            let files: Vec<PathBuf> = group.into_iter().map(|shared| shared.file).collect();
+            let problem = format!(
+                "the fragment name `{name}` is defined in {}, so {} used, and an operation that spreads it is left \
+                 out. Each shared fragment needs its own name.",
+                listed(&files),
+                if files.len() == 2 {
+                    "neither is"
+                } else {
+                    "none of them is"
+                }
+            );
+            rejected.push(Rejected {
+                files: files.clone(),
+                name: None,
+                problem,
+            });
+            conflicts.insert(name, files);
+        }
+        rejected.sort_by(|left, right| left.files.cmp(&right.files));
         Ok(Self {
             source: directory.to_path_buf(),
-            fragments: fragments.into_values().collect(),
+            fragments,
+            rejected,
+            conflicts,
         })
     }
 
     /// The shared fragment called `name`.
-    fn get_mut(&mut self, name: &str) -> Option<&mut Shared> {
+    fn get(&self, name: &str) -> Option<&Shared> {
         self.fragments
             .binary_search_by(|shared| shared.name.as_str().cmp(name))
             .ok()
-            .and_then(|index| self.fragments.get_mut(index))
+            .and_then(|index| self.fragments.get(index))
     }
 }
 
 impl Saved {
     /// Reads one operation file, appending the shared fragments from `shelf` that it uses and does not define.
-    fn read(file: &Path, shelf: Option<&mut Shelf>) -> Result<Self, String> {
-        let problem = |what: &str| format!("the saved operation {} {what}", file.display());
-        let (text, document) = parse(file, problem)?;
+    fn read(file: &Path, shelf: Option<&Shelf>) -> Result<Self, Rejected> {
+        let left_out = |name: Option<&str>, problem: String| Rejected {
+            files: vec![file.to_path_buf()],
+            name: name.map(ToOwned::to_owned),
+            problem,
+        };
+        Self::parse(file, shelf).map_err(|(name, problem)| left_out(name.as_deref(), problem))
+    }
+
+    /// Reads one operation file, or says what is wrong with it and, when it has one, its name.
+    fn parse(file: &Path, shelf: Option<&Shelf>) -> Result<Self, (Option<String>, String)> {
+        let problem = |what: &str| (None, format!("the saved operation {} {what}", file.display()));
+        let (text, document) = parse(file, |what| problem(what).1).map_err(|error| (None, error))?;
         let mut operations = document.definitions.iter().filter_map(|definition| match definition {
             Definition::OperationDefinition(operation) => Some(operation),
             _ => None,
@@ -295,9 +428,14 @@ impl Saved {
         let variables = operation.variables.iter().map(ToString::to_string).collect();
         let mut pending = Vec::new();
         spreads(&operation.selection_set, &mut pending);
-        let (text, fragment_files) = match shelf {
-            Some(shelf) => with_shared(text, &document, pending, shelf),
-            None => (text, Vec::new()),
+        let (text, fragment_files, shared) = match shelf {
+            Some(shelf) => with_shared(text, &document, pending, shelf).map_err(|conflict| {
+                (
+                    Some(name.to_string()),
+                    format!("the saved operation {} {conflict}", file.display()),
+                )
+            })?,
+            None => (text, Vec::new(), Vec::new()),
         };
         Ok(Self {
             name: name.to_string(),
@@ -307,20 +445,23 @@ impl Saved {
             text,
             file: file.to_path_buf(),
             fragment_files,
+            shared,
         })
     }
 }
 
 /// `text`, the text of `document`, followed by every fragment from `shelf` that is reached from the spreads in
-/// `pending` and not defined in `document`, each once, with the files they came from. A fragment the document
-/// defines wins over a shared one of the same name, and its own spreads are followed too. A name found nowhere is
-/// left for validation to report.
+/// `pending` and not defined in `document`, each once, with the files they came from and their names. A fragment the
+/// document defines wins over a shared one of the same name, and its own spreads are followed too. A name found
+/// nowhere is left for validation to report.
+///
+/// Returns what is wrong, to follow the file's name, when it reaches a shared fragment that is defined twice.
 fn with_shared(
     mut text: String,
     document: &Document,
     pending: Vec<String>,
-    shelf: &mut Shelf,
-) -> (String, Vec<PathBuf>) {
+    shelf: &Shelf,
+) -> Result<(String, Vec<PathBuf>, Vec<String>), String> {
     let local: BTreeMap<&str, &ast::FragmentDefinition> = document
         .definitions
         .iter()
@@ -332,6 +473,7 @@ fn with_shared(
     let mut pending = VecDeque::from(pending);
     let mut seen = HashSet::new();
     let mut files = Vec::new();
+    let mut names = Vec::new();
     while let Some(name) = pending.pop_front() {
         if !seen.insert(name.clone()) {
             continue;
@@ -339,18 +481,24 @@ fn with_shared(
         let mut next = Vec::new();
         if let Some(fragment) = local.get(name.as_str()) {
             spreads(&fragment.selection_set, &mut next);
-        } else if let Some(shared) = shelf.get_mut(&name) {
-            shared.used = true;
+        } else if let Some(shared) = shelf.get(&name) {
             text.push_str("\n\n");
             text.push_str(&shared.text);
             next.clone_from(&shared.spreads);
             if !files.contains(&shared.file) {
                 files.push(shared.file.clone());
             }
+            names.push(name);
+        } else if let Some(defined) = shelf.conflicts.get(&name) {
+            return Err(format!(
+                "spreads the shared fragment `{name}`, which is defined in {}, so it is left out. Each shared \
+                 fragment needs its own name.",
+                listed(defined)
+            ));
         }
         pending.extend(next);
     }
-    (text, files)
+    Ok((text, files, names))
 }
 
 /// The comment lines at the top of `text`, joined on one line. Blank lines before them are skipped, and the first

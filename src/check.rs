@@ -187,10 +187,14 @@ fn operations_report(out: &mut Out, name: &str, endpoint: &Endpoint, schema: Opt
             source.display(),
             if count == 1 { "" } else { "s" }
         );
+        // A file left out is a warning too: the rest of the library loads without it.
+        for left_out in &endpoint.operations.rejected {
+            out.warning("operations", &what, &left_out.problem);
+        }
         match schema {
             None => out.line("operations", format!("{what}: not checked against a schema")),
             Some(loaded) => {
-                let mut broken = 0;
+                let mut broken = endpoint.operations.rejected.len();
                 // An operation broken by a change to the schema is a warning, as an unmatched cost rule is: the
                 // endpoint still works, and only that operation is refused.
                 for saved in &endpoint.operations.operations {
@@ -219,7 +223,10 @@ fn operations_report(out: &mut Out, name: &str, endpoint: &Endpoint, schema: Opt
             shelf.source.display(),
             if count == 1 { "" } else { "s" }
         );
-        let mut unused = 0;
+        for left_out in &shelf.rejected {
+            out.warning("fragments", &what, &left_out.problem);
+        }
+        let mut unused = shelf.rejected.len();
         // A fragment no operation spreads does no harm, but it may be one an operation misspells.
         for shared in shelf.fragments.iter().filter(|shared| !shared.used) {
             let warning = format!("`{}` in {} is used by no operation", shared.name, shared.file.display());

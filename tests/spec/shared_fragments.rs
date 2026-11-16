@@ -252,28 +252,14 @@ fn check_reports_fragments_that_are_all_used_as_ok() {
 }
 
 #[test]
-fn bad_fragments_stop_the_server() {
+fn a_missing_directory_or_no_operations_stop_the_server() {
+    // A bad file in `fragments` is left out instead: see `skipped_files`.
     let mock = MockServer::unreachable();
     let operations = |launch: Launch| launch.file("queries/user_orders.graphql", USER_ORDERS);
     let cases = [
         (
             operations(Launch::new(&config(&mock, ""))),
             vec!["`fragments` names", "is not a directory"],
-        ),
-        (
-            operations(Launch::new(&config(&mock, "")))
-                .file("queries/fragments/user.graphql", USER_FRAGMENTS)
-                .file("queries/fragments/again.graphql", "fragment Contact on User { name }\n"),
-            vec!["`Contact`", "again.graphql", "user.graphql"],
-        ),
-        (
-            operations(Launch::new(&config(&mock, "")))
-                .file("queries/fragments/query.graphql", "query Q { viewer { name } }\n"),
-            vec!["query.graphql", "only fragment definitions"],
-        ),
-        (
-            operations(Launch::new(&config(&mock, ""))).file("queries/fragments/bad.graphql", "fragment Bad on {"),
-            vec!["bad.graphql", "is not valid GraphQL"],
         ),
         (
             Launch::new(&format!(
