@@ -40,6 +40,7 @@ audit_log = "~/.local/state/fieldtrip/audit.jsonl"   # optional: one JSON line p
 costs             = "acme.costs.toml"        # optional cost map, relative to this file
 operations        = "operations/acme/"       # optional directory of saved operations, one per .graphql file
 fragments         = "operations/acme/fragments/"   # optional directory of fragments the saved operations share
+client_directives = ["paginated", "baseClass"]     # optional: directives removed from saved operations
 assumed_list_size = 20                       # optional, default 10
 timeout           = 30                       # optional, seconds, default 30
 response_headers  = ["x-request-id", "traceparent"]   # optional, shown by `execute`
@@ -67,8 +68,9 @@ mutations         = "deny"                   # optional, default "prompt". A tem
 X-Api-Key = { env = "ACME_API_KEY" }
 ```
 
-An endpoint takes `schema`, `schema_ttl`, `headers`, `costs`, `operations`, `fragments`, `assumed_list_size`,
-`timeout`, `response_headers`, the three `max_` limits and `audit_variables` from its template unless it sets them.
+An endpoint takes `schema`, `schema_ttl`, `headers`, `costs`, `operations`, `fragments`, `client_directives`,
+`assumed_list_size`, `timeout`, `response_headers`, the three `max_` limits and `audit_variables` from its template
+unless it sets them.
 Headers merge by name, ignoring case, and the endpoint's win.
 `url`, `description`, `approval` and `auto_approve_cost` are only ever set on the endpoint. `mutations` comes from the
 template too, but an endpoint can only make it stricter. A path may start with `~/`.
@@ -287,3 +289,11 @@ Settled. To change one, ask the user, then add a new dated line instead of editi
 - 2026-11-16: A fragment name defined twice in `fragments` is left out, and so is every operation that spreads it.
 - 2026-11-16: `list_operations` lists the files left out and what is wrong with each, `list_endpoints` counts them,
   and `check` and the startup log give a warning for each. A file left out is a warning, as a broken operation is.
+- 2026-11-16: `client_directives`, on an endpoint or template, names directives that only the user's code generator
+  reads. Every use of one is removed from saved operations and shared fragments as they are read, so what is
+  validated, costed, shown in the prompt and sent has none of them. The prompt still shows what the server receives.
+- 2026-11-16: Only listed names are removed. A directive neither listed nor in the schema still breaks the operation,
+  so a typo is caught. An operation the calling agent writes is validated as written.
+- 2026-11-16: `skip`, `include`, `defer` and `stream`, a name written with `@`, or one that is not a GraphQL name, stop
+  the server, as does `client_directives` on an endpoint with no `operations`. `check` warns about a listed directive
+  that no saved operation or shared fragment uses.

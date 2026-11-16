@@ -6,7 +6,7 @@
 //! falls back to the defaults, which ask before every operation. `mutations` is the exception: a template can deny
 //! them, and an endpoint can only make that stricter, so forgetting the setting on one endpoint never opens writes.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
@@ -216,6 +216,7 @@ struct RawEndpoint {
     costs: Option<PathBuf>,
     operations: Option<PathBuf>,
     fragments: Option<PathBuf>,
+    client_directives: Option<Vec<String>>,
     timeout: Option<u64>,
     response_headers: Option<Vec<String>>,
     max_schema_bytes: Option<u64>,
@@ -245,6 +246,7 @@ struct RawTemplate {
     costs: Option<PathBuf>,
     operations: Option<PathBuf>,
     fragments: Option<PathBuf>,
+    client_directives: Option<Vec<String>>,
     timeout: Option<u64>,
     response_headers: Option<Vec<String>>,
     max_schema_bytes: Option<u64>,
@@ -264,6 +266,7 @@ struct RawShared {
     costs: Option<PathBuf>,
     operations: Option<PathBuf>,
     fragments: Option<PathBuf>,
+    client_directives: Option<Vec<String>>,
     timeout: Option<u64>,
     response_headers: Option<Vec<String>>,
     max_schema_bytes: Option<u64>,
@@ -283,6 +286,7 @@ macro_rules! shared {
             costs: $raw.costs,
             operations: $raw.operations,
             fragments: $raw.fragments,
+            client_directives: $raw.client_directives,
             timeout: $raw.timeout,
             response_headers: $raw.response_headers,
             max_schema_bytes: $raw.max_schema_bytes,
@@ -306,6 +310,8 @@ struct Template {
     operations_path: Option<PathBuf>,
     /// The `fragments` directory, resolved.
     fragments_path: Option<PathBuf>,
+    /// The directives removed from saved operations, for an endpoint that adds or replaces its library.
+    client_directives: Option<Vec<String>>,
     timeout: Option<Duration>,
     response_headers: Option<Vec<String>>,
     mutations: Option<Mutations>,
@@ -438,6 +444,7 @@ impl Template {
         let shared = shared!(raw);
         let operations_path = shared.operations.map(|operations| resolve(&operations, base));
         let fragments_path = shared.fragments.map(|fragments| resolve(&fragments, base));
+        let client_directives = client_directives(shared.client_directives)?;
         Ok(Self {
             schema: schema_path(shared.schema.as_deref(), base)?,
             schema_ttl: shared.schema_ttl.map(Duration::from_secs),
@@ -449,10 +456,18 @@ impl Template {
                 .transpose()?,
             operations: operations_path
                 .as_deref()
-                .map(|operations| Library::load(operations, fragments_path.as_deref()).map(Arc::new))
+                .map(|operations| {
+                    Library::load(
+                        operations,
+                        fragments_path.as_deref(),
+                        client_directives.as_deref().unwrap_or_default(),
+                    )
+                    .map(Arc::new)
+                })
                 .transpose()?,
             operations_path,
             fragments_path,
+            client_directives,
             timeout: timeout(shared.timeout)?,
             response_headers: response_headers(shared.response_headers)?,
             mutations,
@@ -529,6 +544,7 @@ impl Endpoint {
         let operations = library(
             shared.operations.as_deref(),
             shared.fragments.as_deref(),
+            client_directives(shared.client_directives)?,
             template,
             base,
         )?;
@@ -570,29 +586,80 @@ impl Endpoint {
     }
 }
 
-/// The saved operations of an endpoint that sets `operations` and `fragments` as given, or neither, under
-/// `template`. The template's library is shared, unless the endpoint names its own operations or fragments.
+/// The saved operations of an endpoint that sets `operations`, `fragments` and `client_directives` as given, or none
+/// of them, under `template`. The template's library is shared, unless the endpoint sets any of the three.
 fn library(
     operations: Option<&Path>,
     fragments: Option<&Path>,
+    client_directives: Option<Vec<String>>,
     template: &Template,
     base: &Path,
 ) -> Result<Arc<Library>, String> {
-    if operations.is_none() && fragments.is_none() {
+    if operations.is_none() && fragments.is_none() && client_directives.is_none() {
         return Ok(template.operations.clone().unwrap_or_default());
     }
+    let setting = if fragments.is_some() {
+        "`fragments` holds fragments for saved operations to use"
+    } else {
+        "`client_directives` names directives to remove from saved operations"
+    };
+    let key = if fragments.is_some() {
+        "fragments"
+    } else {
+        "client_directives"
+    };
     let fragments = fragments
         .map(|path| resolve(path, base))
         .or_else(|| template.fragments_path.clone());
+    let client_directives = client_directives
+        .or_else(|| template.client_directives.clone())
+        .unwrap_or_default();
     let directory = operations
         .map(|path| resolve(path, base))
         .or_else(|| template.operations_path.clone())
         .ok_or_else(|| {
-            "`fragments` holds fragments for saved operations to use, but this endpoint has no `operations`. Add \
-             `operations`, or remove `fragments`."
-                .to_owned()
+            format!("{setting}, but this endpoint has no `operations`. Add `operations`, or remove `{key}`.")
         })?;
-    Ok(Arc::new(Library::load(&directory, fragments.as_deref())?))
+    Ok(Arc::new(Library::load(
+        &directory,
+        fragments.as_deref(),
+        &client_directives,
+    )?))
+}
+
+/// Directives the server acts on, which a client must never remove.
+const SERVER_DIRECTIVES: [&str; 4] = ["skip", "include", "defer", "stream"];
+
+/// Checks the names in `client_directives`, and puts them in name order without repeats.
+fn client_directives(names: Option<Vec<String>>) -> Result<Option<Vec<String>>, String> {
+    let Some(names) = names else { return Ok(None) };
+    let mut checked = BTreeSet::new();
+    for name in names {
+        if let Some(bare) = name.strip_prefix('@') {
+            return Err(format!(
+                "`client_directives` lists `{name}`. Write each name without the `@`, as in \"{bare}\"."
+            ));
+        }
+        let mut characters = name.chars();
+        let is_name = characters
+            .next()
+            .is_some_and(|first| first == '_' || first.is_ascii_alphabetic())
+            && characters.all(|character| character == '_' || character.is_ascii_alphanumeric());
+        if !is_name {
+            return Err(format!(
+                "`client_directives` lists `{name}`, which is not a directive name. A name has only letters, digits \
+                 and `_`, and does not start with a digit."
+            ));
+        }
+        if SERVER_DIRECTIVES.contains(&name.as_str()) {
+            return Err(format!(
+                "`client_directives` lists `{name}`, but `@{name}` is a directive the server acts on, so it cannot be \
+                 removed before an operation is sent. Remove it from the list."
+            ));
+        }
+        checked.insert(name);
+    }
+    Ok(Some(checked.into_iter().collect()))
 }
 
 /// Checks that `url` is an HTTP URL with a host and no credentials, and returns it as it may be shown.

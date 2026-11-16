@@ -237,6 +237,20 @@ fn operations_report(out: &mut Out, name: &str, endpoint: &Endpoint, schema: Opt
             out.line("fragments", format!("{what}: ok"));
         }
     }
+    let directives = &endpoint.operations.client_directives;
+    if !directives.is_empty() {
+        let what: Vec<String> = directives.iter().map(|name| format!("@{name}")).collect();
+        let what = what.join(", ");
+        let unused = endpoint.operations.unused_client_directives();
+        // A listed directive nothing uses does no harm, but it may be a misspelling of one that is used.
+        for name in &unused {
+            let warning = format!("`@{name}` is used by no saved operation or shared fragment");
+            out.warning("client directives", &what, &warning);
+        }
+        if unused.is_empty() {
+            out.line("client directives", format!("{what}: ok"));
+        }
+    }
 }
 
 /// Reads and validates a schema file.
