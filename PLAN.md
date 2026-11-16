@@ -251,3 +251,12 @@ cargo test --workspace --all-features
   `fieldtrip check` and the startup log warn about each. A missing directory still stops the server. This replaces
   the startup errors of slices 36 and 44.
   Done when: `cargo test skipped_files`
+- [x] **47. Client-only directives.** An endpoint or a template names, with `client_directives`, directives that only
+  the user's code generator reads. Every use of one is removed from saved operations and shared fragments as they
+  load: on operations, variables, fields, fragment spreads, inline fragments and fragment definitions. The result is
+  what is validated, costed, listed, shown in the prompt and sent. A directive neither listed nor in the schema still
+  marks the operation broken, with a hint about `client_directives`, and an operation the agent writes is validated as
+  written. `fieldtrip check` lists the directives and warns about each one nothing uses. A name written with `@`, one
+  that is not a GraphQL name, `skip`, `include`, `defer` or `stream`, or `client_directives` on an endpoint with no
+  `operations` stop the server at startup.
+  Done when: `cargo test client_directives`

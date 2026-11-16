@@ -6,8 +6,12 @@
 //! on it is exactly as if its file had held them. The library is config: it is read once, at startup, and no tool can
 //! change it. Whether an operation still fits the schema is checked whenever the schema loads, so an operation broken
 //! by a change to the API is reported rather than refused at startup.
+//!
+//! A code generator can let its operations carry directives that only it reads. `client_directives` names them, and
+//! every use of one is removed from the operations and the shared fragments as they are read, so what is validated,
+//! shown and sent is what the generator itself would send.
 
-use std::collections::{BTreeMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
@@ -37,6 +41,10 @@ pub(crate) struct Library {
     pub(crate) fragments: Option<Shelf>,
     /// The operation files left out because something is wrong with them, in file order.
     pub(crate) rejected: Vec<Rejected>,
+    /// The directives removed from every operation and shared fragment as it is read, in name order.
+    pub(crate) client_directives: Vec<String>,
+    /// The names in `client_directives` that some operation or shared fragment used.
+    used_directives: BTreeSet<String>,
 }
 
 /// A file, or a name several files share, left out of the library because something is wrong with it. The rest of the
@@ -102,7 +110,7 @@ pub(crate) struct Saved {
 
 impl Library {
     /// Reads every `.graphql` and `.gql` file directly in `directory`, and the shared fragments in `fragments`,
-    /// when it is given.
+    /// when it is given, removing every use of the directives named in `client_directives`.
     ///
     /// A file that does not hold exactly one named query or mutation is left out, as is every file that uses an
     /// operation name another file uses too, and every operation that spreads a shared fragment defined twice.
@@ -110,12 +118,19 @@ impl Library {
     /// # Errors
     ///
     /// Returns a message naming the directory when one cannot be read.
-    pub(crate) fn load(directory: &Path, fragments: Option<&Path>) -> Result<Self, String> {
-        let mut shelf = fragments.map(Shelf::load).transpose()?;
+    pub(crate) fn load(
+        directory: &Path,
+        fragments: Option<&Path>,
+        client_directives: &[String],
+    ) -> Result<Self, String> {
+        let mut used_directives = BTreeSet::new();
+        let mut shelf = fragments
+            .map(|fragments| Shelf::load(fragments, client_directives, &mut used_directives))
+            .transpose()?;
         let mut rejected = Vec::new();
         let mut by_name: BTreeMap<String, Vec<Saved>> = BTreeMap::new();
         for file in graphql_files("operations", directory)? {
-            match Saved::read(&file, shelf.as_ref()) {
+            match Saved::read(&file, shelf.as_ref(), client_directives, &mut used_directives) {
                 Ok(saved) => by_name.entry(saved.name.clone()).or_default().push(saved),
                 Err(left_out) => rejected.push(left_out),
             }
@@ -154,7 +169,18 @@ impl Library {
             operations,
             fragments: shelf,
             rejected,
+            client_directives: client_directives.to_vec(),
+            used_directives,
         })
+    }
+
+    /// The names in `client_directives` that no operation or shared fragment uses, in name order.
+    pub(crate) fn unused_client_directives(&self) -> Vec<&str> {
+        self.client_directives
+            .iter()
+            .filter(|name| !self.used_directives.contains(*name))
+            .map(String::as_str)
+            .collect()
     }
 
     /// Whether the endpoint has no saved operations, and no files that were left out either.
@@ -297,8 +323,9 @@ fn listed(files: &[PathBuf]) -> String {
 
 impl Shelf {
     /// Reads every `.graphql` and `.gql` file directly in `directory`, each holding only fragment definitions. A
-    /// file that does not is left out, and so is a fragment whose name more than one definition uses.
-    fn load(directory: &Path) -> Result<Self, String> {
+    /// file that does not is left out, and so is a fragment whose name more than one definition uses. Every use of a
+    /// directive named in `client` is removed, and its name added to `used`.
+    fn load(directory: &Path, client: &[String], used: &mut BTreeSet<String>) -> Result<Self, String> {
         let mut by_name: BTreeMap<String, Vec<Shared>> = BTreeMap::new();
         let mut rejected = Vec::new();
         for file in graphql_files("fragments", directory)? {
@@ -308,28 +335,29 @@ impl Shelf {
                 name: None,
                 problem,
             };
-            let document = match parse(&file, problem) {
+            let mut document = match parse(&file, problem) {
                 Ok((_, document)) => document,
                 Err(error) => {
                     rejected.push(left_out(error));
                     continue;
                 }
             };
-            let fragments: Option<Vec<&ast::FragmentDefinition>> = document
+            let only_fragments = document
                 .definitions
                 .iter()
-                .map(|definition| match definition {
-                    Definition::FragmentDefinition(fragment) => Some(&**fragment),
-                    _ => None,
-                })
-                .collect();
-            let Some(fragments) = fragments else {
+                .all(|definition| matches!(definition, Definition::FragmentDefinition(_)));
+            if !only_fragments {
                 rejected.push(left_out(problem(
                     "holds a definition that is not a fragment, so it is left out. A file in `fragments` holds only \
                      fragment definitions. An operation goes in `operations`, one per file.",
                 )));
                 continue;
-            };
+            }
+            strip(&mut document, client, used);
+            let fragments = document.definitions.iter().filter_map(|definition| match definition {
+                Definition::FragmentDefinition(fragment) => Some(fragment),
+                _ => None,
+            });
             for fragment in fragments {
                 let mut spread = Vec::new();
                 spreads(&fragment.selection_set, &mut spread);
@@ -386,20 +414,37 @@ impl Shelf {
 }
 
 impl Saved {
-    /// Reads one operation file, appending the shared fragments from `shelf` that it uses and does not define.
-    fn read(file: &Path, shelf: Option<&Shelf>) -> Result<Self, Rejected> {
+    /// Reads one operation file, appending the shared fragments from `shelf` that it uses and does not define. Every
+    /// use of a directive named in `client` is removed, and its name added to `used`.
+    fn read(
+        file: &Path,
+        shelf: Option<&Shelf>,
+        client: &[String],
+        used: &mut BTreeSet<String>,
+    ) -> Result<Self, Rejected> {
         let left_out = |name: Option<&str>, problem: String| Rejected {
             files: vec![file.to_path_buf()],
             name: name.map(ToOwned::to_owned),
             problem,
         };
-        Self::parse(file, shelf).map_err(|(name, problem)| left_out(name.as_deref(), problem))
+        Self::parse(file, shelf, client, used).map_err(|(name, problem)| left_out(name.as_deref(), problem))
     }
 
     /// Reads one operation file, or says what is wrong with it and, when it has one, its name.
-    fn parse(file: &Path, shelf: Option<&Shelf>) -> Result<Self, (Option<String>, String)> {
+    fn parse(
+        file: &Path,
+        shelf: Option<&Shelf>,
+        client: &[String],
+        used: &mut BTreeSet<String>,
+    ) -> Result<Self, (Option<String>, String)> {
         let problem = |what: &str| (None, format!("the saved operation {} {what}", file.display()));
-        let (text, document) = parse(file, |what| problem(what).1).map_err(|error| (None, error))?;
+        let (mut text, mut document) = parse(file, |what| problem(what).1).map_err(|error| (None, error))?;
+        let description = description(&text);
+        // The text as written is kept unless a directive was removed, in which case it is printed from what is left.
+        // Either way the canonical text is printed from the parsed document later, so comments never reach a server.
+        if strip(&mut document, client, used) {
+            text = document.to_string();
+        }
         let mut operations = document.definitions.iter().filter_map(|definition| match definition {
             Definition::OperationDefinition(operation) => Some(operation),
             _ => None,
@@ -424,7 +469,6 @@ impl Saved {
                  to it.",
             ));
         };
-        let description = description(&text);
         let variables = operation.variables.iter().map(ToString::to_string).collect();
         let mut pending = Vec::new();
         spreads(&operation.selection_set, &mut pending);
@@ -447,6 +491,65 @@ impl Saved {
             fragment_files,
             shared,
         })
+    }
+}
+
+/// Removes every use of a directive named in `client` from the operations and fragments in `document`: on the
+/// definitions themselves, on variables, and on every field, fragment spread and inline fragment. Adds each name it
+/// removed to `used`, and says whether it removed any.
+fn strip(document: &mut Document, client: &[String], used: &mut BTreeSet<String>) -> bool {
+    if client.is_empty() {
+        return false;
+    }
+    let mut removed = false;
+    let mut list = |directives: &mut ast::DirectiveList| {
+        directives.retain(|directive| {
+            let name = directive.name.as_str();
+            let listed = client.iter().any(|client| client == name);
+            if listed {
+                used.insert(name.to_owned());
+                removed = true;
+            }
+            !listed
+        });
+    };
+    for definition in &mut document.definitions {
+        match definition {
+            Definition::OperationDefinition(operation) => {
+                let operation = operation.make_mut();
+                list(&mut operation.directives);
+                for variable in &mut operation.variables {
+                    list(&mut variable.make_mut().directives);
+                }
+                strip_selections(&mut operation.selection_set, &mut list);
+            }
+            Definition::FragmentDefinition(fragment) => {
+                let fragment = fragment.make_mut();
+                list(&mut fragment.directives);
+                strip_selections(&mut fragment.selection_set, &mut list);
+            }
+            _ => {}
+        }
+    }
+    removed
+}
+
+/// Calls `list` on the directives of every selection in `selections`, at any depth.
+fn strip_selections(selections: &mut [ast::Selection], list: &mut dyn FnMut(&mut ast::DirectiveList)) {
+    for selection in selections {
+        match selection {
+            ast::Selection::Field(field) => {
+                let field = field.make_mut();
+                list(&mut field.directives);
+                strip_selections(&mut field.selection_set, list);
+            }
+            ast::Selection::InlineFragment(inline) => {
+                let inline = inline.make_mut();
+                list(&mut inline.directives);
+                strip_selections(&mut inline.selection_set, list);
+            }
+            ast::Selection::FragmentSpread(spread) => list(&mut spread.make_mut().directives),
+        }
     }
 }
 
@@ -539,6 +642,9 @@ impl Saved {
         for problem in problems(error) {
             let _ = write!(out, "\n- {problem}");
         }
+        if let Some(hint) = directive_hint(error) {
+            let _ = write!(out, "\n{hint}");
+        }
         out
     }
 }
@@ -556,6 +662,16 @@ impl Saved {
             .collect();
         format!(", with shared fragments from {}", files.join(", "))
     }
+}
+
+/// What to tell the calling agent about an unknown directive in a saved operation, when `error` reports one. Code
+/// generators let operations carry directives that only they read, and the user can list those.
+pub(crate) fn directive_hint(error: &str) -> Option<&'static str> {
+    error.contains("cannot find directive").then_some(
+        "If a directive the schema does not have is one that only the user's code generator reads, the user can \
+         name it in `client_directives` for this endpoint, and fieldtrip will remove it from saved operations before \
+         they are checked and sent. A misspelled directive has to be fixed in the file.",
+    )
 }
 
 /// The problems in an error from [`Plan::new`], without the advice around them.

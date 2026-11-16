@@ -265,6 +265,23 @@ A fragment defined in an operation's own file wins over a shared one with the sa
 text, fragments included, since that is what is sent. `fieldtrip check` counts the fragments and warns about any that
 no operation uses.
 
+Code generators often let operations carry directives that only the generator reads, such as `@paginated` or
+`@baseClass(name: "OrderBase")`, and strip them before sending. The server's schema doesn't declare them, so these
+operations would be listed as broken. Name them in `client_directives` and fieldtrip removes every use of them, on
+operations, variables, fields, fragment spreads, inline fragments and fragment definitions, as the files are read:
+
+```toml
+[templates.acme]
+operations        = "client/queries/"
+fragments         = "client/queries/fragments/"
+client_directives = ["paginated", "idempotent", "baseClass"]   # names without the `@`
+```
+
+What is validated, costed, shown in the prompt and sent has none of them, so the prompt still shows exactly what the
+server receives. A directive that is neither listed nor in the schema is still an error, so a typo is caught, and an
+operation the agent writes is validated as written. `@skip`, `@include`, `@defer` and `@stream` can't be listed,
+since the server acts on them. `fieldtrip check` warns about a listed directive that nothing uses.
+
 `list_operations` shows the agent each one with its description, variables, estimated cost and text, and
 `search_schema` lists matching ones first. A library can hold hundreds, so the agent can narrow the list: `query`
 matches words in the name or description, `kind` keeps queries or mutations, and `uses` keeps operations that select

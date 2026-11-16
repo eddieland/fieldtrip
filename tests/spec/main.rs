@@ -17,6 +17,8 @@ mod check_command;
 #[cfg(test)]
 mod cli_flags;
 #[cfg(test)]
+mod client_directives;
+#[cfg(test)]
 mod config_checks;
 #[cfg(test)]
 mod cost_argument;

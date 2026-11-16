@@ -570,6 +570,9 @@ fn listing(out: &mut String, schema: &Loaded, name: &str, endpoint: &Endpoint, s
             for problem in library::problems(&error) {
                 let _ = writeln!(out, "  - {problem}");
             }
+            if let Some(hint) = library::directive_hint(&error) {
+                let _ = writeln!(out, "  {hint}");
+            }
         }
     }
 }
