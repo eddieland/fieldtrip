@@ -24,7 +24,8 @@ use serde_json::{Map, Value, json};
 use sha2::{Digest as _, Sha256};
 
 use crate::config::Endpoint;
-use crate::http::Reply;
+use crate::headers::Generated;
+use crate::http::{Failed, Reply};
 use crate::plan::{Kind, Variables};
 
 /// Where attempts are recorded, if anywhere.
@@ -71,8 +72,8 @@ pub(crate) enum Outcome<'reply> {
     NotSent,
     /// The endpoint answered.
     Answered(&'reply Reply),
-    /// The request was made, or was about to be, and no answer came. The message says why.
-    Failed(&'reply str),
+    /// The request was made, or was about to be, and no answer came. It says why.
+    Failed(&'reply Failed),
 }
 
 /// The most of the end of the log that `history` reads.
@@ -239,6 +240,7 @@ impl Audit {
                     .flatten()
                     .map(|parsed| parsed.errors.map_or(0, |errors| errors.len()));
                 entry.insert("errors".to_owned(), json!(errors));
+                insert_sent(&mut entry, &reply.sent);
                 if !reply.headers.is_empty() {
                     let headers: Map<String, Value> = reply
                         .headers
@@ -248,11 +250,20 @@ impl Audit {
                     entry.insert("headers".to_owned(), Value::Object(headers));
                 }
             }
-            Outcome::Failed(error) => {
-                entry.insert("error".to_owned(), json!(error));
+            Outcome::Failed(failed) => {
+                entry.insert("error".to_owned(), json!(failed.message));
+                insert_sent(&mut entry, &failed.sent);
             }
         }
         entry
+    }
+}
+
+/// Adds `sent`, the generated header values a request carried, by header name, when there are any.
+fn insert_sent(entry: &mut Map<String, Value>, sent: &[Generated]) {
+    if !sent.is_empty() {
+        let sent: Map<String, Value> = sent.iter().map(|made| (made.name.clone(), json!(made.value))).collect();
+        entry.insert("sent".to_owned(), Value::Object(sent));
     }
 }
 

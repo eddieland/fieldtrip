@@ -852,8 +852,10 @@ impl Fieldtrip {
                        variables and its cost, unless their config says otherwise (`list_endpoints` shows who \
                        approves). Write for that reader: name the operation, pass inputs as variables, and select \
                        only the fields you need. The result starts with what was sent and its estimated cost, then \
-                       a line with the HTTP status, how long the request took, and any response headers the user \
-                       chose to show, such as a request or trace ID to look up in their logs. Then come `errors`, \
+                       a line with the HTTP status, how long the request took, any ID fieldtrip generated for the \
+                       request (`sent X-Correlation-Id ...`), and any response headers the user chose to show, such \
+                       as a request or trace ID. Give those IDs to the user when something needs looking up in the \
+                       server's logs; a generated one is shown even when no answer came. Then come `errors`, \
                        in full, then `data`, then any `extensions`, each as the server wrote it. When those after \
                        `errors` are too long for one result, they come back as a summary that is still valid JSON, \
                        with long lists cut to their first items, each cut marked with what it dropped. To keep a \
@@ -973,11 +975,9 @@ impl Fieldtrip {
                 endpoint.max_response_bytes,
             )
             .await;
-        let outcome = sent
-            .as_ref()
-            .map_or_else(|error| Outcome::Failed(error), Outcome::Answered);
+        let outcome = sent.as_ref().map_or_else(Outcome::Failed, Outcome::Answered);
         self.audit.record(endpoint, &attempt, &verdict, outcome).await;
-        let reply = sent?;
+        let reply = sent.map_err(String::from)?;
         let mut summary = format!(
             "Sent {} to `{name}`. Estimated cost: {}.{unasked}\n{}",
             plan.title(),

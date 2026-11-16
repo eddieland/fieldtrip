@@ -1,11 +1,11 @@
 //! The HTTP client that talks to GraphQL endpoints.
 
 use std::error::Error as _;
-use std::fmt::Write as _;
+use std::fmt::{self, Write as _};
 use std::time::{Duration, Instant};
 
 use crate::config::Endpoint;
-use crate::headers::{Header, Secret};
+use crate::headers::{Generated, Header, Secret};
 
 /// The `User-Agent` sent with every request.
 const USER_AGENT: &str = concat!(env!("CARGO_PKG_NAME"), "/", env!("CARGO_PKG_VERSION"));
@@ -36,16 +36,57 @@ pub(crate) struct Reply {
     /// When this is a retry after a 401 that was refused with a 401 too, a note that says both happened and which
     /// header commands ran again.
     pub(crate) refused_twice: Option<String>,
+    /// The values fieldtrip generated for this request's `generate` headers, in config order.
+    pub(crate) sent: Vec<Generated>,
+}
+
+/// A request that got no answer, or none that could be read.
+#[derive(Debug)]
+pub(crate) struct Failed {
+    /// What went wrong, for the calling agent.
+    pub(crate) message: String,
+    /// The values generated for the request's `generate` headers, when it was sent. Empty when it never left, for
+    /// instance because a header could not be resolved.
+    pub(crate) sent: Vec<Generated>,
+}
+
+impl fmt::Display for Failed {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.message)?;
+        if !self.sent.is_empty() {
+            let ids = self
+                .sent
+                .iter()
+                .map(|made| format!("{} {}", made.name, made.value))
+                .collect::<Vec<_>>()
+                .join(", ");
+            write!(
+                f,
+                "\nThe request was sent with {ids}. Even without an answer, the endpoint's logs may hold it under that \
+                 ID, so pass it on to whoever can read them."
+            )?;
+        }
+        Ok(())
+    }
+}
+
+impl From<Failed> for String {
+    fn from(failed: Failed) -> Self {
+        failed.to_string()
+    }
 }
 
 /// The most characters of one response header's value that are shown.
 const MAX_HEADER_VALUE: usize = 200;
 
 impl Reply {
-    /// One line with the status, how long the request took, and the chosen response headers:
-    /// `HTTP 200 · 812 ms · x-request-id abc123`.
+    /// One line with the status, how long the request took, the generated request headers and the chosen response
+    /// headers: `HTTP 200 · 812 ms · sent X-Correlation-Id 1b4e… · x-request-id abc123`.
     pub(crate) fn metadata(&self) -> String {
         let mut line = format!("HTTP {} · {} ms", self.status, self.elapsed.as_millis());
+        for made in &self.sent {
+            let _ = write!(line, " · sent {} {}", made.name, made.value);
+        }
         for (name, value) in &self.headers {
             let _ = write!(line, " · {name} {value}");
         }
@@ -75,19 +116,29 @@ impl Client {
     /// At most `limit` bytes of the body are read. The rest is dropped, so a huge response cannot exhaust memory.
     ///
     /// When the endpoint answers 401 and one of its headers comes from a command, the command runs again and the
-    /// request is retried once: the usual cause is a token that expired while its output was being reused.
+    /// request is retried once: the usual cause is a token that expired while its output was being reused. The
+    /// retry carries the same generated values, so both attempts share an ID in the endpoint's logs.
     ///
     /// # Errors
     ///
-    /// Returns a message when a header cannot be resolved or no response arrives. An HTTP error status is not an
-    /// error here: GraphQL servers put useful detail in the body, so the caller decides what the status means.
+    /// Returns what went wrong when a header cannot be resolved or no response arrives, with the generated values
+    /// the request carried. An HTTP error status is not an error here: GraphQL servers put useful detail in the
+    /// body, so the caller decides what the status means.
     pub(crate) async fn post(
         &self,
         endpoint: &Endpoint,
         payload: &serde_json::Value,
         limit: usize,
-    ) -> Result<Reply, String> {
-        let reply = self.send(endpoint, payload, limit, false).await?;
+    ) -> Result<Reply, Failed> {
+        let mut generated = Vec::new();
+        for header in &endpoint.headers {
+            let made = header.generate().map_err(|message| Failed {
+                message,
+                sent: Vec::new(),
+            })?;
+            generated.extend(made);
+        }
+        let reply = self.send(endpoint, payload, limit, false, &generated).await?;
         let refreshable: Vec<&Header> = endpoint
             .headers
             .iter()
@@ -103,13 +154,18 @@ impl Client {
             .collect::<Vec<_>>()
             .join(", ");
         let plural = if refreshable.len() == 1 { "" } else { "s" };
-        let mut retry = self.send(endpoint, payload, limit, true).await.map_err(|error| {
-            format!(
-                "{} answered HTTP {UNAUTHORIZED}, so fieldtrip ran the command{plural} for the header{plural} \
-                 {commands} again to get a fresh credential, and that failed. {error}",
-                endpoint.shown_url
-            )
-        })?;
+        let mut retry = self
+            .send(endpoint, payload, limit, true, &generated)
+            .await
+            .map_err(|failed| Failed {
+                message: format!(
+                    "{} answered HTTP {UNAUTHORIZED}, so fieldtrip ran the command{plural} for the header{plural} \
+                     {commands} again to get a fresh credential, and that failed. {}",
+                    endpoint.shown_url, failed.message
+                ),
+                // The first request was sent, whether or not the retry was.
+                sent: generated.clone(),
+            })?;
         if retry.status == UNAUTHORIZED {
             for header in &refreshable {
                 header.refused(UNAUTHORIZED);
@@ -127,19 +183,33 @@ impl Client {
     }
 
     /// Sends one request. With `fresh_headers`, header commands run again instead of reusing their last output.
+    /// `generated` holds the values of the `generate` headers.
     async fn send(
         &self,
         endpoint: &Endpoint,
         payload: &serde_json::Value,
         limit: usize,
         fresh_headers: bool,
-    ) -> Result<Reply, String> {
+        generated: &[Generated],
+    ) -> Result<Reply, Failed> {
         // Resolve every header before anything is sent, so a missing value never produces a half-authenticated
         // request.
         let mut headers = Vec::with_capacity(endpoint.headers.len());
         for header in &endpoint.headers {
-            headers.push(header.resolve(fresh_headers).await?);
+            let resolved = header
+                .resolve(fresh_headers, generated)
+                .await
+                .map_err(|message| Failed {
+                    message,
+                    sent: Vec::new(),
+                })?;
+            headers.push(resolved);
         }
+        // From here on the request may have reached the endpoint, so a failure carries what it was sent with.
+        let failed = |message: String| Failed {
+            message,
+            sent: generated.to_vec(),
+        };
         let mut request = self
             .http
             .post(&endpoint.url)
@@ -167,7 +237,8 @@ impl Client {
                         explain(&error.without_url())
                     )
                 }
-            })?;
+            })
+            .map_err(failed)?;
         let status = response.status().as_u16();
         if response.status().is_redirection() {
             let target = response
@@ -175,12 +246,12 @@ impl Client {
                 .get("location")
                 .and_then(|location| location.to_str().ok())
                 .unwrap_or("another URL");
-            return Err(format!(
+            return Err(failed(format!(
                 "{} answered HTTP {status}, a redirect to {target}. fieldtrip does not follow redirects, because the \
                  headers configured for this endpoint would go to a host the user did not name. The user has to put \
                  the final URL in the fieldtrip config.",
                 endpoint.shown_url
-            ));
+            )));
         }
 
         let mut bytes = Vec::new();
@@ -197,8 +268,8 @@ impl Client {
                         explain(&error.without_url())
                     )
                 }
-            })?;
-            let Some(chunk) = chunk else { break };
+            });
+            let Some(chunk) = chunk.map_err(failed)? else { break };
             let room = limit - bytes.len();
             if chunk.len() > room {
                 bytes.extend_from_slice(chunk.get(..room).unwrap_or_default());
@@ -218,6 +289,7 @@ impl Client {
             elapsed,
             headers,
             refused_twice: None,
+            sent: generated.to_vec(),
         })
     }
 }

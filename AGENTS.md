@@ -7,7 +7,7 @@ Guidance for coding agents working in this repository.
 fieldtrip is an MCP server, written in Rust, that lets an AI agent work with a GraphQL API: load the schema, search
 it, validate and cost an operation, and execute it only after the human approves.
 
-- [DESIGN.md](DESIGN.md) is one page: goal, non-goals, tools, config, the three header plugs, the approval model, and
+- [DESIGN.md](DESIGN.md) is one page: goal, non-goals, tools, config, the header plugs, the approval model, and
   a dated list of decisions. Those decisions are settled. Don't reopen one because a different choice looks
   reasonable. If a decision blocks the work, ask the user.
 - [PLAN.md](PLAN.md) is the ordered checklist of slices. It says what to do next and how to tell it is done.

@@ -52,6 +52,7 @@ schema_ttl        = 86400                    # optional, seconds a schema is cac
 [templates.acme.headers]
 X-Client      = "fieldtrip"
 Authorization = { command = ["python", "-m", "acme_auth", "token"], format = "Bearer {}", ttl = 300 }
+X-Correlation-Id = { generate = "uuid" }     # optional: a new value for each request, shown by `execute`
 
 [endpoints.acme-prod]
 template          = "acme"                   # optional
@@ -76,9 +77,9 @@ The config path comes from `--config`, defaulting to `$XDG_CONFIG_HOME/fieldtrip
 `~/.config/fieldtrip/config.toml`. `--url`, with an optional `--schema`, defines a single endpoint with no headers and
 no file. `fieldtrip check` loads the same configuration, prints what each endpoint resolves to and exits.
 
-## The three plugs
+## The plugs
 
-A header value comes from one of three plugs. `env` and `command` take an optional `format`, in which `{}` is replaced
+A header value comes from one of four plugs. `env` and `command` take an optional `format`, in which `{}` is replaced
 by the value.
 
 | Plug | Config | Value |
@@ -86,6 +87,9 @@ by the value.
 | Literal | `"fieldtrip"` | The string as written |
 | Environment | `{ env = "NAME" }` | The variable, read when the request is made |
 | Command | `{ command = ["python", "-m", "acme_auth", "token"] }` | The command's stdout, trimmed |
+| Generated | `{ generate = "uuid" }` or `{ generate = "traceparent" }` | A new UUID v4, or W3C trace context, per request |
+
+The first three are secrets. A generated value is an ID, and is shown so the request can be found in the server's logs.
 
 ## Cost map
 
@@ -269,3 +273,9 @@ Settled. To change one, ask the user, then add a new dated line instead of editi
 - 2026-11-16: A fragment name defined twice in `fragments`, a file there holding anything else, a missing directory,
   or `fragments` on an endpoint with no `operations` stop the server. A fragment found nowhere breaks only the
   operation that spreads it. `check` warns about a shared fragment no operation uses.
+- 2026-11-16: A fourth plug, `{ generate = "uuid" }` or `{ generate = "traceparent" }`, gives a header a new value for
+  each request. This replaces the enum of three set on 2026-11-12. It takes no `format` and no `ttl`.
+- 2026-11-16: A generated value is not a secret. `execute` shows it, as `sent <name> <value>`, and the audit log
+  records it under `sent`, for a request that got no answer too. It is never removed from a response.
+- 2026-11-16: A value is generated once per call. The retry after a 401 repeats it, so both attempts share an ID.
+- 2026-11-16: A request that never left, because a header could not be resolved, reports no generated value.

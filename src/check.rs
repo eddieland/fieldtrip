@@ -171,7 +171,7 @@ async fn endpoint_report(out: &mut Out, name: &str, endpoint: &Endpoint) {
     for header in &endpoint.headers {
         let label = format!("header {}", header.name);
         let what = header.source();
-        match header.resolve(false).await {
+        match header.resolve(false, &[]).await {
             Ok(_resolved) => out.line(&label, format!("{what}: ok")),
             Err(problem) => out.problem(&label, &what, &problem),
         }
