@@ -215,6 +215,7 @@ struct RawEndpoint {
     assumed_list_size: Option<u64>,
     costs: Option<PathBuf>,
     operations: Option<PathBuf>,
+    fragments: Option<PathBuf>,
     timeout: Option<u64>,
     response_headers: Option<Vec<String>>,
     max_schema_bytes: Option<u64>,
@@ -243,6 +244,7 @@ struct RawTemplate {
     assumed_list_size: Option<u64>,
     costs: Option<PathBuf>,
     operations: Option<PathBuf>,
+    fragments: Option<PathBuf>,
     timeout: Option<u64>,
     response_headers: Option<Vec<String>>,
     max_schema_bytes: Option<u64>,
@@ -261,6 +263,7 @@ struct RawShared {
     assumed_list_size: Option<u64>,
     costs: Option<PathBuf>,
     operations: Option<PathBuf>,
+    fragments: Option<PathBuf>,
     timeout: Option<u64>,
     response_headers: Option<Vec<String>>,
     max_schema_bytes: Option<u64>,
@@ -279,6 +282,7 @@ macro_rules! shared {
             assumed_list_size: $raw.assumed_list_size,
             costs: $raw.costs,
             operations: $raw.operations,
+            fragments: $raw.fragments,
             timeout: $raw.timeout,
             response_headers: $raw.response_headers,
             max_schema_bytes: $raw.max_schema_bytes,
@@ -298,6 +302,10 @@ struct Template {
     assumed_list_size: Option<u64>,
     costs: Option<Arc<CostMap>>,
     operations: Option<Arc<Library>>,
+    /// The `operations` directory, resolved, for an endpoint that adds or replaces `fragments`.
+    operations_path: Option<PathBuf>,
+    /// The `fragments` directory, resolved.
+    fragments_path: Option<PathBuf>,
     timeout: Option<Duration>,
     response_headers: Option<Vec<String>>,
     mutations: Option<Mutations>,
@@ -428,6 +436,8 @@ impl Template {
         }
         let mutations = mutations(raw.mutations.as_deref())?;
         let shared = shared!(raw);
+        let operations_path = shared.operations.map(|operations| resolve(&operations, base));
+        let fragments_path = shared.fragments.map(|fragments| resolve(&fragments, base));
         Ok(Self {
             schema: schema_path(shared.schema.as_deref(), base)?,
             schema_ttl: shared.schema_ttl.map(Duration::from_secs),
@@ -437,10 +447,12 @@ impl Template {
                 .costs
                 .map(|costs| CostMap::load(&resolve(&costs, base)).map(Arc::new))
                 .transpose()?,
-            operations: shared
-                .operations
-                .map(|operations| Library::load(&resolve(&operations, base)).map(Arc::new))
+            operations: operations_path
+                .as_deref()
+                .map(|operations| Library::load(operations, fragments_path.as_deref()).map(Arc::new))
                 .transpose()?,
+            operations_path,
+            fragments_path,
             timeout: timeout(shared.timeout)?,
             response_headers: response_headers(shared.response_headers)?,
             mutations,
@@ -514,10 +526,12 @@ impl Endpoint {
             Some(path) => Arc::new(CostMap::load(&resolve(path, base))?),
             None => template.costs.clone().unwrap_or_default(),
         };
-        let operations = match &shared.operations {
-            Some(path) => Arc::new(Library::load(&resolve(path, base))?),
-            None => template.operations.clone().unwrap_or_default(),
-        };
+        let operations = library(
+            shared.operations.as_deref(),
+            shared.fragments.as_deref(),
+            template,
+            base,
+        )?;
         Ok(Self {
             shown_url,
             description: raw.description.as_deref().map(one_line).filter(|text| !text.is_empty()),
@@ -554,6 +568,31 @@ impl Endpoint {
             url: raw.url,
         })
     }
+}
+
+/// The saved operations of an endpoint that sets `operations` and `fragments` as given, or neither, under
+/// `template`. The template's library is shared, unless the endpoint names its own operations or fragments.
+fn library(
+    operations: Option<&Path>,
+    fragments: Option<&Path>,
+    template: &Template,
+    base: &Path,
+) -> Result<Arc<Library>, String> {
+    if operations.is_none() && fragments.is_none() {
+        return Ok(template.operations.clone().unwrap_or_default());
+    }
+    let fragments = fragments
+        .map(|path| resolve(path, base))
+        .or_else(|| template.fragments_path.clone());
+    let directory = operations
+        .map(|path| resolve(path, base))
+        .or_else(|| template.operations_path.clone())
+        .ok_or_else(|| {
+            "`fragments` holds fragments for saved operations to use, but this endpoint has no `operations`. Add \
+             `operations`, or remove `fragments`."
+                .to_owned()
+        })?;
+    Ok(Arc::new(Library::load(&directory, fragments.as_deref())?))
 }
 
 /// Checks that `url` is an HTTP URL with a host and no credentials, and returns it as it may be shown.

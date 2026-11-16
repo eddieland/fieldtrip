@@ -1,15 +1,18 @@
 //! The operation library: named operations the user trusts, read from a directory of `.graphql` files.
 //!
-//! Each file holds one named query or mutation, plus any fragments it uses. The comment lines at the top of the file
-//! are its description. The library is config: it is read once, at startup, and no tool can change it. Whether an
-//! operation still fits the schema is checked whenever the schema loads, so an operation broken by a change to the
-//! API is reported rather than refused at startup.
+//! Each file holds one named query or mutation, plus any fragments of its own. The comment lines at the top of the
+//! file are its description. A second directory, named by `fragments`, can hold fragments that many operations share:
+//! each operation gets the shared fragments it spreads, and the ones they spread, appended to its text, so from then
+//! on it is exactly as if its file had held them. The library is config: it is read once, at startup, and no tool can
+//! change it. Whether an operation still fits the schema is checked whenever the schema loads, so an operation broken
+//! by a change to the API is reported rather than refused at startup.
 
+use std::collections::{BTreeMap, HashSet, VecDeque};
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
 use apollo_compiler::ExecutableDocument;
-use apollo_compiler::ast::{Definition, Document, OperationType};
+use apollo_compiler::ast::{self, Definition, Document, OperationType};
 use apollo_compiler::executable::{Selection, SelectionSet};
 
 use crate::config::Endpoint;
@@ -30,6 +33,32 @@ pub(crate) struct Library {
     pub(crate) source: Option<PathBuf>,
     /// The operations, in name order. Names are unique.
     pub(crate) operations: Vec<Saved>,
+    /// The shared fragments, when `fragments` names a directory.
+    pub(crate) fragments: Option<Shelf>,
+}
+
+/// The shared fragments of a library, as `fieldtrip check` reports them.
+#[derive(Debug)]
+pub(crate) struct Shelf {
+    /// The directory the fragments were read from.
+    pub(crate) source: PathBuf,
+    /// Each fragment, in name order.
+    pub(crate) fragments: Vec<Shared>,
+}
+
+/// One shared fragment.
+#[derive(Debug)]
+pub(crate) struct Shared {
+    /// The fragment's name.
+    pub(crate) name: String,
+    /// The file it was read from.
+    pub(crate) file: PathBuf,
+    /// Whether any operation in the library uses it.
+    pub(crate) used: bool,
+    /// The fragment, printed from the parsed file.
+    text: String,
+    /// The names of the fragments it spreads, in the order they appear.
+    spreads: Vec<String>,
 }
 
 /// One operation from the library.
@@ -43,43 +72,28 @@ pub(crate) struct Saved {
     pub(crate) description: Option<String>,
     /// The variables it declares, as written in GraphQL, such as `$id: ID!`.
     pub(crate) variables: Vec<String>,
-    /// The file's text, as written.
+    /// The file's text, as written, followed by each shared fragment it uses.
     pub(crate) text: String,
     /// The file it was read from.
     pub(crate) file: PathBuf,
+    /// The files of the shared fragments appended to its text, each once, in the order first used.
+    pub(crate) fragment_files: Vec<PathBuf>,
 }
 
 impl Library {
-    /// Reads every `.graphql` and `.gql` file directly in `directory`.
+    /// Reads every `.graphql` and `.gql` file directly in `directory`, and the shared fragments in `fragments`,
+    /// when it is given.
     ///
     /// # Errors
     ///
-    /// Returns a message naming the directory or the file when the directory cannot be read, a file does not hold
-    /// exactly one named query or mutation, or two files use the same operation name.
-    pub(crate) fn load(directory: &Path) -> Result<Self, String> {
-        let entries = std::fs::read_dir(directory).map_err(|error| {
-            format!(
-                "`operations` names {}, which is not a directory that can be read ({error}). Create it, or remove \
-                 `operations`.",
-                directory.display()
-            )
-        })?;
-        let mut files: Vec<PathBuf> = entries
-            .filter_map(Result::ok)
-            .map(|entry| entry.path())
-            .filter(|path| {
-                path.is_file()
-                    && path
-                        .extension()
-                        .and_then(|extension| extension.to_str())
-                        .is_some_and(|extension| EXTENSIONS.contains(&extension))
-            })
-            .collect();
-        files.sort();
-
-        let mut operations: Vec<Saved> = Vec::with_capacity(files.len());
-        for file in files {
-            let saved = Saved::read(&file)?;
+    /// Returns a message naming the directory or the file when a directory cannot be read, a file does not hold
+    /// exactly one named query or mutation, two files use the same operation name, a file in `fragments` holds
+    /// anything but fragments, or two of them define the same fragment.
+    pub(crate) fn load(directory: &Path, fragments: Option<&Path>) -> Result<Self, String> {
+        let mut shelf = fragments.map(Shelf::load).transpose()?;
+        let mut operations: Vec<Saved> = Vec::new();
+        for file in graphql_files("operations", directory)? {
+            let saved = Saved::read(&file, shelf.as_mut())?;
             if let Some(earlier) = operations.iter().find(|earlier| earlier.name == saved.name) {
                 return Err(format!(
                     "the operation name `{}` is used in both {} and {}. Each saved operation needs its own name.",
@@ -94,6 +108,7 @@ impl Library {
         Ok(Self {
             source: Some(directory.to_path_buf()),
             operations,
+            fragments: shelf,
         })
     }
 
@@ -144,20 +159,114 @@ impl Library {
     }
 }
 
-impl Saved {
-    /// Reads one operation file.
-    fn read(file: &Path) -> Result<Self, String> {
-        let problem = |what: &str| format!("the saved operation {} {what}", file.display());
-        let text = std::fs::read_to_string(file).map_err(|error| problem(&format!("could not be read: {error}")))?;
-        let document = Document::parse(&text, file).map_err(|invalid| {
-            let first = invalid.errors.iter().next().map(|diagnostic| {
-                let position = diagnostic.line_column_range().map_or_else(String::new, |range| {
-                    format!(" at {}:{}", range.start.line, range.start.column)
-                });
-                format!("{}{position}", diagnostic.error)
+/// The `.graphql` and `.gql` files directly in `directory`, in name order. `setting` names the config key that
+/// named the directory, for the error.
+fn graphql_files(setting: &str, directory: &Path) -> Result<Vec<PathBuf>, String> {
+    let entries = std::fs::read_dir(directory).map_err(|error| {
+        format!(
+            "`{setting}` names {}, which is not a directory that can be read ({error}). Create it, or remove \
+             `{setting}`.",
+            directory.display()
+        )
+    })?;
+    let mut files: Vec<PathBuf> = entries
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.is_file()
+                && path
+                    .extension()
+                    .and_then(|extension| extension.to_str())
+                    .is_some_and(|extension| EXTENSIONS.contains(&extension))
+        })
+        .collect();
+    files.sort();
+    Ok(files)
+}
+
+/// Reads and parses `file`. Errors are worded by `problem`, which is given what went wrong.
+fn parse(file: &Path, problem: impl Fn(&str) -> String) -> Result<(String, Document), String> {
+    let text = std::fs::read_to_string(file).map_err(|error| problem(&format!("could not be read: {error}")))?;
+    let document = Document::parse(&text, file).map_err(|invalid| {
+        let first = invalid.errors.iter().next().map(|diagnostic| {
+            let position = diagnostic.line_column_range().map_or_else(String::new, |range| {
+                format!(" at {}:{}", range.start.line, range.start.column)
             });
-            problem(&format!("is not valid GraphQL: {}", first.unwrap_or_default()))
-        })?;
+            format!("{}{position}", diagnostic.error)
+        });
+        problem(&format!("is not valid GraphQL: {}", first.unwrap_or_default()))
+    })?;
+    Ok((text, document))
+}
+
+/// Adds the names of the fragments spread in `selections`, at any depth, to `out`, in the order they appear.
+fn spreads(selections: &[ast::Selection], out: &mut Vec<String>) {
+    for selection in selections {
+        match selection {
+            ast::Selection::Field(field) => spreads(&field.selection_set, out),
+            ast::Selection::InlineFragment(inline) => spreads(&inline.selection_set, out),
+            ast::Selection::FragmentSpread(spread) => out.push(spread.fragment_name.to_string()),
+        }
+    }
+}
+
+impl Shelf {
+    /// Reads every `.graphql` and `.gql` file directly in `directory`, each holding only fragment definitions.
+    fn load(directory: &Path) -> Result<Self, String> {
+        let mut fragments: BTreeMap<String, Shared> = BTreeMap::new();
+        for file in graphql_files("fragments", directory)? {
+            let problem = |what: &str| format!("the shared fragment file {} {what}", file.display());
+            let (_, document) = parse(&file, problem)?;
+            for definition in &document.definitions {
+                let Definition::FragmentDefinition(fragment) = definition else {
+                    return Err(problem(
+                        "holds a definition that is not a fragment. A file in `fragments` holds only fragment \
+                         definitions. An operation goes in `operations`, one per file.",
+                    ));
+                };
+                let name = fragment.name.to_string();
+                if let Some(earlier) = fragments.get(&name) {
+                    return Err(format!(
+                        "the fragment name `{name}` is defined in both {} and {}. Each shared fragment needs its own \
+                         name.",
+                        earlier.file.display(),
+                        file.display()
+                    ));
+                }
+                let mut spread = Vec::new();
+                spreads(&fragment.selection_set, &mut spread);
+                fragments.insert(
+                    name.clone(),
+                    Shared {
+                        name,
+                        file: file.clone(),
+                        used: false,
+                        text: fragment.to_string(),
+                        spreads: spread,
+                    },
+                );
+            }
+        }
+        Ok(Self {
+            source: directory.to_path_buf(),
+            fragments: fragments.into_values().collect(),
+        })
+    }
+
+    /// The shared fragment called `name`.
+    fn get_mut(&mut self, name: &str) -> Option<&mut Shared> {
+        self.fragments
+            .binary_search_by(|shared| shared.name.as_str().cmp(name))
+            .ok()
+            .and_then(|index| self.fragments.get_mut(index))
+    }
+}
+
+impl Saved {
+    /// Reads one operation file, appending the shared fragments from `shelf` that it uses and does not define.
+    fn read(file: &Path, shelf: Option<&mut Shelf>) -> Result<Self, String> {
+        let problem = |what: &str| format!("the saved operation {} {what}", file.display());
+        let (text, document) = parse(file, problem)?;
         let mut operations = document.definitions.iter().filter_map(|definition| match definition {
             Definition::OperationDefinition(operation) => Some(operation),
             _ => None,
@@ -182,15 +291,66 @@ impl Saved {
                  to it.",
             ));
         };
+        let description = description(&text);
+        let variables = operation.variables.iter().map(ToString::to_string).collect();
+        let mut pending = Vec::new();
+        spreads(&operation.selection_set, &mut pending);
+        let (text, fragment_files) = match shelf {
+            Some(shelf) => with_shared(text, &document, pending, shelf),
+            None => (text, Vec::new()),
+        };
         Ok(Self {
             name: name.to_string(),
             kind,
-            description: description(&text),
-            variables: operation.variables.iter().map(ToString::to_string).collect(),
+            description,
+            variables,
             text,
             file: file.to_path_buf(),
+            fragment_files,
         })
     }
+}
+
+/// `text`, the text of `document`, followed by every fragment from `shelf` that is reached from the spreads in
+/// `pending` and not defined in `document`, each once, with the files they came from. A fragment the document
+/// defines wins over a shared one of the same name, and its own spreads are followed too. A name found nowhere is
+/// left for validation to report.
+fn with_shared(
+    mut text: String,
+    document: &Document,
+    pending: Vec<String>,
+    shelf: &mut Shelf,
+) -> (String, Vec<PathBuf>) {
+    let local: BTreeMap<&str, &ast::FragmentDefinition> = document
+        .definitions
+        .iter()
+        .filter_map(|definition| match definition {
+            Definition::FragmentDefinition(fragment) => Some((fragment.name.as_str(), &**fragment)),
+            _ => None,
+        })
+        .collect();
+    let mut pending = VecDeque::from(pending);
+    let mut seen = HashSet::new();
+    let mut files = Vec::new();
+    while let Some(name) = pending.pop_front() {
+        if !seen.insert(name.clone()) {
+            continue;
+        }
+        let mut next = Vec::new();
+        if let Some(fragment) = local.get(name.as_str()) {
+            spreads(&fragment.selection_set, &mut next);
+        } else if let Some(shared) = shelf.get_mut(&name) {
+            shared.used = true;
+            text.push_str("\n\n");
+            text.push_str(&shared.text);
+            next.clone_from(&shared.spreads);
+            if !files.contains(&shared.file) {
+                files.push(shared.file.clone());
+            }
+        }
+        pending.extend(next);
+    }
+    (text, files)
 }
 
 /// The comment lines at the top of `text`, joined on one line. Blank lines before them are skipped, and the first
@@ -221,16 +381,32 @@ impl Saved {
     /// what planning it said.
     pub(crate) fn broken(&self, endpoint: &str, error: &str) -> String {
         let mut out = format!(
-            "The saved operation `{}` ({}) no longer validates against the schema of `{endpoint}`, so it cannot be \
+            "The saved operation `{}` ({}{}) no longer validates against the schema of `{endpoint}`, so it cannot be \
              run. The API has probably changed since it was saved. Tell the user, who can fix the file. Meanwhile you \
              can write the operation yourself, checking it with `estimate_cost`. What is wrong:",
             self.name,
-            self.file.display()
+            self.file.display(),
+            self.with_fragments()
         );
         for problem in problems(error) {
             let _ = write!(out, "\n- {problem}");
         }
         out
+    }
+}
+
+impl Saved {
+    /// `, with shared fragments from FILES` when it uses any, to follow the operation's own file in a message.
+    pub(crate) fn with_fragments(&self) -> String {
+        if self.fragment_files.is_empty() {
+            return String::new();
+        }
+        let files: Vec<String> = self
+            .fragment_files
+            .iter()
+            .map(|file| file.display().to_string())
+            .collect();
+        format!(", with shared fragments from {}", files.join(", "))
     }
 }
 

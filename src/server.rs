@@ -528,8 +528,9 @@ fn listing(out: &mut String, schema: &Loaded, name: &str, endpoint: &Endpoint, s
             let _ = writeln!(
                 out,
                 "  BROKEN: it no longer validates against the schema, so `execute` will not run it. Tell the user, \
-                 who can fix {}.",
-                saved.file.display()
+                 who can fix {}{}.",
+                saved.file.display(),
+                saved.with_fragments()
             );
             for problem in library::problems(&error) {
                 let _ = writeln!(out, "  - {problem}");
@@ -1246,9 +1247,10 @@ impl Fieldtrip {
         for saved in &endpoint.operations.operations {
             if let Err(error) = saved.plan(&held, name, endpoint) {
                 tracing::warn!(
-                    "the saved operation `{}` for endpoint `{name}` ({}) no longer validates against the schema: {}",
+                    "the saved operation `{}` for endpoint `{name}` ({}{}) no longer validates against the schema: {}",
                     saved.name,
                     saved.file.display(),
+                    saved.with_fragments(),
                     library::problems(&error).join("; ")
                 );
             }
