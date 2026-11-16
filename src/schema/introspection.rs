@@ -84,6 +84,9 @@ async fn attempt(
             show_bytes(endpoint.max_schema_bytes)
         ));
     }
+    if let Some(note) = reply.refused_twice {
+        return Err(note);
+    }
     if matches!(reply.status, 401 | 403) {
         return Err(format!(
             "{} answered HTTP {}: it did not accept the credentials. The user has to check the headers configured \

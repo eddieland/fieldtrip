@@ -93,6 +93,9 @@ pub(crate) struct Endpoint {
     pub(crate) template: Option<String>,
     /// The SDL file to read the schema from, as an absolute path. `None` means introspection.
     pub(crate) schema: Option<PathBuf>,
+    /// How long an introspected schema kept in fieldtrip's cache is used before introspecting again. Zero keeps
+    /// nothing.
+    pub(crate) schema_ttl: Duration,
     /// The headers sent with every request to this endpoint, in name order. A header that comes from a template is
     /// shared with the template's other endpoints, and so is a command's cached output.
     pub(crate) headers: Vec<Arc<Header>>,
@@ -145,6 +148,9 @@ pub(crate) enum Approval {
 
 /// The name of the endpoint that `--url` defines.
 const FLAG_ENDPOINT: &str = "default";
+
+/// The `schema_ttl` of an endpoint that does not set one: a day.
+const DEFAULT_SCHEMA_TTL: Duration = Duration::from_hours(24);
 
 /// The `timeout` of an endpoint that does not set one.
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
@@ -203,6 +209,7 @@ struct RawEndpoint {
     auto_approve_cost: Option<u64>,
     mutations: Option<String>,
     schema: Option<PathBuf>,
+    schema_ttl: Option<u64>,
     #[serde(default)]
     headers: BTreeMap<String, toml::Value>,
     assumed_list_size: Option<u64>,
@@ -230,6 +237,7 @@ struct RawTemplate {
     auto_approve_cost: Option<toml::Value>,
     mutations: Option<String>,
     schema: Option<PathBuf>,
+    schema_ttl: Option<u64>,
     #[serde(default)]
     headers: BTreeMap<String, toml::Value>,
     assumed_list_size: Option<u64>,
@@ -248,6 +256,7 @@ struct RawTemplate {
 #[derive(Default)]
 struct RawShared {
     schema: Option<PathBuf>,
+    schema_ttl: Option<u64>,
     headers: BTreeMap<String, toml::Value>,
     assumed_list_size: Option<u64>,
     costs: Option<PathBuf>,
@@ -265,6 +274,7 @@ macro_rules! shared {
     ($raw:expr) => {
         RawShared {
             schema: $raw.schema,
+            schema_ttl: $raw.schema_ttl,
             headers: $raw.headers,
             assumed_list_size: $raw.assumed_list_size,
             costs: $raw.costs,
@@ -283,6 +293,7 @@ macro_rules! shared {
 #[derive(Debug, Default)]
 struct Template {
     schema: Option<PathBuf>,
+    schema_ttl: Option<Duration>,
     headers: Vec<Arc<Header>>,
     assumed_list_size: Option<u64>,
     costs: Option<Arc<CostMap>>,
@@ -419,6 +430,7 @@ impl Template {
         let shared = shared!(raw);
         Ok(Self {
             schema: schema_path(shared.schema.as_deref(), base)?,
+            schema_ttl: shared.schema_ttl.map(Duration::from_secs),
             headers: headers(shared.headers, base)?,
             assumed_list_size: assumed_list_size(shared.assumed_list_size)?,
             costs: shared
@@ -511,6 +523,11 @@ impl Endpoint {
             description: raw.description.as_deref().map(one_line).filter(|text| !text.is_empty()),
             template: raw.template,
             schema: schema_path(shared.schema.as_deref(), base)?.or_else(|| template.schema.clone()),
+            schema_ttl: shared
+                .schema_ttl
+                .map(Duration::from_secs)
+                .or(template.schema_ttl)
+                .unwrap_or(DEFAULT_SCHEMA_TTL),
             headers,
             assumed_list_size: assumed_list_size(shared.assumed_list_size)?
                 .or(template.assumed_list_size)
@@ -709,6 +726,18 @@ pub(crate) fn show_bytes(bytes: usize) -> String {
         format!("{} KiB", bytes / KIB)
     } else {
         format!("{bytes} bytes")
+    }
+}
+
+/// `duration` for a person to read, rounded down: `45 s`, `12 min`, `3 h`, `1 day` or `3 days`.
+pub(crate) fn show_duration(duration: Duration) -> String {
+    let seconds = duration.as_secs();
+    match seconds {
+        0..120 => format!("{seconds} s"),
+        120..7_200 => format!("{} min", seconds / 60),
+        7_200..86_400 => format!("{} h", seconds / 3_600),
+        86_400..172_800 => "1 day".to_owned(),
+        _ => format!("{} days", seconds / 86_400),
     }
 }
 

@@ -8,7 +8,7 @@ use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::tool::{InputResponses, RequestState};
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{CallToolResponse, CallToolResult, ContentBlock, Implementation, ServerCapabilities, ServerConfig};
-use rmcp::service::RequestContext;
+use rmcp::service::{NotificationContext, RequestContext};
 use rmcp::{RoleServer, ServerHandler, schemars, tool, tool_handler, tool_router};
 use serde::Deserialize;
 use serde_json::value::RawValue;
@@ -16,13 +16,13 @@ use tokio::sync::Mutex;
 
 use crate::approval::{self, Operation, Outstanding, Round};
 use crate::audit::{self, Attempt, Audit, Outcome, Verdict};
-use crate::config::{Config, Endpoint, Mutations, show_bytes};
+use crate::config::{Approval, Config, Endpoint, Mutations, show_bytes, show_duration};
 use crate::http::Client;
 use crate::library::{self, Saved};
 use crate::plan::{Kind, Plan, Variables};
 use crate::schema::{Loaded, introspection};
 use crate::suggest::backticked;
-use crate::{response, saved, select};
+use crate::{cache, response, saved, select};
 
 /// What the server tells a client about itself and how to use it.
 const INSTRUCTIONS: &str = "fieldtrip lets you use GraphQL APIs the user has configured, reading the real schema \
@@ -54,7 +54,7 @@ type ToolResult = Result<String, String>;
 pub(crate) struct Fieldtrip {
     config: Arc<Config>,
     /// Schemas loaded so far, by endpoint name. The lock is held while loading, so each schema loads once.
-    schemas: Arc<Mutex<HashMap<String, Arc<Loaded>>>>,
+    schemas: Arc<Mutex<HashMap<String, Arc<Held>>>>,
     http: Client,
     /// Approval prompts that are waiting for an answer, on protocol revisions that ask by round trip.
     outstanding: Arc<Outstanding>,
@@ -62,6 +62,50 @@ pub(crate) struct Fieldtrip {
     audit: Arc<Audit>,
     /// The tools this server offers. `history` is left out when there is no audit log to read.
     tools: Arc<ToolRouter<Self>>,
+}
+
+/// A loaded schema and where it came from.
+#[derive(Debug)]
+struct Held {
+    /// The schema.
+    schema: Loaded,
+    /// Where it came from.
+    origin: Origin,
+}
+
+impl std::ops::Deref for Held {
+    type Target = Loaded;
+
+    fn deref(&self) -> &Loaded {
+        &self.schema
+    }
+}
+
+/// Where a schema came from.
+#[derive(Debug)]
+enum Origin {
+    /// The endpoint's `schema` file.
+    File,
+    /// An introspection query, just now.
+    Introspected,
+    /// fieldtrip's cache, where it was written this long ago, within the endpoint's `schema_ttl`.
+    Kept(std::time::Duration),
+    /// fieldtrip's cache, written this long ago, because introspecting failed with the error given.
+    Fallback(std::time::Duration, String),
+}
+
+impl Held {
+    /// A note to add to every result that reads a schema that may be out of date. Empty for any other schema.
+    fn staleness(&self) -> String {
+        match &self.origin {
+            Origin::Fallback(age, _) => format!(
+                "\n[This schema is fieldtrip's cached copy from {} ago, because the endpoint could not be \
+                 introspected. It may be out of date. `introspect` with `refresh: true` tries again.]",
+                show_duration(*age)
+            ),
+            _ => String::new(),
+        }
+    }
 }
 
 /// Arguments of `describe`.
@@ -527,7 +571,8 @@ struct IntrospectArguments {
     /// Whether to load the schema again.
     #[schemars(
         description = "Set to `true` to load the schema again from its source, after the API has changed. \
-                       Otherwise the copy already loaded is used."
+                       Otherwise the copy already loaded is used, or the one fieldtrip keeps on disk while it is \
+                       newer than the endpoint's `schema_ttl`."
     )]
     #[serde(default)]
     refresh: bool,
@@ -559,13 +604,21 @@ impl Fieldtrip {
                        from (a file or introspection), who approves `execute` requests, `mutations: denied` when \
                        `execute` refuses every mutation there, the cost map if there is one, how many operations \
                        the user has saved for `list_operations`, and the names of the headers sent with each request, so you can tell whether \
-                       authentication is set up. Header values are never shown. When several endpoints are \
+                       authentication is set up. For a header produced by a command, such as a login helper, it says \
+                       how the command's last run went: ok, failed with its exit status, or not run yet. It runs \
+                       nothing to find out. A failed command usually means the user's login expired: tell them to \
+                       sign in again rather than retrying. Header values are never shown. When several endpoints are \
                        instances of one service, such as dev and prod, prefer the one the description or the user \
                        points to, and ask when it is unclear. Endpoints and headers come only from the user's \
                        config: if one is missing, ask the user to add it.",
         annotations(read_only_hint = true, open_world_hint = false)
     )]
-    fn list_endpoints(&self) -> String {
+    #[expect(
+        clippy::needless_pass_by_value,
+        reason = "rmcp's `tool` macro hands the request context over by value"
+    )]
+    fn list_endpoints(&self, context: RequestContext<RoleServer>) -> String {
+        let unseen = approval::auto_accepting(context.client_info().as_ref());
         let endpoints = &self.config.endpoints;
         if endpoints.is_empty() {
             return "No endpoints are configured. The user adds them to the fieldtrip config file.".to_owned();
@@ -581,11 +634,18 @@ impl Fieldtrip {
                 Some(path) => {
                     let _ = writeln!(out, "  schema: file {}", path.display());
                 }
+                None if endpoint.schema_ttl.is_zero() => {
+                    let _ = writeln!(out, "  schema: introspection, not cached");
+                }
                 None => {
-                    let _ = writeln!(out, "  schema: introspection");
+                    let _ = writeln!(
+                        out,
+                        "  schema: introspection, cached for {}",
+                        show_duration(endpoint.schema_ttl)
+                    );
                 }
             }
-            let _ = writeln!(out, "  approval: {}", approval::policy(endpoint));
+            let _ = writeln!(out, "  approval: {}", approval::policy_for(endpoint, unseen));
             if endpoint.mutations == Mutations::Deny {
                 let _ = writeln!(out, "  mutations: denied");
             }
@@ -605,6 +665,11 @@ impl Fieldtrip {
             if !endpoint.headers.is_empty() {
                 let names: Vec<&str> = endpoint.headers.iter().map(|header| header.name.as_str()).collect();
                 let _ = writeln!(out, "  headers: {}", names.join(", "));
+            }
+            for header in &endpoint.headers {
+                if let Some(status) = header.status() {
+                    let _ = writeln!(out, "  header {}: {status}", header.name);
+                }
             }
             if !endpoint.response_headers.is_empty() {
                 let _ = writeln!(
@@ -700,7 +765,7 @@ impl Fieldtrip {
             definition,
             endpoint.max_output_chars,
             "Describe one field at a time, as `Type.field`, or use `search_schema`.",
-        ))
+        ) + &schema.staleness())
     }
 
     #[tool(
@@ -723,7 +788,7 @@ impl Fieldtrip {
         let found = schema.search(name, &arguments.query)?;
         let saved = endpoint.operations.matching(&arguments.query);
         if saved.is_empty() {
-            return Ok(found);
+            return Ok(found + &schema.staleness());
         }
         let mut out = "Saved operations that match, which `execute` runs by `operation_name` (`list_operations` \
                        shows them in full):\n"
@@ -739,7 +804,7 @@ impl Fieldtrip {
             );
         }
         out.push('\n');
-        Ok(out + &found)
+        Ok(out + &found + &schema.staleness())
     }
 
     #[tool(
@@ -773,6 +838,7 @@ impl Fieldtrip {
                  the user's config. The user can run it themselves.\n",
             );
         }
+        out.push_str(&schema.staleness());
         Ok(out)
     }
 
@@ -861,6 +927,15 @@ impl Fieldtrip {
             };
             (verdict, unasked)
         } else {
+            if let Some(client) = approval::auto_accepting(context.client_info().as_ref()) {
+                tracing::warn!("refused an operation on `{name}`: {client} would accept the prompt unseen");
+                let verdict = Verdict {
+                    approval: "unavailable",
+                    reason: Some(format!("{client} accepts approval prompts without showing them")),
+                };
+                self.audit.record(endpoint, &attempt, &verdict, Outcome::NotSent).await;
+                return Err(approval::unseen(name, client));
+            }
             let prompt = approval::prompt(name, &endpoint.shown_url, &plan, &arguments.variables);
             let decision = if approval::asks_by_round_trip(&context) {
                 let operation = Operation {
@@ -902,12 +977,15 @@ impl Fieldtrip {
             .map_or_else(|error| Outcome::Failed(error), Outcome::Answered);
         self.audit.record(endpoint, &attempt, &verdict, outcome).await;
         let reply = sent?;
-        let summary = format!(
+        let mut summary = format!(
             "Sent {} to `{name}`. Estimated cost: {}.{unasked}\n{}",
             plan.title(),
             plan.cost,
             reply.metadata()
         );
+        if let Some(note) = &reply.refused_twice {
+            let _ = write!(summary, "\n{note}");
+        }
         if reply.cut_short {
             // Too long to read in full, so it cannot be parsed. The status says whether it is a result.
             let excerpt: String = reply.body.chars().take(EXCERPT).collect();
@@ -1092,17 +1170,34 @@ impl Fieldtrip {
                        it once per endpoint to see what the API offers, then use `search_schema` and `describe` to \
                        read the fields you need. The schema stays loaded for every tool, so there is no need to send \
                        an introspection query with `execute`. It also reports cost-map rules that match nothing in \
-                       the schema. Pass `refresh` only when the API has changed since it was loaded.",
+                       the schema. An introspected schema is kept on disk, a day unless the user's config says \
+                       otherwise, and the result says when it came from there. When the endpoint cannot be \
+                       introspected, an older copy stands in and every tool that reads it says it may be out of \
+                       date. Pass `refresh` only when the API has changed since it was loaded.",
         annotations(read_only_hint = true, open_world_hint = true)
     )]
     async fn introspect(&self, Parameters(arguments): Parameters<IntrospectArguments>) -> ToolResult {
         let name = &arguments.endpoint;
         let schema = self.schema(name, arguments.refresh).await?;
         let endpoint = self.endpoint(name)?;
-        let source = endpoint.schema.as_ref().map_or_else(
-            || format!("loaded by introspection from {}", endpoint.shown_url),
-            |path| format!("read from the file {}", path.display()),
-        );
+        let url = &endpoint.shown_url;
+        let source = match (&schema.origin, &endpoint.schema) {
+            (Origin::File, Some(path)) => format!("read from the file {}", path.display()),
+            (Origin::File | Origin::Introspected, _) => format!("loaded by introspection from {url}"),
+            (Origin::Kept(age), _) => format!(
+                "loaded by introspection from {url} {} ago and read from fieldtrip's cache, which keeps it for \
+                 {} (`schema_ttl`). If the API has changed since, call again with `refresh: true`",
+                show_duration(*age),
+                show_duration(endpoint.schema_ttl)
+            ),
+            (Origin::Fallback(age, error), _) => format!(
+                "read from fieldtrip's cache, where it was kept {} ago. It may be out of date: {url} could not be \
+                 introspected just now, so this copy stands in, and `refresh: true` tries again.\nIntrospection \
+                 failed with: {}",
+                show_duration(*age),
+                error.trim_end_matches('.')
+            ),
+        };
         Ok(format!(
             "Schema for `{name}`, {source}.\n{}{}",
             schema.overview(endpoint.mutations),
@@ -1133,23 +1228,23 @@ impl Fieldtrip {
     }
 
     /// Returns the schema for the endpoint called `name`, loading it on first use or when `refresh` is set.
-    async fn schema(&self, name: &str, refresh: bool) -> Result<Arc<Loaded>, String> {
+    async fn schema(&self, name: &str, refresh: bool) -> Result<Arc<Held>, String> {
         let endpoint = self.endpoint(name)?;
         let mut schemas = self.schemas.lock().await;
         if let Some(loaded) = schemas.get(name).filter(|_| !refresh) {
             return Ok(Arc::clone(loaded));
         }
-        let loaded = Arc::new(self.load(name, endpoint).await?);
+        let loaded = Arc::new(self.load(name, endpoint, refresh).await?);
         schemas.insert(name.to_owned(), Arc::clone(&loaded));
         drop(schemas);
         Ok(loaded)
     }
 
     /// Loads the schema for `endpoint`, and warns about each saved operation that no longer validates against it.
-    async fn load(&self, name: &str, endpoint: &Endpoint) -> Result<Loaded, String> {
-        let loaded = self.read_schema(name, endpoint).await?;
+    async fn load(&self, name: &str, endpoint: &Endpoint, refresh: bool) -> Result<Held, String> {
+        let held = self.read_schema(name, endpoint, refresh).await?;
         for saved in &endpoint.operations.operations {
-            if let Err(error) = saved.plan(&loaded, name, endpoint) {
+            if let Err(error) = saved.plan(&held, name, endpoint) {
                 tracing::warn!(
                     "the saved operation `{}` for endpoint `{name}` ({}) no longer validates against the schema: {}",
                     saved.name,
@@ -1158,7 +1253,7 @@ impl Fieldtrip {
                 );
             }
         }
-        Ok(loaded)
+        Ok(held)
     }
 
     /// Checks the saved operations of every endpoint whose schema is a file, so that one broken by a change to the
@@ -1176,18 +1271,67 @@ impl Fieldtrip {
     }
 
     /// Reads the schema for `endpoint` from its file, or by introspection when it has none.
-    async fn read_schema(&self, name: &str, endpoint: &Endpoint) -> Result<Loaded, String> {
-        let Some(path) = &endpoint.schema else {
-            let sdl = introspection::fetch(&self.http, endpoint).await?;
-            return Loaded::from_sdl(&sdl, &format!("The introspection result from {}", endpoint.shown_url));
+    ///
+    /// An introspected schema is kept in fieldtrip's cache for `schema_ttl`, and read from there until then unless
+    /// `refresh` is set. When introspection fails, a copy of any age stands in, unless `refresh` asked for a new one.
+    async fn read_schema(&self, name: &str, endpoint: &Endpoint, refresh: bool) -> Result<Held, String> {
+        if let Some(path) = &endpoint.schema {
+            let text = std::fs::read_to_string(path).map_err(|error| {
+                format!(
+                    "Could not read the schema file {} for endpoint `{name}`: {error}",
+                    path.display()
+                )
+            })?;
+            let schema = Loaded::from_sdl(&text, &format!("The schema file {}", path.display()))?;
+            return Ok(Held {
+                schema,
+                origin: Origin::File,
+            });
+        }
+        let caching = !endpoint.schema_ttl.is_zero();
+        let kept = if caching {
+            cache::read_schema(&endpoint.url)
+        } else {
+            None
         };
-        let text = std::fs::read_to_string(path).map_err(|error| {
-            format!(
-                "Could not read the schema file {} for endpoint `{name}`: {error}",
-                path.display()
-            )
-        })?;
-        Loaded::from_sdl(&text, &format!("The schema file {}", path.display()))
+        // A copy that does not parse, written by an older fieldtrip perhaps, is as good as none.
+        let kept = kept.and_then(|kept| Some((Loaded::from_sdl(&kept.sdl, "The cached schema").ok()?, kept.age)));
+        let (kept, age) = match kept {
+            Some((schema, age)) if !refresh && age < endpoint.schema_ttl => {
+                return Ok(Held {
+                    schema,
+                    origin: Origin::Kept(age),
+                });
+            }
+            Some((schema, age)) if !refresh => (Some(schema), age),
+            _ => (None, std::time::Duration::ZERO),
+        };
+        let introspected = match introspection::fetch(&self.http, endpoint).await {
+            Ok(sdl) => sdl,
+            Err(error) => {
+                return match kept {
+                    Some(schema) => {
+                        tracing::warn!("`{name}` could not be introspected, so its cached schema stands in: {error}");
+                        Ok(Held {
+                            schema,
+                            origin: Origin::Fallback(age, error),
+                        })
+                    }
+                    None => Err(error),
+                };
+            }
+        };
+        let schema = Loaded::from_sdl(
+            &introspected,
+            &format!("The introspection result from {}", endpoint.shown_url),
+        )?;
+        if caching && let Err(error) = cache::write_schema(&endpoint.url, &endpoint.shown_url, &introspected) {
+            tracing::warn!("the schema of `{name}` could not be kept in the cache: {error}");
+        }
+        Ok(Held {
+            schema,
+            origin: Origin::Introspected,
+        })
     }
 }
 
@@ -1201,5 +1345,27 @@ impl ServerHandler for Fieldtrip {
         ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(Implementation::new(env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION")))
             .with_instructions(self.instructions())
+    }
+
+    async fn on_initialized(&self, context: NotificationContext<RoleServer>) {
+        let client = context.peer.peer_info().map(|info| info.client_info.clone());
+        let Some(client) = approval::auto_accepting(client.as_ref()) else {
+            return;
+        };
+        let asking: Vec<&str> = self
+            .config
+            .endpoints
+            .iter()
+            .filter(|(_, endpoint)| endpoint.approval == Approval::Elicit)
+            .map(|(name, _)| name.as_str())
+            .collect();
+        if !asking.is_empty() {
+            tracing::warn!(
+                "{client} accepts fieldtrip's approval prompts without showing them, so `execute` will refuse every \
+                 operation that needs one on {}. Set `approval = \"client\"` on those endpoints and add a permission \
+                 rule in {client} that asks before `fieldtrip_execute`.",
+                backticked(asking.into_iter())
+            );
+        }
     }
 }

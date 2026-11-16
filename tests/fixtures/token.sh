@@ -27,6 +27,15 @@ case "$1" in
     echo "$runs" > token-runs
     echo "t0ken-$runs"
     ;;
+  once)
+    # Prints a token on its first run and fails on every later one, as a login that expires between runs does.
+    if [ -e token-once ]; then
+      echo "session expired: run acme login" >&2
+      exit 4
+    fi
+    touch token-once
+    echo "t0ken-once"
+    ;;
   *)
     echo "token.sh: unknown mode '$1'" >&2
     exit 64

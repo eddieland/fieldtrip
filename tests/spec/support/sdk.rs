@@ -23,6 +23,7 @@ use super::{Human, Launch, Reply, server_command};
 #[derive(Debug, Clone)]
 struct Handler {
     human: Human,
+    client: String,
     prompts: Arc<Mutex<Vec<String>>>,
 }
 
@@ -50,7 +51,7 @@ impl ClientHandler for Handler {
         } else {
             ClientCapabilities::builder().enable_elicitation().build()
         };
-        ClientConfig::new(capabilities, Implementation::new("fieldtrip-spec-sdk", "0"))
+        ClientConfig::new(capabilities, Implementation::new(self.client.clone(), "0"))
     }
 }
 
@@ -73,6 +74,7 @@ impl SdkClient {
         let prompts = Arc::new(Mutex::new(Vec::new()));
         let handler = Handler {
             human: launch.human,
+            client: launch.client.clone(),
             prompts: Arc::clone(&prompts),
         };
 

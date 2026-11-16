@@ -58,6 +58,7 @@ pub(crate) struct Mcp {
     prompts: Vec<String>,
     dir: TempDir,
     instructions: Option<String>,
+    client: String,
 }
 
 /// How to start the server for a test.
@@ -68,7 +69,11 @@ pub(crate) struct Launch {
     human: Human,
     env: Vec<(String, String)>,
     files: Vec<(String, String)>,
+    client: String,
 }
+
+/// The `clientInfo.name` the test clients give unless a test says otherwise.
+const TEST_CLIENT: &str = "fieldtrip-spec";
 
 /// What a run of `fieldtrip check` did.
 #[derive(Debug)]
@@ -103,6 +108,7 @@ impl Launch {
             human: Human::Absent,
             env: Vec::new(),
             files: Vec::new(),
+            client: TEST_CLIENT.to_owned(),
         }
     }
 
@@ -115,6 +121,7 @@ impl Launch {
             human: Human::Absent,
             env: Vec::new(),
             files: Vec::new(),
+            client: TEST_CLIENT.to_owned(),
         }
     }
 
@@ -137,6 +144,12 @@ impl Launch {
         self
     }
 
+    /// Makes the client introduce itself as `name` in its `clientInfo`, as a real MCP client does.
+    pub(crate) fn client(mut self, name: &str) -> Self {
+        self.client = name.to_owned();
+        self
+    }
+
     /// Makes the client answer approval prompts as `human` does.
     pub(crate) fn human(mut self, human: Human) -> Self {
         self.human = human;
@@ -148,6 +161,7 @@ impl Launch {
         let (dir, arguments, env) = self.prepare();
         let arguments: Vec<&std::ffi::OsStr> = arguments.iter().map(AsRef::as_ref).collect();
         let mut mcp = Mcp::spawn(&arguments, &env, self.human, dir);
+        mcp.client.clone_from(&self.client);
         mcp.initialize();
         mcp
     }
@@ -304,6 +318,7 @@ impl Mcp {
             prompts: Vec::new(),
             dir,
             instructions: None,
+            client: TEST_CLIENT.to_owned(),
         }
     }
 
@@ -319,7 +334,7 @@ impl Mcp {
             &json!({
                 "protocolVersion": "2025-11-25",
                 "capabilities": capabilities,
-                "clientInfo": { "name": "fieldtrip-spec", "version": "0" },
+                "clientInfo": { "name": self.client, "version": "0" },
             }),
         );
         assert!(

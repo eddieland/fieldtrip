@@ -22,7 +22,7 @@ in the user's config, out of the agent's sight and out of its control.
 
 | Tool | Input | Returns |
 | --- | --- | --- |
-| `list_endpoints` | none | Each endpoint's name, URL, schema source and header names |
+| `list_endpoints` | none | Each endpoint's name, URL, schema source, header names and header commands' last run |
 | `list_operations` | `endpoint`, `query?`, `uses?`, `kind?`, `name?` | Saved operations: name, kind, description, variables, cost, text |
 | `introspect` | `endpoint`, `refresh?` | Overview: root types, counts, query and mutation names |
 | `search_schema` | `endpoint`, `query` | Ranked matches as one-line signatures |
@@ -46,6 +46,7 @@ max_schema_bytes  = 33554432                 # optional, default 32 MiB, read of
 max_response_bytes = 8388608                 # optional, default 8 MiB, read of a response to `execute`
 max_output_chars  = 40000                    # optional, default 40,000, characters in one tool result
 audit_variables   = false                    # optional, default true: leave variables out of the audit log
+schema_ttl        = 86400                    # optional, seconds a schema is cached, default 1 day
 
 [templates.acme.headers]
 X-Client      = "fieldtrip"
@@ -64,7 +65,7 @@ mutations         = "deny"                   # optional, default "prompt". A tem
 X-Api-Key = { env = "ACME_API_KEY" }
 ```
 
-An endpoint takes `schema`, `headers`, `costs`, `operations`, `assumed_list_size`, `timeout`,
+An endpoint takes `schema`, `schema_ttl`, `headers`, `costs`, `operations`, `assumed_list_size`, `timeout`,
 `response_headers`, the three `max_` limits and `audit_variables` from its template unless it sets them. Headers
 merge by name, ignoring case, and the endpoint's win.
 `url`, `description`, `approval` and `auto_approve_cost` are only ever set on the endpoint. `mutations` comes from the
@@ -115,6 +116,7 @@ prompt is a request from the server. From 2026-07-28 it is an "input required" r
 | Query with cost at or below `auto_approve_cost` | Sent without a prompt |
 | Endpoint sets `approval = "client"` | Sent without a prompt, mutations included |
 | Mutation, and the endpoint or its template sets `mutations = "deny"` | Not sent, and no prompt is shown |
+| A prompt is needed, and the client is known to accept prompts unseen | Not sent, and no prompt is shown |
 
 ## Decisions
 
@@ -237,3 +239,23 @@ Settled. To change one, ask the user, then add a new dated line instead of editi
 - 2026-11-14: A line that cannot be written is logged to stderr. The attempt has happened, so the call is not failed.
 - 2026-11-14: `history` reads the log back as it is written, newest last, and is offered only when `audit_log` is set.
 - 2026-11-14: `history` shows only endpoints in the current config, since several configs can share one log.
+- 2026-11-14: `list_endpoints` shows how each header command's last run went: ok, failed and why, or not run yet.
+- 2026-11-14: That status is only read, never produced: listing endpoints runs no command and sends nothing.
+- 2026-11-14: A failure is shown by a short reason, such as `exit 3`. Stdout and stderr are not shown there.
+- 2026-11-14: When the retry after a 401 is refused with a 401 too, the result says both happened and names each
+  header and program that ran again, so the user knows to sign in again rather than ask for a permission.
+- 2026-11-14: A command that fails when run again after a 401 is reported with that 401 as the reason it ran.
+- 2026-11-14: An introspected schema is kept as SDL under `fieldtrip/schemas` in the user's cache directory, per URL.
+- 2026-11-14: A kept schema is used instead of introspecting for `schema_ttl` seconds, a day unless set. 0 keeps none.
+- 2026-11-14: `introspect(refresh = true)` never reads the cache. It introspects, and keeps the result.
+- 2026-11-14: When introspection fails, a kept schema of any age stands in, except on a refresh. `introspect` says
+  how old it is and why, and every other tool that reads it says it may be out of date.
+- 2026-11-14: A kept schema's file is named by a hash of the URL and holds only the shown URL. Only the user can
+  read it.
+- 2026-11-14: A client known to accept a prompt with no fields without showing it is never asked. Where a prompt is
+  needed, `execute` refuses, on both protocol revisions. The client is known by its `clientInfo.name`.
+- 2026-11-14: OpenCode (`opencode`, any case) is such a client. The list is a constant in the code, not config.
+- 2026-11-14: `approval = "client"` and `auto_approve_cost` still apply to such a client: neither depends on a prompt.
+- 2026-11-14: When such a client connects with the `initialize` handshake, a warning names the endpoints affected.
+  `list_endpoints` says so on each of them.
+- 2026-11-14: The audit log records that refusal as `unavailable`, with a reason that names the client.

@@ -5,7 +5,7 @@ use std::fmt::Write as _;
 use std::time::{Duration, Instant};
 
 use crate::config::Endpoint;
-use crate::headers::Secret;
+use crate::headers::{Header, Secret};
 
 /// The `User-Agent` sent with every request.
 const USER_AGENT: &str = concat!(env!("CARGO_PKG_NAME"), "/", env!("CARGO_PKG_VERSION"));
@@ -33,6 +33,9 @@ pub(crate) struct Reply {
     /// The endpoint's configured `response_headers` that came back, by their configured name, in config order.
     /// Values have had secrets removed.
     pub(crate) headers: Vec<(String, String)>,
+    /// When this is a retry after a 401 that was refused with a 401 too, a note that says both happened and which
+    /// header commands ran again.
+    pub(crate) refused_twice: Option<String>,
 }
 
 /// The most characters of one response header's value that are shown.
@@ -85,10 +88,42 @@ impl Client {
         limit: usize,
     ) -> Result<Reply, String> {
         let reply = self.send(endpoint, payload, limit, false).await?;
-        if reply.status == UNAUTHORIZED && endpoint.headers.iter().any(|header| header.is_refreshable()) {
-            return self.send(endpoint, payload, limit, true).await;
+        let refreshable: Vec<&Header> = endpoint
+            .headers
+            .iter()
+            .map(AsRef::as_ref)
+            .filter(|header: &&Header| header.is_refreshable())
+            .collect();
+        if reply.status != UNAUTHORIZED || refreshable.is_empty() {
+            return Ok(reply);
         }
-        Ok(reply)
+        let commands = refreshable
+            .iter()
+            .map(|header| format!("`{}` (`{}`)", header.name, header.program().unwrap_or_default()))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let plural = if refreshable.len() == 1 { "" } else { "s" };
+        let mut retry = self.send(endpoint, payload, limit, true).await.map_err(|error| {
+            format!(
+                "{} answered HTTP {UNAUTHORIZED}, so fieldtrip ran the command{plural} for the header{plural} \
+                 {commands} again to get a fresh credential, and that failed. {error}",
+                endpoint.shown_url
+            )
+        })?;
+        if retry.status == UNAUTHORIZED {
+            for header in &refreshable {
+                header.refused(UNAUTHORIZED);
+            }
+            retry.refused_twice = Some(format!(
+                "{} answered HTTP {UNAUTHORIZED} twice. After the first, fieldtrip ran the command{plural} for the \
+                 header{plural} {commands} again and retried with what {} printed, which was refused too. The login \
+                 behind it has most likely expired or been revoked: the user has to sign in again, then retry. A \
+                 missing permission is usually HTTP 403 instead.",
+                endpoint.shown_url,
+                if refreshable.len() == 1 { "it" } else { "they" }
+            ));
+        }
+        Ok(retry)
     }
 
     /// Sends one request. With `fresh_headers`, header commands run again instead of reusing their last output.
@@ -182,6 +217,7 @@ impl Client {
             cut_short,
             elapsed,
             headers,
+            refused_twice: None,
         })
     }
 }
