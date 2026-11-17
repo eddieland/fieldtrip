@@ -410,10 +410,11 @@ The toolchain is pinned in `rust-toolchain.toml` (the MSRV is always the latest 
 automatically. Lints are configured in `Cargo.toml` and are warnings locally; CI fails on any warning.
 
 ```sh
-cargo fmt --all                                                   # 120-column formatting
-cargo clippy --workspace --all-targets --all-features             # pedantic + nursery + curated restriction lints
-RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --document-private-items
-cargo test --workspace --all-features
+make            # list the targets
+make check      # what CI runs: fmt, clippy, doc and test, with every warning an error
+make clippy     # or only the targets you name
+make format     # reformat in place, 120 columns
+make deny       # advisories, licenses and crate sources, with cargo-deny
 ```
 
 Every public item needs a doc comment; functions returning `Result` need an `# Errors` section and functions that

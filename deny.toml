@@ -1,0 +1,39 @@
+# What `cargo deny check` holds every crate in Cargo.lock to. CI runs it, and so does `make deny`.
+#
+# fieldtrip carries the user's credentials, so a dependency with a known vulnerability, an unexpected license or an
+# unexpected origin should fail a build instead of being found later.
+
+[graph]
+# The targets the release workflow builds. Crates that only other targets pull in are not checked.
+targets = [
+    "x86_64-unknown-linux-musl",
+    "aarch64-unknown-linux-musl",
+    "x86_64-apple-darwin",
+    "aarch64-apple-darwin",
+    "x86_64-pc-windows-msvc",
+]
+all-features = true
+
+[advisories]
+# Vulnerabilities and unsound crates are always errors. Unmaintained crates are reported only for direct
+# dependencies, which are the ones this repository can replace.
+unmaintained = "workspace"
+yanked = "deny"
+ignore = []
+
+[licenses]
+# Permissive licenses only. Add one here when a new dependency needs it and the license is acceptable.
+allow = ["MIT", "Apache-2.0", "Apache-2.0 WITH LLVM-exception", "BSD-2-Clause", "BSD-3-Clause", "ISC", "Unicode-3.0", "Zlib"]
+confidence-threshold = 0.9
+
+[bans]
+# Duplicate versions come from transitive dependencies and are outside our control, as in the clippy config.
+multiple-versions = "allow"
+wildcards = "deny"
+
+[sources]
+# Crates come from crates.io and nowhere else: no git dependencies and no other registries.
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []
