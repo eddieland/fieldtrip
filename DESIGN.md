@@ -28,13 +28,15 @@ in the user's config, out of the agent's sight and out of its control.
 | `search_schema` | `endpoint`, `query` | Glossary targets, then ranked matches as one-line signatures |
 | `describe` | `endpoint`, `name` (`Type` or `Type.field`) | That definition as compact SDL |
 | `estimate_cost` | `endpoint`, `operation` or `operation_name`, `variables?` | Validation errors, or cost, depth, breakdown, assumptions |
-| `execute` | `endpoint`, `operation` or `operation_name`, `variables?`, `select?`, `save?` | Status, `errors`, then the rest or a summary |
+| `execute` | `endpoint`, `operation` or `operation_name`, `variables?`, `select?`, `save?` | Status, `errors`, then the rest, or a file's path with a preview |
+| `read_result` | `result`, `select?` | Part of a response `execute` wrote to a file, by a path. Sends nothing |
 | `history` | `endpoint?`, `limit?` | The latest `execute` attempts from the audit log. Only offered with `audit_log` |
 
 ## Config shape
 
 ```toml
 audit_log = "~/.local/state/fieldtrip/audit.jsonl"   # optional: one JSON line per `execute` attempt
+result_ttl = 86400                           # optional, seconds a response file is kept, default 1 day
 
 [templates.acme]                             # optional: settings that several endpoints share
 costs             = "acme.costs.toml"        # optional cost map, relative to this file
@@ -48,6 +50,7 @@ response_headers  = ["x-request-id", "traceparent"]   # optional, shown by `exec
 max_schema_bytes  = 33554432                 # optional, default 32 MiB, read of an introspection response
 max_response_bytes = 8388608                 # optional, default 8 MiB, read of a response to `execute`
 max_output_chars  = 40000                    # optional, default 40,000, characters in one tool result
+max_inline_chars  = 10000                    # optional, default 10,000, a longer response goes to a file
 audit_variables   = false                    # optional, default true: leave variables out of the audit log
 schema_ttl        = 86400                    # optional, seconds a schema is cached, default 1 day
 
@@ -70,7 +73,7 @@ X-Api-Key = { env = "ACME_API_KEY" }
 ```
 
 An endpoint takes `schema`, `schema_ttl`, `headers`, `costs`, `glossary`, `operations`, `fragments`, `client_directives`,
-`assumed_list_size`, `timeout`, `response_headers`, the three `max_` limits and `audit_variables` from its template
+`assumed_list_size`, `timeout`, `response_headers`, the four `max_` limits and `audit_variables` from its template
 unless it sets them.
 Headers merge by name, ignoring case, and the endpoint's win.
 `url`, `description`, `approval` and `auto_approve_cost` are only ever set on the endpoint. `mutations` comes from the
@@ -353,3 +356,35 @@ Settled. To change one, ask the user, then add a new dated line instead of editi
 - 2026-11-17: `introspect` reports the targets the schema lacks, as it does unmatched cost rules, and `check` warns
   about them. A search for such a term still shows the target, marked as not in the schema. `list_endpoints` shows
   the glossary file and how many terms it has.
+- 2026-11-17: A response to `execute` longer than `max_inline_chars` (10,000, set per endpoint or template) is written
+  whole to a file without being asked, and the result has its path and size, `errors` in full, a preview and the shape
+  of the response, never the body. A shorter one is shown as before. This replaces the 2026-11-13 summary of up to
+  `max_output_chars` for a response to `execute`. That summary remains for a file that could not be written.
+- 2026-11-17: `max_inline_chars` cannot show more than `max_output_chars`: the smaller applies. Under 1,000 stops the
+  server.
+- 2026-11-17: The preview is the 2026-11-13 summary, in at most 4,000 characters, and at least 1,000 of them after
+  `errors` however long those are. The shape is one line per path with its type, list items merged, at most 40 lines.
+- 2026-11-17: With `select`, the response is still written whole when it is too long, and the selection is shown up to
+  `max_inline_chars`.
+- 2026-11-17: A response file goes in a directory of the session's own, `fieldtrip/responses/<session>`, in the cache
+  directory, and is named by the endpoint and an ID fieldtrip makes for it. This refines the 2026-11-13 line on `save`,
+  which still forces a file at any size.
+- 2026-11-17: `read_result` takes a result, by the ID or the path `execute` gave, and a `select` path, and returns that
+  part of the file, after `errors` in full. It sends nothing, so it asks nobody. Without a path it gives the preview
+  and the shape again. No jq: `select` is the one path language.
+- 2026-11-17: `read_result` reads only files under `fieldtrip/responses`, once links and `..` are followed. The calling
+  agent is not trusted with a path to anything else, so any other path is refused, whatever the file holds.
+- 2026-11-17: A result's ID is its file's name without `.json`. An ID is looked for in this session's directory first,
+  then in those of earlier sessions.
+- 2026-11-17: What `read_result` selects is held to the `max_output_chars` of the endpoint the result is named after,
+  not to `max_inline_chars`, because the calling agent asked for that part.
+- 2026-11-17: A response file is deleted `result_ttl` seconds after it was written, a day unless set, at the top of
+  the config like `audit_log`, since every endpoint's files share one directory. Zero stops the server.
+- 2026-11-17: Nothing runs in the background. Old files are deleted at startup, before a file is written, and before
+  one is looked for, whichever session wrote them. A session's directory goes with its last file.
+- 2026-11-17: Only `.json` files in `fieldtrip/responses` and in the directories directly inside it are deleted, which
+  includes what `save` wrote there before sessions had directories. Links are not followed.
+- 2026-11-17: An audit line for an attempt whose response went to a file has `result`, the file's ID. The file is that
+  session's `<result>.json`, so the log holds no path.
+- 2026-11-17: `history` still gives the lines as written. After them it lists the files that still exist for the lines
+  shown, and counts those that are gone. This adds to the 2026-11-14 line on `history`.

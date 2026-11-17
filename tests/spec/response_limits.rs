@@ -138,7 +138,7 @@ fn a_template_sets_both_limits_and_check_shows_them() {
         own.text
     );
     assert!(
-        own.text.contains("the 3000 it holds"),
+        own.text.contains("the 3000 shown of a saved response"),
         "the endpoint's output limit wins"
     );
     assert!(checked.passed, "{}", checked.stdout);
@@ -149,7 +149,9 @@ fn a_template_sets_both_limits_and_check_shows_them() {
             .nth(1)
             .unwrap_or_default();
         assert!(
-            section.contains(&format!("  max response bytes: {bytes}\n  max output chars: {chars}\n")),
+            section.contains(&format!(
+                "  max response bytes: {bytes}\n  max output chars: {chars}\n  max inline chars: 10000\n"
+            )),
             "check shows the limits for `{endpoint}`: {}",
             checked.stdout
         );

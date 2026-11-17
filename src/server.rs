@@ -20,9 +20,10 @@ use crate::config::{Approval, Config, Endpoint, Mutations, show_bytes, show_dura
 use crate::http::Client;
 use crate::library::{self, Saved};
 use crate::plan::{Kind, Plan, Variables};
+use crate::results::Results;
 use crate::schema::{Loaded, introspection};
 use crate::suggest::backticked;
-use crate::{cache, response, saved, select};
+use crate::{cache, response, results, select, shape};
 
 /// What the server tells a client about itself and how to use it.
 const INSTRUCTIONS: &str = "fieldtrip lets you use GraphQL APIs the user has configured, reading the real schema \
@@ -34,7 +35,11 @@ const INSTRUCTIONS: &str = "fieldtrip lets you use GraphQL APIs the user has con
      4. `search_schema` finds a type, field or saved operation by a word. `describe` shows a field's exact \
      arguments and return type.\n\
      5. Write one operation and check it with `estimate_cost` until it is valid and cheap. Nothing is sent.\n\
-     6. `execute` sends it, or a saved operation named by `operation_name`. The user approves each request unless their config says otherwise.\n\
+     6. `execute` sends it, or a saved operation named by `operation_name`. The user approves each request unless \
+     their config says otherwise.\n\
+     7. A response too long to show is written to a file, and `execute` returns its path, a preview and its shape. \
+     `read_result` then returns any part of it by a path, without sending anything: use it rather than running the \
+     operation again.\n\
      GraphQL habits that matter here: take every field and argument name from the schema, never from memory. \
      Select only the fields you need, since there is no wildcard. Name the operation and pass inputs as \
      variables, not as values pasted into the text: the user reads both when approving. Give lists a page size, \
@@ -60,6 +65,8 @@ pub(crate) struct Fieldtrip {
     outstanding: Arc<Outstanding>,
     /// Where each `execute` attempt is recorded.
     audit: Arc<Audit>,
+    /// Where responses too long to show are written.
+    results: Arc<Results>,
     /// The tools this server offers. `history` is left out when there is no audit log to read.
     tools: Arc<ToolRouter<Self>>,
 }
@@ -242,10 +249,10 @@ struct ExecuteArguments {
     select: Option<String>,
     /// Whether to save the whole response to a file.
     #[schemars(
-        description = "Optional. Set to `true` to write the whole response to a new file that fieldtrip names, and \
-                       get back its path and size with a short preview instead of the response. Use it when the \
-                       response may be large and you can read files, or need all of it but not in your context. It \
-                       changes neither what is sent nor what the user approves."
+        description = "Optional. Set to `true` to write the whole response to a new file that fieldtrip names, \
+                       whatever its size, and get back its path and size with the response or a short preview of it. \
+                       A long response is written to a file without this. Use it when you want a small one on disk \
+                       too. It changes neither what is sent nor what the user approves."
     )]
     #[serde(default)]
     save: bool,
@@ -288,9 +295,55 @@ const SAVED_PREVIEW: usize = 4_000;
 /// Room kept in a result for the note that follows a summary.
 const NOTE_ROOM: usize = 500;
 
+/// The least room the preview of a saved response gets, however long the `errors` before it are: this much, or a
+/// quarter of what the result may hold when that is less.
+const MIN_PREVIEW: usize = 1_000;
+
+/// The most paths shown of a response's shape.
+const SHAPE_PATHS: usize = 40;
+
+/// The most characters of one line of a response's shape.
+const SHAPE_LINE: usize = 200;
+
+/// The shape of `body`, a response that was written to a file, in at most `budget` characters: a heading, then one
+/// line per path. Empty when the body is not JSON.
+fn shape_of(body: &str, budget: usize) -> String {
+    let Ok(response) = serde_json::from_str::<serde_json::Value>(body) else {
+        return String::new();
+    };
+    let lines = shape::lines(&response);
+    let mut out = "\nShape of the whole response, one line per path. `nodes[50]` is a list of 50 items, and `select` \
+                   takes one with `nodes[0]` or all with `nodes[*]`:"
+        .to_owned();
+    let mut room = budget.saturating_sub(out.chars().count() + 40);
+    let mut shown = 0;
+    for line in lines.iter().take(SHAPE_PATHS) {
+        let mut line: String = line.chars().take(SHAPE_LINE).collect();
+        if line.chars().count() == SHAPE_LINE {
+            line.push('…');
+        }
+        let length = line.chars().count() + 1;
+        if length > room {
+            break;
+        }
+        room -= length;
+        let _ = write!(out, "\n{line}");
+        shown += 1;
+    }
+    match lines.len() - shown {
+        0 => {}
+        1 => out.push_str("\n… and 1 more path."),
+        more => {
+            let _ = write!(out, "\n… and {more} more paths.");
+        }
+    }
+    out
+}
+
 /// The result of `execute`: `head`, which ends with the errors, then each of the `rest` of the response's parts as
-/// the server wrote it when they fit in the `room`, or a summary of them that is still valid JSON when not.
-fn shown(head: String, rest: &[(String, Box<RawValue>)], room: response::Room) -> String {
+/// the server wrote it when they fit in the `room`, or a summary of them that is still valid JSON when not. `shape`
+/// follows a summary of a response that was written to a file.
+fn shown(head: String, rest: &[(String, Box<RawValue>)], room: response::Room, shape: &str) -> String {
     let limit = room.limit();
     let mut written = String::new();
     for (name, value) in rest {
@@ -304,14 +357,69 @@ fn shown(head: String, rest: &[(String, Box<RawValue>)], room: response::Room) -
         .iter()
         .filter_map(|(name, value)| Some((name.clone(), serde_json::from_str(value.get()).ok()?)))
         .collect();
-    let space = limit.saturating_sub(head.chars().count() + NOTE_ROOM);
+    let mut space = limit.saturating_sub(head.chars().count() + NOTE_ROOM + shape.chars().count());
+    if room.is_of_a_file() {
+        // Errors are never cut, and can use the room up. The preview is all the result shows of the rest.
+        space = space.max(MIN_PREVIEW.min(limit / 4));
+    }
     match response::summarize(&parts, space) {
         Some(summary) => {
             let note = response::note(&summary, length, room);
-            format!("{head}{}\n{note}", summary.lines)
+            format!("{head}{}\n{note}{shape}", summary.lines)
+        }
+        None if room.is_of_a_file() => {
+            let limit = limit.saturating_sub(shape.chars().count());
+            capped_after(head, &written, limit, "The file has all of it.") + shape
         }
         None => capped_after(head, &written, limit, ASK_FOR_LESS),
     }
+}
+
+/// What a result shows of the GraphQL response `body`, whose top-level members are `parts`.
+///
+/// `summary` comes first, then a line for each connection with more pages, then `saved_note`. Errors follow, whole,
+/// because they say what went wrong. After them comes the part `select` picked, or `data` and the rest, cut to fit
+/// the `room`, and the shape of the response when a preview of a file was cut.
+fn laid_out(
+    summary: String,
+    saved_note: &str,
+    body: &str,
+    mut parts: BTreeMap<String, Box<RawValue>>,
+    select: Option<&select::Path>,
+    room: response::Room,
+) -> String {
+    let mut head = summary;
+    let data = parts.get("data").and_then(|data| serde_json::from_str(data.get()).ok());
+    for hint in data.as_ref().map_or_else(Vec::new, response::page_hints) {
+        let _ = write!(head, "\n{hint}");
+    }
+    head.push_str(saved_note);
+    let errors = parts.remove("errors");
+    let rest = if let Some(path) = select {
+        let picked =
+            serde_json::from_str(body).map_or_else(|_error| select::Selected::nothing(), |whole| path.select(&whole));
+        let _ = write!(head, "\n{}", picked.line);
+        if let Some(errors) = errors.filter(|_| !path.is_in_errors()) {
+            let _ = write!(head, "\nerrors: {}", errors.get().trim());
+        }
+        picked
+            .value
+            .and_then(|value| serde_json::value::to_raw_value(&value).ok())
+            .map(|value| ("selected".to_owned(), value))
+            .into_iter()
+            .collect()
+    } else {
+        if let Some(errors) = errors {
+            let _ = write!(head, "\nerrors: {}", errors.get().trim());
+        }
+        let data = parts.remove("data").map(|data| ("data".to_owned(), data));
+        data.into_iter().chain(parts).collect::<Vec<_>>()
+    };
+    let shape = match room {
+        response::Room::Preview(limit) => shape_of(body, limit / 3),
+        response::Room::Result(_) | response::Room::Selection(_) | response::Room::Read(_) => String::new(),
+    };
+    shown(head, &rest, room, &shape)
 }
 
 /// How `execute` says to get a smaller result.
@@ -618,6 +726,25 @@ struct HistoryArguments {
     limit: Option<usize>,
 }
 
+/// Arguments of `read_result`.
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+struct ReadResultArguments {
+    /// The result to read.
+    #[schemars(
+        description = "The ID of a response that `execute` wrote to a file, such as `acme-prod-1b4e28ba9f3c`, or \
+                       the file's path. Both are in `execute`'s result, where it says the response was saved. No \
+                       other file can be read."
+    )]
+    result: String,
+    /// A path that picks part of the response.
+    #[schemars(description = "A path that picks part of the saved response, such as \
+                       `data.repository.issues.nodes[*].number`, written as for `execute`: it starts at `data`, \
+                       `errors` or `extensions`, names are joined by `.`, `[0]` takes one item of a list and `[*]` \
+                       every item. Take the names from the shape `execute` showed. Leave it out to see the preview \
+                       and the shape again.")]
+    select: Option<String>,
+}
+
 /// Arguments of `introspect`.
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 struct IntrospectArguments {
@@ -641,11 +768,15 @@ impl Fieldtrip {
         if audit.path().is_none() {
             tools.remove_route("history");
         }
+        let results = Results::new(audit.session(), config.result_ttl);
+        // Earlier sessions leave their files behind, so the ones that are too old are cleared out now.
+        results.sweep();
         Self {
             config: Arc::new(config),
             schemas: Arc::default(),
             http,
             outstanding: Arc::default(),
+            results: Arc::new(results),
             audit: Arc::new(audit),
             tools: Arc::new(tools),
         }
@@ -941,11 +1072,13 @@ impl Fieldtrip {
                        request (`sent X-Correlation-Id ...`), and any response headers the user chose to show, such \
                        as a request or trace ID. Give those IDs to the user when something needs looking up in the \
                        server's logs; a generated one is shown even when no answer came. Then come `errors`, \
-                       in full, then `data`, then any `extensions`, each as the server wrote it. When those after \
-                       `errors` are too long for one result, they come back as a summary that is still valid JSON, \
-                       with long lists cut to their first items, each cut marked with what it dropped. To keep a \
-                       large response out of your context, pass `select` to pick the part you need, or `save` to \
-                       write all of it to a file and get its path and a preview. A connection with \
+                       in full, then `data`, then any `extensions`, each as the server wrote it. A response too \
+                       long to show is written whole to a file instead: the result gives the file's path, `errors` \
+                       in full, a preview that is still valid JSON, with long lists and strings cut and each cut \
+                       marked with what it dropped, and the shape of the response, one line per path with its type \
+                       and size. Nothing was lost, so do not send the operation again to see more: `read_result` returns \
+                       any part of the file by a path. To get one part in this result, pass `select`. Pass `save` to have a short response written to a file too. A \
+                       connection with \
                        `hasNextPage: true` is pointed out with its cursor: page through it with `after` rather than \
                        raising `first`. A response \
                        can hold both `data` and `errors`: read both, because one field can fail while the rest \
@@ -1058,7 +1191,23 @@ impl Fieldtrip {
             .http
             .post(endpoint, &plan.payload(&variables), endpoint.max_response_bytes)
             .await;
-        let outcome = sent.as_ref().map_or_else(Outcome::Failed, Outcome::Answered);
+        // A response too long to show is written to a file whole, so nothing has to be sent again to see the rest.
+        // It is written before the attempt is recorded, so the audit log can name the file.
+        let inline = endpoint.inline_limit();
+        let written = sent
+            .as_ref()
+            .ok()
+            .filter(|reply| !reply.cut_short)
+            .map(|reply| (reply, reply.body.chars().count()))
+            .filter(|(_, length)| arguments.save || *length > inline)
+            .map(|(reply, length)| (length, self.results.write(name, &reply.body)));
+        let result = written
+            .as_ref()
+            .and_then(|(_, stored)| stored.as_ref().ok())
+            .map(|stored| stored.id.as_str());
+        let outcome = sent
+            .as_ref()
+            .map_or_else(Outcome::Failed, |reply| Outcome::Answered(reply, result));
         self.audit.record(endpoint, &attempt, &verdict, outcome).await;
         let reply = sent.map_err(String::from)?;
         let mut summary = format!(
@@ -1096,67 +1245,122 @@ impl Fieldtrip {
                 Err(text)
             };
         }
-        let (summary, room) = if arguments.save {
-            match saved::save(name, &reply.body) {
-                Ok(path) => (
+        let (saved_note, room) = match written {
+            Some((length, Ok(stored))) => {
+                let why = if length > inline {
                     format!(
-                        "{summary}\nSaved the whole response, {} bytes, to {}",
+                        "\nThe response has {} characters, more than the {} that are shown here \
+                         (`max_inline_chars`), so it was saved instead.",
+                        shape::grouped(length),
+                        shape::grouped(inline)
+                    )
+                } else {
+                    String::new()
+                };
+                let room = if select.is_some() {
+                    response::Room::Selection(inline)
+                } else {
+                    response::Room::Preview(inline.min(SAVED_PREVIEW))
+                };
+                (
+                    format!(
+                        "{why}\nSaved the whole response, {} bytes, to {}\n`read_result` with `result: \"{}\"` and a \
+                         `select` path returns any part of it, and sends nothing.",
                         reply.body.len(),
-                        path.display()
+                        stored.path.display(),
+                        stored.id
                     ),
-                    response::Room::Preview(endpoint.max_output_chars.min(SAVED_PREVIEW)),
-                ),
-                Err(error) => (
-                    format!("{summary}\nThe response was not saved: {error}."),
-                    response::Room::Result(endpoint.max_output_chars),
-                ),
+                    room,
+                )
             }
-        } else {
-            (summary, response::Room::Result(endpoint.max_output_chars))
+            Some((_, Err(error))) => (
+                format!("\nThe response was not saved: {error}."),
+                response::Room::Result(endpoint.max_output_chars),
+            ),
+            None => (String::new(), response::Room::Result(endpoint.max_output_chars)),
         };
-        let Ok(mut parts) = serde_json::from_str::<BTreeMap<String, Box<RawValue>>>(&reply.body) else {
+        let Ok(parts) = serde_json::from_str::<BTreeMap<String, Box<RawValue>>>(&reply.body) else {
             let excerpt: String = reply.body.chars().take(EXCERPT).collect();
-            return Err(format!("{summary}\nThe response was not a GraphQL response: {excerpt}"));
+            return Err(format!(
+                "{summary}{saved_note}\nThe response was not a GraphQL response: {excerpt}"
+            ));
         };
         if !parts.contains_key("errors") && !parts.contains_key("data") {
             return Err(capped(
                 format!(
-                    "{summary}\nThe response has neither `data` nor `errors`, so it is not a GraphQL response:\n{}",
+                    "{summary}{saved_note}\nThe response has neither `data` nor `errors`, so it is not a GraphQL \
+                     response:\n{}",
                     reply.body.trim()
                 ),
-                endpoint.max_output_chars,
-                ASK_FOR_LESS,
+                room.limit(),
+                if room.is_of_a_file() {
+                    "The file has all of it."
+                } else {
+                    ASK_FOR_LESS
+                },
             ));
         }
 
-        // Errors come first and whole, because they say what went wrong. What follows them is cut to fit.
-        let mut head = summary;
-        let data = parts.get("data").and_then(|data| serde_json::from_str(data.get()).ok());
-        for hint in data.as_ref().map_or_else(Vec::new, response::page_hints) {
-            let _ = write!(head, "\n{hint}");
-        }
-        let errors = parts.remove("errors");
-        let rest = if let Some(path) = &select {
-            let picked = serde_json::from_str(&reply.body)
-                .map_or_else(|_error| select::Selected::nothing(), |whole| path.select(&whole));
-            let _ = write!(head, "\n{}", picked.line);
-            if let Some(errors) = errors.filter(|_| !path.is_in_errors()) {
-                let _ = write!(head, "\nerrors: {}", errors.get().trim());
-            }
-            picked
-                .value
-                .and_then(|value| serde_json::value::to_raw_value(&value).ok())
-                .map(|value| ("selected".to_owned(), value))
-                .into_iter()
-                .collect()
-        } else {
-            if let Some(errors) = errors {
-                let _ = write!(head, "\nerrors: {}", errors.get().trim());
-            }
-            let data = parts.remove("data").map(|data| ("data".to_owned(), data));
-            data.into_iter().chain(parts).collect::<Vec<_>>()
+        Ok(finished(laid_out(
+            summary,
+            &saved_note,
+            &reply.body,
+            parts,
+            select.as_ref(),
+            room,
+        )))
+    }
+
+    #[tool(
+        title = "Read part of a saved GraphQL response",
+        description = "Return part of a response that `execute` wrote to a file because it was too long to show, or \
+                       because you passed `save`. Use it instead of running the operation again when you want to \
+                       look at another part: it reads the file and sends nothing to the endpoint, so it needs no \
+                       approval and costs the API nothing. Pass the result ID or the path from `execute`'s result \
+                       as `result`, and a `select` path such as `data.repository.issues.nodes[*].number`, using the \
+                       names in the shape `execute` showed. It returns `errors` in full, then the selected part as \
+                       JSON. A selection too long for one result is cut by structure, with each cut marked: narrow \
+                       the path, for instance to one item with `[0]`, to get a part whole. Without `select` it \
+                       returns the preview and the shape again. A path that matches nothing says what is there. The \
+                       file holds the response as it was when it arrived: to see current data, run the operation \
+                       again with `execute`.",
+        annotations(read_only_hint = true, open_world_hint = false)
+    )]
+    fn read_result(&self, Parameters(arguments): Parameters<ReadResultArguments>) -> ToolResult {
+        let select = arguments
+            .select
+            .as_deref()
+            .map(select::Path::parse)
+            .transpose()
+            .map_err(|error| error.replace(" Nothing was sent.", ""))?;
+        let stored = self.results.find(&arguments.result)?;
+        let body = std::fs::read_to_string(&stored.path).map_err(|error| {
+            format!(
+                "Could not read the result `{}` at {}: {error}",
+                stored.id,
+                stored.path.display()
+            )
+        })?;
+        let summary = format!(
+            "Result `{}`: {} bytes, in {}. Nothing was sent to the endpoint.",
+            stored.id,
+            shape::grouped(body.len()),
+            stored.path.display()
+        );
+        let Ok(parts) = serde_json::from_str::<BTreeMap<String, Box<RawValue>>>(&body) else {
+            let excerpt: String = body.chars().take(EXCERPT).collect();
+            return Err(format!(
+                "{summary}\nThe file does not hold a GraphQL response: it is not JSON, or not a JSON object, so \
+                 `select` has nothing to pick from. It begins: {excerpt}"
+            ));
         };
-        Ok(finished(shown(head, &rest, room)))
+        let (output, inline) = self.limits_of(&stored.id);
+        let room = if select.is_some() {
+            response::Room::Read(output)
+        } else {
+            response::Room::Preview(inline.min(SAVED_PREVIEW))
+        };
+        Ok(laid_out(summary, "", &body, parts, select.as_ref(), room))
     }
 
     #[tool(
@@ -1169,8 +1373,11 @@ impl Fieldtrip {
                        unless the user keeps them out, and `approval`: `accepted`, `auto` or `client` for one that \
                        was sent, with its HTTP `status`, time in `ms` and number of `errors`, or `declined`, \
                        `cancelled`, `unavailable`, `failed` or `denied` with a `reason` for one that was not. The \
-                       first line names this session. Responses are not recorded: run the operation again to see \
-                       data. Do not send again what the user declined unless they ask for it.",
+                       first line names this session. A response is not in the log, but a line with a `result` \
+                       is an attempt whose response was written to a file: the files that still exist are listed \
+                       after the lines, and `read_result` reads them without sending anything. For any other \
+                       attempt, run the operation again to see data. Do not send again what the user declined \
+                       unless they ask for it.",
         annotations(read_only_hint = true, open_world_hint = false)
     )]
     fn history(&self, Parameters(arguments): Parameters<HistoryArguments>) -> ToolResult {
@@ -1238,6 +1445,7 @@ impl Fieldtrip {
         for line in shown {
             let _ = write!(out, "\n{line}");
         }
+        out.push_str(&self.result_files(shown));
         let dropped = recent.len() - kept;
         if dropped > 0 {
             let attempts = if dropped == 1 { "attempt" } else { "attempts" };
@@ -1301,6 +1509,68 @@ impl Fieldtrip {
             format!("{INSTRUCTIONS}{HISTORY_INSTRUCTIONS}")
         } else {
             INSTRUCTIONS.to_owned()
+        }
+    }
+
+    /// The `max_output_chars` and the inline limit that apply to the result called `id`: those of the endpoint it
+    /// is named after, or the smallest of any endpoint when that one is no longer configured.
+    fn limits_of(&self, id: &str) -> (usize, usize) {
+        let endpoints = &self.config.endpoints;
+        let named = endpoints
+            .iter()
+            .filter(|(name, _)| id.strip_prefix(name.as_str()).is_some_and(|rest| rest.starts_with('-')))
+            .max_by_key(|(name, _)| name.len());
+        named.map_or_else(
+            || {
+                let smallest =
+                    |limit: fn(&Endpoint) -> usize| endpoints.values().map(limit).min().unwrap_or(usize::MAX);
+                (
+                    smallest(|endpoint| endpoint.max_output_chars),
+                    smallest(Endpoint::inline_limit),
+                )
+            },
+            |(_, endpoint)| (endpoint.max_output_chars, endpoint.inline_limit()),
+        )
+    }
+
+    /// A note for `history` about the attempts in `lines` whose response was written to a file: which files are
+    /// still there, and how many are gone. Empty when no line names a result.
+    fn result_files(&self, lines: &[String]) -> String {
+        self.results.sweep();
+        let mut there = Vec::new();
+        let mut gone = 0_usize;
+        for line in lines {
+            let Ok(entry) = serde_json::from_str::<serde_json::Value>(line) else {
+                continue;
+            };
+            let text = |key: &str| entry.get(key).and_then(serde_json::Value::as_str);
+            let (Some(session), Some(id)) = (text("session"), text("result")) else {
+                continue;
+            };
+            match results::existing(session, id) {
+                Some(path) => there.push(format!("`{id}` in {}", path.display())),
+                None => gone += 1,
+            }
+        }
+        let deleted = match gone {
+            0 => String::new(),
+            1 => " 1 other has been deleted.".to_owned(),
+            many => format!(" {many} others have been deleted."),
+        };
+        let kept = show_duration(self.config.result_ttl);
+        if there.is_empty() && gone == 0 {
+            String::new()
+        } else if there.is_empty() {
+            format!(
+                "\n[The responses these attempts name by `result` were in files that have been deleted, which \
+                 happens {kept} after one is written (`result_ttl`). Run an operation again to see its data.]"
+            )
+        } else {
+            format!(
+                "\n[Responses still in files, named by `result` above. `read_result` returns any part of one \
+                 without sending anything: {}.{deleted} A file is deleted {kept} after it is written (`result_ttl`).]",
+                there.join(", ")
+            )
         }
     }
 

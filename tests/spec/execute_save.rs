@@ -1,5 +1,6 @@
 //! Slice 34: `save` writes the whole response to a new file that fieldtrip names, in its cache directory, and the
-//! result gives the path, the size and a short preview instead of the response.
+//! result gives the path, the size and a short preview instead of the response. Since slice 54 the file is in a
+//! directory of the session's own, and a preview that was cut is followed by the shape of the response.
 
 use std::path::{Path, PathBuf};
 
@@ -68,9 +69,9 @@ fn a_large_response_is_saved_whole_and_previewed() {
     let (path, size) = saved(&reply);
     assert_eq!(size, body.len(), "the size is the body's");
     assert_eq!(
-        path.parent(),
+        path.parent().and_then(Path::parent),
         Some(responses(&mcp).as_path()),
-        "it is in fieldtrip's cache directory"
+        "it is in fieldtrip's cache directory, in a directory for this session"
     );
     assert!(
         path.file_name()
@@ -90,7 +91,11 @@ fn a_large_response_is_saved_whole_and_previewed() {
         "the result is only a preview: {}",
         reply.text.chars().count()
     );
-    let note = reply.text.lines().last().unwrap_or_default();
+    let note = reply
+        .text
+        .lines()
+        .find(|line| line.starts_with("[The result would have "))
+        .unwrap_or_default();
     assert!(
         note.contains("shown of a saved response") && note.contains("The file has all of it"),
         "{note}"
@@ -221,4 +226,9 @@ fn only_the_user_can_read_a_saved_response() {
     let mode = |path: &Path| std::fs::metadata(path).expect("metadata").permissions().mode() & 0o777;
     assert_eq!(mode(&path), 0o600, "the file is the user's alone");
     assert_eq!(mode(&responses(&mcp)), 0o700, "so is the directory");
+    assert_eq!(
+        path.parent().map(mode),
+        Some(0o700),
+        "and the session's directory in it"
+    );
 }

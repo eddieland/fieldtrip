@@ -137,4 +137,9 @@ fn hints_come_with_a_selection_and_with_a_summary() {
         );
     }
     assert!(summarized.text.contains("this is a summary"), "{}", summarized.text);
+    assert!(
+        summarized.text.contains("Saved the whole response, "),
+        "the hint comes with a response that went to a file too: {}",
+        summarized.text
+    );
 }

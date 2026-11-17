@@ -1,5 +1,8 @@
 //! Slice 32: when the parts after `errors` are too long for a result, they are summarized by structure. `errors`
 //! stays whole, each part is still valid JSON, and each cut list or string says how much it dropped.
+//!
+//! Since slice 54 a response this long is written to a file, and the summary is the preview of it: at most 4,000
+//! characters, or the endpoint's limits when they are smaller.
 
 use serde_json::{Map, Value, json};
 
@@ -31,10 +34,17 @@ fn products(count: usize, title_length: usize) -> Vec<Value> {
         .collect()
 }
 
-/// The parts of a summarized result, each parsed, in order, and the note on the last line.
+/// The parts of a summarized result, each parsed, in order, and the note that follows them.
 fn parts(reply: &Reply) -> (Vec<(String, Value)>, String) {
-    let lines: Vec<&str> = reply.text.lines().skip(2).collect();
+    let lines: Vec<&str> = reply
+        .text
+        .lines()
+        .skip_while(|line| !line.starts_with("`read_result` with "))
+        .skip(1)
+        .take_while(|line| !line.starts_with("Shape of the whole response"))
+        .collect();
     let (note, parts) = lines.split_last().expect("there is a note");
+    assert!(note.starts_with("[The result would have "), "{note}");
     let parts = parts
         .iter()
         .map(|line| {
@@ -70,10 +80,10 @@ fn a_large_data_is_summarized_after_whole_errors() {
         "path": ["products", 4999, "title"],
         "extensions": { "code": "INTERNAL_SERVER_ERROR" },
     }]);
-    // Many servers write `errors` after `data`. Here `data` alone is about 5 MB.
+    // Many servers write `errors` after `data`. Here `data` alone is over 1 MB.
     let body = format!(
         "{{\"data\":{},\"errors\":{errors},\"extensions\":{{\"cost\":5000}}}}",
-        json!({ "products": products(5000, 1000) })
+        json!({ "products": products(5000, 300) })
     );
     let (mut mcp, _mock) = start(body, "");
 
@@ -81,8 +91,8 @@ fn a_large_data_is_summarized_after_whole_errors() {
 
     assert!(!reply.is_error, "a response with data is a result: {}", reply.text);
     assert!(
-        reply.text.chars().count() <= 40_000,
-        "the result fits the cap: {}",
+        reply.text.chars().count() <= 4_000,
+        "the result is a preview: {}",
         reply.text.chars().count()
     );
     let (parts, note) = parts(&reply);
@@ -94,7 +104,12 @@ fn a_large_data_is_summarized_after_whole_errors() {
         &json!({ "cost": 5000 }),
         "small parts are whole"
     );
-    for phrase in ["`max_output_chars`", "valid JSON", "`errors` is whole", "`select`"] {
+    for phrase in [
+        "shown of a saved response",
+        "valid JSON",
+        "`errors` is whole",
+        "The file has all of it",
+    ] {
         assert!(note.contains(phrase), "the note says {phrase:?}: {note}");
     }
     let list = part(&parts, "data")["products"].as_array().expect("the list is kept");
@@ -105,7 +120,7 @@ fn a_large_data_is_summarized_after_whole_errors() {
         5000,
         "the marker says how many were dropped"
     );
-    assert_eq!(kept.first(), Some(&json!({ "id": "p-0", "title": "t".repeat(1000) })));
+    assert_eq!(kept.first(), Some(&json!({ "id": "p-0", "title": "t".repeat(300) })));
     assert!(
         note.contains(&format!("lists to their first {} items", kept.len())),
         "the note says how many items each list kept: {note}"
@@ -113,9 +128,9 @@ fn a_large_data_is_summarized_after_whole_errors() {
 }
 
 #[test]
-fn a_body_just_over_the_cap_is_summarized() {
-    let body = json!({ "data": { "products": products(400, 80) } }).to_string();
-    assert!(body.len() > 40_000 && body.len() < 45_000, "{}", body.len());
+fn a_body_just_over_the_limit_is_summarized() {
+    let body = json!({ "data": { "products": products(100, 80) } }).to_string();
+    assert!(body.len() > 10_000 && body.len() < 12_000, "{}", body.len());
     let (mut mcp, _mock) = start(body, "");
 
     let reply = execute(&mut mcp);
@@ -125,8 +140,8 @@ fn a_body_just_over_the_cap_is_summarized() {
     assert!(note.contains("this is a summary"), "{note}");
     let list = part(&parts, "data")["products"].as_array().expect("the list is kept");
     let (marker, kept) = list.split_last().expect("the list has a marker");
-    assert_eq!(kept.len() + dropped(marker, "items"), 400);
-    assert!(kept.len() > 300, "most of it still fits: {}", kept.len());
+    assert_eq!(kept.len() + dropped(marker, "items"), 100);
+    assert!(kept.len() > 20, "as much as the preview holds is kept: {}", kept.len());
 }
 
 #[test]
@@ -153,11 +168,11 @@ fn a_long_string_is_cut_and_says_how_much() {
 
 #[test]
 fn whitespace_alone_is_not_a_reason_to_drop_anything() {
-    let data = json!({ "products": products(200, 100) });
+    let data = json!({ "products": products(15, 100) });
     let body = serde_json::to_string_pretty(&json!({ "data": data }))
         .expect("pretty JSON")
-        .replace("  ", "        ");
-    assert!(body.len() > 40_000, "{}", body.len());
+        .replace("  ", &" ".repeat(64));
+    assert!(body.len() > 10_000, "{}", body.len());
     let (mut mcp, _mock) = start(body, "");
 
     let reply = execute(&mut mcp);

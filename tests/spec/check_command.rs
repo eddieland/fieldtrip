@@ -44,6 +44,7 @@ fn a_good_config_passes_and_shows_what_each_endpoint_resolves_to() {
     let dir = checked.dir.path();
     let expected = format!(
         "Config: {config}\n\
+         Result files: {results}, deleted after 1 day\n\
          \n\
          store\n  \
            description: The store.\n  \
@@ -54,6 +55,7 @@ fn a_good_config_passes_and_shows_what_each_endpoint_resolves_to() {
            assumed list size: 10\n  \
            max response bytes: 8 MiB\n  \
            max output chars: 40000\n  \
+           max inline chars: 10000\n  \
            schema: file {schema}: ok\n  \
            cost map: {costs} (2 rules): warning: These rules match nothing in this schema: `Product.nope`.\n  \
            header Authorization: command `sh`, formatted, reused for 300s: ok\n  \
@@ -62,6 +64,7 @@ fn a_good_config_passes_and_shows_what_each_endpoint_resolves_to() {
          \n\
          0 problems, 1 warning.\n",
         config = dir.join("fieldtrip.toml").display(),
+        results = dir.join("cache-home").join("fieldtrip").join("responses").display(),
         url = mock.url(),
         schema = dir.join("schema.graphql").display(),
         costs = dir.join("store.costs.toml").display(),
@@ -140,7 +143,8 @@ fn check_works_with_url_flags() {
 
     assert!(checked.passed, "{}{}", checked.stdout, checked.stderr);
     assert!(
-        checked.stdout.starts_with("Config: from --url\n\ndefault\n"),
+        checked.stdout.starts_with("Config: from --url\nResult files: ")
+            && checked.stdout.contains(", deleted after 1 day\n\ndefault\n"),
         "{}",
         checked.stdout
     );

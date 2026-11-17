@@ -196,14 +196,20 @@ fn a_large_selection_is_summarized() {
 
     let reply = execute(&mut mcp, "data.products[*].title");
 
-    assert!(reply.text.chars().count() <= 40_000, "{}", reply.text.chars().count());
+    assert!(reply.text.chars().count() <= 10_000, "{}", reply.text.chars().count());
     let (lines, json) = lines_and_json(&reply);
-    assert_eq!(
-        lines.first().copied(),
-        Some("Selected `data.products[*].title`: 1000 matches, as a list.")
+    assert!(
+        lines.contains(&"Selected `data.products[*].title`: 1000 matches, as a list."),
+        "{lines:?}"
     );
     assert!(
-        lines.last().is_some_and(|note| note.contains("this is a summary")),
+        lines.iter().any(|line| line.starts_with("Saved the whole response, ")),
+        "a response this long is in a file: {lines:?}"
+    );
+    assert!(
+        lines
+            .last()
+            .is_some_and(|note| note.contains("this is a summary") && note.contains("`max_inline_chars`")),
         "{lines:?}"
     );
     let selected = json["selected"].as_array().expect("a list");

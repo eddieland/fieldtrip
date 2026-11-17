@@ -15,7 +15,7 @@ schema = "schema.graphql"
 "#;
 
 /// The tools in the order a calling agent uses them.
-const WORKFLOW: [&str; 7] = [
+const WORKFLOW: [&str; 8] = [
     "list_endpoints",
     "list_operations",
     "introspect",
@@ -23,6 +23,7 @@ const WORKFLOW: [&str; 7] = [
     "describe",
     "estimate_cost",
     "execute",
+    "read_result",
 ];
 
 /// The tool called `name` in `tools`.
@@ -104,6 +105,11 @@ fn annotations_say_only_execute_can_change_anything() {
         Some(false),
         "list_endpoints only reads the config"
     );
+    assert_eq!(
+        hint(tool(&tools, "read_result"), "openWorldHint"),
+        Some(false),
+        "read_result only reads a file fieldtrip wrote"
+    );
 }
 
 #[test]
@@ -136,12 +142,13 @@ fn descriptions_carry_the_graphql_habits_where_they_apply() {
     let tools = mcp.tool_list();
     let description = |name: &str| text(tool(&tools, name), "/description").to_owned();
 
-    let expectations: [(&str, &[&str]); 5] = [
+    let expectations: [(&str, &[&str]); 6] = [
         ("introspect", &["`search_schema`", "`describe`"]),
         ("search_schema", &["`describe`"]),
         ("describe", &["deprecated", "... on"]),
         ("estimate_cost", &["`execute`", "`first`", "without sending"]),
         ("execute", &["`estimate_cost`", "variables", "`errors`", "declines"]),
+        ("read_result", &["`execute`", "`select`", "sends nothing"]),
     ];
     for (name, phrases) in expectations {
         let description = description(name);

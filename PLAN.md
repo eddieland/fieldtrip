@@ -303,3 +303,29 @@ cargo test --workspace --all-features
   outside `[glossary]`, a term with no words or no targets, two terms that differ only in case, or a target that is
   not a `Type` or `Type.member` stop the server at startup.
   Done when: `cargo test glossary`
+- [x] **54. Large responses go to a file.** A response to `execute` longer than `max_inline_chars`, 10,000 unless an
+  endpoint or its template sets it, is written whole to a new file in a directory of the session's own under
+  `fieldtrip/responses`, named after the endpoint. The result gives the path and size, `errors` in full, a preview of
+  at most 4,000 characters cut like any summary, and the shape of the response: one line per path with its type, list
+  lengths and long strings' lengths, such as `data.products[200].title: string (100 chars)`, at most 40 lines. A
+  response under the limit is shown as before and writes nothing. With `select` the file is still written and the
+  selection is shown, cut when it is longer than the limit itself. The limit never exceeds `max_output_chars`, one
+  under 1,000 stops the server, and `fieldtrip check` shows it. `save` still forces a file at any size.
+  Done when: `cargo test response_spill`
+- [x] **55. `read_result`.** A read-only `read_result` tool takes `result`, the ID or the path that `execute` gave
+  for a response it wrote to a file, and an optional `select` path, and returns `errors` in full and then that part of
+  the file, without a request to the endpoint. A selection too long for `max_output_chars` is cut like any summary, a
+  path that misses says what is there, and with no path the preview and the shape come back. A path outside
+  fieldtrip's responses directory is refused, however it is written, and an unknown ID is answered with this session's
+  results. A result of an earlier session is found by its ID. `execute` names the ID and the tool where it says the
+  response was saved, and the instructions say to read a result rather than send the operation again.
+  Done when: `cargo test read_result`
+- [x] **56. Response files are deleted, and `history` lists them.** A response file is deleted `result_ttl` seconds
+  after it was written, a day unless the top of the config sets it: at startup, before the next file is written, and
+  before `read_result` looks for one, whichever session wrote it. An emptied directory of another session is removed,
+  a file `save` wrote before sessions had directories is deleted the same way, and a file fieldtrip did not write is
+  left alone. `read_result` on a deleted result says how long files are kept. `result_ttl = 0` stops the server, and
+  `fieldtrip check` shows the directory and the time. With `audit_log` set, the line for an attempt whose response
+  went to a file has `result`, its ID, and `history` lists after its lines the files that still exist, with their
+  paths, and counts the ones that are gone.
+  Done when: `cargo test result_files`
