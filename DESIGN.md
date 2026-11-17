@@ -25,7 +25,7 @@ in the user's config, out of the agent's sight and out of its control.
 | `list_endpoints` | none | Each endpoint's name, URL, schema source, header names and header commands' last run |
 | `list_operations` | `endpoint`, `query?`, `uses?`, `kind?`, `name?` | Saved operations: name, kind, description, variables, cost, text |
 | `introspect` | `endpoint`, `refresh?` | Overview: root types, counts, query and mutation names |
-| `search_schema` | `endpoint`, `query` | Ranked matches as one-line signatures |
+| `search_schema` | `endpoint`, `query` | Glossary targets, then ranked matches as one-line signatures |
 | `describe` | `endpoint`, `name` (`Type` or `Type.field`) | That definition as compact SDL |
 | `estimate_cost` | `endpoint`, `operation` or `operation_name`, `variables?` | Validation errors, or cost, depth, breakdown, assumptions |
 | `execute` | `endpoint`, `operation` or `operation_name`, `variables?`, `select?`, `save?` | Status, `errors`, then the rest or a summary |
@@ -38,6 +38,7 @@ audit_log = "~/.local/state/fieldtrip/audit.jsonl"   # optional: one JSON line p
 
 [templates.acme]                             # optional: settings that several endpoints share
 costs             = "acme.costs.toml"        # optional cost map, relative to this file
+glossary          = "acme.glossary.toml"     # optional: the user's words for things in the schema
 operations        = "operations/acme/"       # optional directory of saved operations, one per .graphql file
 fragments         = "operations/acme/fragments/"   # optional directory of fragments the saved operations share
 client_directives = ["paginated", "baseClass"]     # optional: directives removed from saved operations
@@ -68,7 +69,7 @@ mutations         = "deny"                   # optional, default "prompt". A tem
 X-Api-Key = { env = "ACME_API_KEY" }
 ```
 
-An endpoint takes `schema`, `schema_ttl`, `headers`, `costs`, `operations`, `fragments`, `client_directives`,
+An endpoint takes `schema`, `schema_ttl`, `headers`, `costs`, `glossary`, `operations`, `fragments`, `client_directives`,
 `assumed_list_size`, `timeout`, `response_headers`, the three `max_` limits and `audit_variables` from its template
 unless it sets them.
 Headers merge by name, ignoring case, and the endpoint's win.
@@ -110,6 +111,21 @@ is a pattern over the fields of an operation, and sets a `cost`, a `multiplier`,
 
 A pattern is a type followed by one or more field names, and it matches a field reached through that chain. `*`
 stands for any one name. `cost` replaces what the field itself costs. `multiplier` replaces the size of a list.
+
+## Glossary
+
+People name things in the words of the product they use, not the schema's. An endpoint's `glossary` file maps each
+of the user's terms to the schema's names for it: a type, or a type and one of its fields, input fields or enum values.
+
+```toml
+[glossary]
+"PR"    = ["PullRequest"]
+"draft" = ["PullRequest.isDraft"]
+"org"   = ["Organization"]
+```
+
+`search_schema` and `list_operations` look each word of a query up here first, and mark what they found with the
+term, as in `draft → PullRequest.isDraft`.
 
 ## Approval model
 
@@ -321,3 +337,19 @@ Settled. To change one, ask the user, then add a new dated line instead of editi
   what still uses a variable. One that was unused before the directives were removed stays and is reported.
 - 2026-11-17: A dropped variable passed with `operation_name` is left out with a note, not refused, since the
   generated client would pass it. The prompt, the request and the audit log show the variables that are sent.
+- 2026-11-17: An endpoint can name a `glossary`: a TOML file whose `[glossary]` table maps each of the user's terms to
+  a list of targets, each a `Type` or a `Type.member`. It is config like the cost map: read once, at startup, no tool
+  can change it, and an endpoint takes it from its template unless it sets its own.
+- 2026-11-17: A term is one or more words, matched as whole words in a row, ignoring case and spacing. Where terms
+  overlap in a query, the longest wins.
+- 2026-11-17: `search_schema` shows the targets of each term in the query first, before saved operations and the
+  schema's own matches, each as `term → signature`. A target is not repeated among the matches below it.
+- 2026-11-17: In the `query` of `list_operations`, and in the saved operations `search_schema` lists, a term matches
+  an operation that uses one of its targets, as `uses` would, or one whose name or description holds the term. Those
+  found through a target come first and are marked `glossary: term → Target`. Every other word matches as before.
+- 2026-11-17: A glossary that is not valid stops the server at startup: a file that does not parse, a key outside
+  `[glossary]`, a term with no words or no targets, two terms that differ only in case, or a target that is not a
+  `Type` or `Type.member`. A target the schema lacks is not an error.
+- 2026-11-17: `introspect` reports the targets the schema lacks, as it does unmatched cost rules, and `check` warns
+  about them. A search for such a term still shows the target, marked as not in the schema. `list_endpoints` shows
+  the glossary file and how many terms it has.

@@ -129,7 +129,8 @@ struct SearchArguments {
     /// The words to search for.
     #[schemars(
         description = "One or more words separated by spaces, such as `refund` or `user email`. Every word must \
-                       match. Case is ignored."
+                       match. Case is ignored. Use the user's own word for a thing when they gave one: their glossary may \
+                       know it."
     )]
     query: String,
 }
@@ -153,7 +154,8 @@ struct ListOperationsArguments {
     /// Words to filter by.
     #[schemars(
         description = "Optional. One or more words separated by spaces, such as `order` or `refund payment`. Only \
-                       operations whose name or description holds every word are listed. Case is ignored. Leave it \
+                       operations whose name or description holds every word are listed. A word from the user's \
+                       glossary also matches operations that use what it stands for. Case is ignored. Leave it \
                        out to list them all."
     )]
     query: Option<String>,
@@ -368,14 +370,18 @@ fn sendable(saved: Option<&Saved>, variables: &Variables) -> (Variables, Option<
     saved.map_or_else(|| (variables.clone(), None), |saved| saved.sendable(variables))
 }
 
-/// One saved operation on one line: name, kind, cost or `BROKEN`, variables and the start of its description.
-fn summary(schema: &Loaded, name: &str, endpoint: &Endpoint, saved: &Saved) -> String {
+/// One saved operation on one line: name, kind, cost or `BROKEN`, variables, the glossary terms it was found
+/// `through` and the start of its description.
+fn summary(schema: &Loaded, name: &str, endpoint: &Endpoint, saved: &Saved, through: &[String]) -> String {
     let mut line = match saved.plan(schema, name, endpoint) {
         Ok(plan) => format!("{} ({}, cost {}", saved.name, saved.kind.keyword(), plan.cost),
         Err(_) => format!("{} ({}, BROKEN: no longer valid", saved.name, saved.kind.keyword()),
     };
     if !saved.variables.is_empty() {
         let _ = write!(line, ", {}", saved.variables.join(", "));
+    }
+    if !through.is_empty() {
+        let _ = write!(line, "; glossary: {}", through.join("; "));
     }
     line.push(')');
     if let Some(description) = &saved.description {
@@ -441,13 +447,14 @@ impl<'call> Filters<'call> {
         parts.join(", ")
     }
 
-    /// The operations of `library` that pass every filter.
-    fn apply<'library>(&self, library: &'library library::Library, schema: &Loaded) -> Vec<&'library Saved> {
-        library
-            .matching(self.query)
+    /// The operations of the `endpoint` that pass every filter, each with the glossary terms it was found through.
+    fn apply<'library>(&self, endpoint: &'library Endpoint, schema: &Loaded) -> Vec<(&'library Saved, Vec<String>)> {
+        endpoint
+            .operations
+            .matching_with(self.query, &endpoint.glossary, schema)
             .into_iter()
-            .filter(|saved| self.kind.is_none_or(|kind| saved.kind == kind))
-            .filter(|saved| saved.uses(schema, &self.selectors))
+            .filter(|(saved, _)| self.kind.is_none_or(|kind| saved.kind == kind))
+            .filter(|(saved, _)| saved.uses(schema, &self.selectors))
             .collect()
     }
 }
@@ -491,7 +498,7 @@ fn operation_list(schema: &Loaded, name: &str, endpoint: &Endpoint, filters: &Fi
 fn matching_operations(schema: &Loaded, name: &str, endpoint: &Endpoint, filters: &Filters<'_>) -> String {
     let library = &endpoint.operations;
     let total = library.operations.len();
-    let matching = filters.apply(library, schema);
+    let matching = filters.apply(endpoint, schema);
     let mut out = if filters.are_empty() {
         let source = library.source.as_ref().map(|source| source.display().to_string());
         format!(
@@ -521,9 +528,9 @@ fn matching_operations(schema: &Loaded, name: &str, endpoint: &Endpoint, filters
     };
     out.push_str(" Run one with `execute` and `operation_name`, passing the variables it declares.\n");
     if matching.len() <= FULL_LISTING {
-        for saved in matching {
+        for (saved, through) in matching {
             out.push('\n');
-            listing(&mut out, schema, name, endpoint, saved);
+            listing(&mut out, schema, name, endpoint, saved, &through);
         }
         return out;
     }
@@ -532,15 +539,18 @@ fn matching_operations(schema: &Loaded, name: &str, endpoint: &Endpoint, filters
         "More than {FULL_LISTING} match, so each is on one line, without its text. Narrow the list with `query`, \
          `uses` or `kind`, or pass `name` to see one in full.\n"
     );
-    for saved in matching {
-        let _ = writeln!(out, "{}", summary(schema, name, endpoint, saved));
+    for (saved, through) in matching {
+        let _ = writeln!(out, "{}", summary(schema, name, endpoint, saved, &through));
     }
     out
 }
 
-/// Writes one saved operation for `list_operations`.
-fn listing(out: &mut String, schema: &Loaded, name: &str, endpoint: &Endpoint, saved: &Saved) {
+/// Writes one saved operation for `list_operations`, with the glossary terms it was found `through`.
+fn listing(out: &mut String, schema: &Loaded, name: &str, endpoint: &Endpoint, saved: &Saved, through: &[String]) {
     let _ = writeln!(out, "{} ({})", saved.name, saved.kind.keyword());
+    if !through.is_empty() {
+        let _ = writeln!(out, "  glossary: {}", through.join("; "));
+    }
     if let Some(description) = &saved.description {
         let _ = writeln!(out, "  description: {description}");
     }
@@ -647,7 +657,7 @@ impl Fieldtrip {
                        one of these endpoint names, and fieldtrip talks to no other host. For each endpoint it \
                        returns the user's description of it when there is one, the URL, where the schema comes \
                        from (a file or introspection), who approves `execute` requests, `mutations: denied` when \
-                       `execute` refuses every mutation there, the cost map if there is one, how many operations \
+                       `execute` refuses every mutation there, the cost map and the glossary of the user's own words if there are any, how many operations \
                        the user has saved for `list_operations`, and the names of the headers sent with each request, so you can tell whether \
                        authentication is set up. For a header produced by a command, such as a login helper, it says \
                        how the command's last run went: ok, failed with its exit status, or not run yet. It runs \
@@ -699,6 +709,11 @@ impl Fieldtrip {
                 let plural = if rules == 1 { "" } else { "s" };
                 let _ = writeln!(out, "  cost map: {} ({rules} rule{plural})", source.display());
             }
+            if let Some(source) = &endpoint.glossary.source {
+                let terms = endpoint.glossary.len();
+                let plural = if terms == 1 { "" } else { "s" };
+                let _ = writeln!(out, "  glossary: {} ({terms} term{plural})", source.display());
+            }
             if let Some(source) = &endpoint.operations.source {
                 let count = endpoint.operations.operations.len();
                 let left_out = match endpoint.operations.operation_files_left_out() {
@@ -744,7 +759,9 @@ impl Fieldtrip {
                        marked BROKEN with what is wrong, and `execute` will not run it. Files that could not be \
                        loaded at all, such as two with one name, are listed at the end as left out. A library can \
                        hold hundreds, \
-                       so narrow it: `query` matches words in the name or description, `uses` matches operations \
+                       so narrow it: `query` matches words in the name or description, and a word from the user's \
+                       glossary also matches the operations that use what it stands for, listed first and marked \
+                       `glossary: term → name`. `uses` matches operations \
                        that select a type or a chain of fields such as `Order.payment`, and `kind` keeps queries or \
                        mutations. When more than five match, each gets one line without its text, and `name` shows \
                        one in full.",
@@ -782,7 +799,7 @@ impl Fieldtrip {
                  passing the variables it declares.\n\n",
                 saved.file.display()
             );
-            listing(&mut out, &schema, name, endpoint, saved);
+            listing(&mut out, &schema, name, endpoint, saved, &[]);
             return Ok(capped(
                 out,
                 endpoint.max_output_chars,
@@ -830,33 +847,45 @@ impl Fieldtrip {
                        (`invoice`, `refund`), not GraphQL words such as `query` or `list`. To look inside one type, \
                        add its name as a second word: `user orders`, not `User.orders`. When nothing matches, the \
                        nearest names are suggested. Operations the user saved whose name or description matches \
-                       every word are listed first: prefer one of those when it does what you need.",
+                       every word are listed first: prefer one of those when it does what you need. \
+                       When the user keeps a glossary of their own words for this API, such as `PR` for \
+                       `PullRequest`, a word from it is looked up there before anything else, and each line reads \
+                       `term → name`. So search for the user's word as they said it before trying synonyms.",
         annotations(read_only_hint = true, open_world_hint = true)
     )]
     async fn search_schema(&self, Parameters(arguments): Parameters<SearchArguments>) -> ToolResult {
         let name = &arguments.endpoint;
         let endpoint = self.endpoint(name)?;
         let schema = self.schema(name, false).await?;
-        let found = schema.search(name, &arguments.query)?;
-        let saved = endpoint.operations.matching(&arguments.query);
-        if saved.is_empty() {
-            return Ok(found + &schema.staleness());
+        let found = schema.search(name, &arguments.query, &endpoint.glossary)?;
+        let saved = endpoint
+            .operations
+            .matching_with(&arguments.query, &endpoint.glossary, &schema);
+        let mut operations = String::new();
+        if !saved.is_empty() {
+            operations.push_str(
+                "Saved operations that match, which `execute` runs by `operation_name` (`list_operations` shows them \
+                 in full):\n",
+            );
         }
-        let mut out = "Saved operations that match, which `execute` runs by `operation_name` (`list_operations` \
-                       shows them in full):\n"
-            .to_owned();
-        for saved in saved.iter().take(SEARCH_OPERATIONS) {
-            let _ = writeln!(out, "{}", summary(&schema, name, endpoint, saved));
+        for (saved, through) in saved.iter().take(SEARCH_OPERATIONS) {
+            let _ = writeln!(operations, "{}", summary(&schema, name, endpoint, saved, through));
         }
         if saved.len() > SEARCH_OPERATIONS {
             let _ = writeln!(
-                out,
+                operations,
                 "And {} more. `list_operations` with the same `query` lists them all.",
                 saved.len() - SEARCH_OPERATIONS
             );
         }
-        out.push('\n');
-        Ok(out + &found + &schema.staleness())
+        // The user's own words first, then what they saved, then the schema's matches, with a blank line between.
+        let parts = [found.glossary, operations, found.schema];
+        let parts: Vec<&str> = parts
+            .iter()
+            .map(String::as_str)
+            .filter(|part| !part.is_empty())
+            .collect();
+        Ok(parts.join("\n") + &schema.staleness())
     }
 
     #[tool(
@@ -1228,7 +1257,7 @@ impl Fieldtrip {
                        it once per endpoint to see what the API offers, then use `search_schema` and `describe` to \
                        read the fields you need. The schema stays loaded for every tool, so there is no need to send \
                        an introspection query with `execute`. It also reports cost-map rules that match nothing in \
-                       the schema. An introspected schema is kept on disk, a day unless the user's config says \
+                       the schema, and targets of the user's glossary that the schema no longer has. An introspected schema is kept on disk, a day unless the user's config says \
                        otherwise, and the result says when it came from there. When the endpoint cannot be \
                        introspected, an older copy stands in and every tool that reads it says it may be out of \
                        date. Pass `refresh` only when the API has changed since it was loaded.",
@@ -1257,9 +1286,10 @@ impl Fieldtrip {
             ),
         };
         Ok(format!(
-            "Schema for `{name}`, {source}.\n{}{}",
+            "Schema for `{name}`, {source}.\n{}{}{}",
             schema.overview(endpoint.mutations),
-            schema.cost_map_report(&endpoint.costs)
+            schema.cost_map_report(&endpoint.costs),
+            schema.glossary_report(&endpoint.glossary)
         ))
     }
 }

@@ -6,7 +6,8 @@ use apollo_compiler::Name;
 use apollo_compiler::ast::{DirectiveList, EnumValueDefinition, FieldDefinition, InputValueDefinition};
 use apollo_compiler::schema::ExtendedType;
 
-use super::{Loaded, render};
+use super::{Found, Loaded, render};
+use crate::glossary::Glossary;
 use crate::suggest::{backticked, nearest};
 
 /// How many matches a search returns.
@@ -169,12 +170,13 @@ impl Item<'_> {
     }
 }
 
-/// Searches `loaded` for `query` and returns the best matches as one-line signatures.
+/// Searches `loaded` for `query` and returns the best matches as one-line signatures, after the targets of each term
+/// of `glossary` that `query` holds.
 ///
 /// # Errors
 ///
 /// Returns a message when `query` has no words in it.
-pub(super) fn search(loaded: &Loaded, endpoint: &str, query: &str) -> Result<String, String> {
+pub(super) fn search(loaded: &Loaded, endpoint: &str, query: &str, glossary: &Glossary) -> Result<Found, String> {
     let terms: Vec<String> = query.split_whitespace().map(str::to_lowercase).collect();
     if terms.is_empty() {
         return Err("Give `query` at least one word to search for, such as part of a field or type name.".to_owned());
@@ -182,11 +184,51 @@ pub(super) fn search(loaded: &Loaded, endpoint: &str, query: &str) -> Result<Str
     let shown = terms.join(" ");
 
     let items = items(loaded);
+
+    // The user's own words come first: what each term in the query stands for, whether or not the schema's names
+    // or descriptions hold the word.
+    let (found, rest) = glossary.found(query);
+    let mut from_glossary = String::new();
+    let mut targets: Vec<usize> = Vec::new();
+    for term in &found {
+        for target in &term.targets {
+            if let Some(index) = position(&items, target)
+                && let Some(item) = items.get(index)
+            {
+                let _ = writeln!(from_glossary, "{} → {}", term.text, item.line());
+                targets.push(index);
+            } else {
+                let _ = writeln!(
+                    from_glossary,
+                    "{} → {target}  (not in this schema: the user's glossary is out of date. Tell them.)",
+                    term.text
+                );
+            }
+        }
+    }
+    if !from_glossary.is_empty() {
+        from_glossary.insert_str(
+            0,
+            &format!("From the user's glossary for `{endpoint}`, their words for things in this schema:\n"),
+        );
+    }
+    let answered = !from_glossary.is_empty() && rest.is_empty();
+    let result = |schema: String| Found {
+        glossary: from_glossary,
+        schema,
+    };
+
     let mut matches: Vec<(u32, &Item<'_>)> = items
         .iter()
-        .filter_map(|item| item.score(&terms).map(|score| (score, item)))
+        .enumerate()
+        .filter(|(index, _)| !targets.contains(index))
+        .filter_map(|(_, item)| item.score(&terms).map(|score| (score, item)))
         .collect();
     if matches.is_empty() {
+        // When the glossary answered every word, there is nothing more to say.
+        if answered {
+            return Ok(result(String::new()));
+        }
         let names = items.iter().filter(|item| item.kind_rank() <= 1).map(Item::name);
         let near = nearest(&shown, names, SUGGESTIONS);
         let mut out = format!("No matches for \"{shown}\" in `{endpoint}`.");
@@ -194,7 +236,7 @@ pub(super) fn search(loaded: &Loaded, endpoint: &str, query: &str) -> Result<Str
             let _ = write!(out, " Nearest names: {}.", backticked(near));
         }
         out.push('\n');
-        return Ok(out);
+        return Ok(result(out));
     }
     matches.sort_by(|(left_score, left), (right_score, right)| {
         right_score
@@ -205,7 +247,8 @@ pub(super) fn search(loaded: &Loaded, endpoint: &str, query: &str) -> Result<Str
 
     let count = matches.len();
     let plural = if count == 1 { "match" } else { "matches" };
-    let mut out = format!("{count} {plural} for \"{shown}\" in `{endpoint}`, best first:\n");
+    let other = if targets.is_empty() { "" } else { "other " };
+    let mut out = format!("{count} {other}{plural} for \"{shown}\" in `{endpoint}`, best first:\n");
     for (_, item) in matches.iter().take(MAX_RESULTS) {
         let _ = writeln!(out, "{}", item.line());
     }
@@ -216,7 +259,31 @@ pub(super) fn search(loaded: &Loaded, endpoint: &str, query: &str) -> Result<Str
             count - MAX_RESULTS
         );
     }
-    Ok(out)
+    Ok(result(out))
+}
+
+/// Where the glossary target `target`, a `Type` or a `Type.member`, is in `items`.
+fn position(items: &[Item<'_>], target: &str) -> Option<usize> {
+    items.iter().position(|item| match target.split_once('.') {
+        None => matches!(item, Item::Type(_)) && item.name() == target,
+        Some((parent, member)) => {
+            !matches!(item, Item::Type(_) | Item::Argument { .. })
+                && item.parents().first().copied().flatten() == Some(parent)
+                && item.name() == member
+        }
+    })
+}
+
+/// The targets of `glossary` that are not in the schema, as `` `term` → `target` ``.
+pub(super) fn missing_targets(loaded: &Loaded, glossary: &Glossary) -> Vec<String> {
+    let items = items(loaded);
+    glossary
+        .terms()
+        .iter()
+        .flat_map(|term| term.targets.iter().map(move |target| (term, target)))
+        .filter(|(_, target)| position(&items, target).is_none())
+        .map(|(term, target)| format!("`{}` → `{target}`", term.text))
+        .collect()
 }
 
 /// Everything searchable in the schema, in schema order.

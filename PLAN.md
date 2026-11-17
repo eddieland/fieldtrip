@@ -293,3 +293,13 @@ cargo test --workspace --all-features
   more than 12 puts the nearest names first, then the others in schema order, and counts the ones left out. An
   unknown output field keeps its nearest names.
   Done when: `cargo test valid_names`
+- [x] **53. Glossary.** An endpoint or a template names, with `glossary`, a TOML file whose `[glossary]` table maps
+  the user's terms to schema names: `"draft" = ["PullRequest.isDraft"]`. `search_schema` shows the targets of each
+  term in the query first, as `term → signature`, ahead of the schema's own matches and without repeating them. A term
+  is whole words, ignoring case, and can be several words. In `list_operations`, a term in `query` also matches the
+  operations that use one of its targets, listed first and marked `glossary: term → Target`, and the other filters
+  still apply. `introspect` reports targets the schema does not have, a search marks them, and `fieldtrip check` warns
+  about them. `list_endpoints` shows the file and its number of terms. A file that is missing or does not parse, a key
+  outside `[glossary]`, a term with no words or no targets, two terms that differ only in case, or a target that is
+  not a `Type` or `Type.member` stop the server at startup.
+  Done when: `cargo test glossary`

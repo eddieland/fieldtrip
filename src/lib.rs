@@ -10,6 +10,7 @@ mod check;
 mod cli;
 mod config;
 mod costs;
+mod glossary;
 mod headers;
 mod hints;
 mod http;

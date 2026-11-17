@@ -1,7 +1,7 @@
 //! `fieldtrip check`: the configuration as each endpoint resolves it, for the user to read.
 //!
 //! It answers what an MCP client hides: whether the config loads, what an endpoint takes from its template,
-//! whether every header can be produced, and whether a cost map and the saved operations fit the schema. It never
+//! whether every header can be produced, and whether a cost map, a glossary and the saved operations fit the schema. It never
 //! prints a header value. It sends nothing to any endpoint unless the user passes `--introspect`: for a schema that
 //! comes from introspection it reads the copy in fieldtrip's cache.
 
@@ -221,6 +221,27 @@ async fn endpoint_report(out: &mut Out, name: &str, endpoint: &Endpoint, http: O
                 // so these are warnings, not problems.
                 for finding in findings {
                     out.warning("cost map", &what, &finding);
+                }
+            }
+        }
+    }
+
+    if let Some(source) = &endpoint.glossary.source {
+        let terms = endpoint.glossary.len();
+        let what = format!(
+            "{} ({terms} term{})",
+            source.display(),
+            if terms == 1 { "" } else { "s" }
+        );
+        match &schema {
+            None => out.line("glossary", format!("{what}: not checked against a schema")),
+            Some(against) => {
+                let what = format!("{what}{}", against.note);
+                // A glossary shared by several instances of a service can name a field only some of them have,
+                // so this is a warning, as an unmatched cost rule is.
+                match against.schema.glossary_finding(&endpoint.glossary) {
+                    None => out.line("glossary", format!("{what}: ok")),
+                    Some(finding) => out.warning("glossary", &what, &finding),
                 }
             }
         }

@@ -17,6 +17,7 @@ use serde::Deserialize;
 
 use crate::cli::Args;
 use crate::costs::CostMap;
+use crate::glossary::Glossary;
 use crate::headers::Header;
 use crate::library::Library;
 
@@ -103,6 +104,8 @@ pub(crate) struct Endpoint {
     pub(crate) assumed_list_size: u64,
     /// The rules that replace the built-in costs for this endpoint. Empty when it has no cost map.
     pub(crate) costs: Arc<CostMap>,
+    /// The user's words for things in this endpoint's schema. Empty when it has no glossary.
+    pub(crate) glossary: Arc<Glossary>,
     /// The operations the user saved for this endpoint. Empty when it names no `operations` directory.
     pub(crate) operations: Arc<Library>,
     /// How long a request to this endpoint may take.
@@ -214,6 +217,7 @@ struct RawEndpoint {
     headers: BTreeMap<String, toml::Value>,
     assumed_list_size: Option<u64>,
     costs: Option<PathBuf>,
+    glossary: Option<PathBuf>,
     operations: Option<PathBuf>,
     fragments: Option<PathBuf>,
     client_directives: Option<Vec<String>>,
@@ -244,6 +248,7 @@ struct RawTemplate {
     headers: BTreeMap<String, toml::Value>,
     assumed_list_size: Option<u64>,
     costs: Option<PathBuf>,
+    glossary: Option<PathBuf>,
     operations: Option<PathBuf>,
     fragments: Option<PathBuf>,
     client_directives: Option<Vec<String>>,
@@ -264,6 +269,7 @@ struct RawShared {
     headers: BTreeMap<String, toml::Value>,
     assumed_list_size: Option<u64>,
     costs: Option<PathBuf>,
+    glossary: Option<PathBuf>,
     operations: Option<PathBuf>,
     fragments: Option<PathBuf>,
     client_directives: Option<Vec<String>>,
@@ -284,6 +290,7 @@ macro_rules! shared {
             headers: $raw.headers,
             assumed_list_size: $raw.assumed_list_size,
             costs: $raw.costs,
+            glossary: $raw.glossary,
             operations: $raw.operations,
             fragments: $raw.fragments,
             client_directives: $raw.client_directives,
@@ -305,6 +312,7 @@ struct Template {
     headers: Vec<Arc<Header>>,
     assumed_list_size: Option<u64>,
     costs: Option<Arc<CostMap>>,
+    glossary: Option<Arc<Glossary>>,
     operations: Option<Arc<Library>>,
     /// The `operations` directory, resolved, for an endpoint that adds or replaces `fragments`.
     operations_path: Option<PathBuf>,
@@ -454,6 +462,10 @@ impl Template {
                 .costs
                 .map(|costs| CostMap::load(&resolve(&costs, base)).map(Arc::new))
                 .transpose()?,
+            glossary: shared
+                .glossary
+                .map(|glossary| Glossary::load(&resolve(&glossary, base)).map(Arc::new))
+                .transpose()?,
             operations: operations_path
                 .as_deref()
                 .map(|operations| {
@@ -563,6 +575,7 @@ impl Endpoint {
                 .or(template.assumed_list_size)
                 .unwrap_or(DEFAULT_ASSUMED_LIST_SIZE),
             costs,
+            glossary: glossary(shared.glossary.as_deref(), template, base)?,
             operations,
             timeout: timeout(shared.timeout)?.or(template.timeout).unwrap_or(DEFAULT_TIMEOUT),
             response_headers: response_headers(shared.response_headers)?
@@ -583,6 +596,14 @@ impl Endpoint {
             mutations,
             url: raw.url,
         })
+    }
+}
+
+/// The glossary of an endpoint that names the file `own`, or its template's, or none.
+fn glossary(own: Option<&Path>, template: &Template, base: &Path) -> Result<Arc<Glossary>, String> {
+    match own {
+        Some(path) => Ok(Arc::new(Glossary::load(&resolve(path, base))?)),
+        None => Ok(template.glossary.clone().unwrap_or_default()),
     }
 }
 
