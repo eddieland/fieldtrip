@@ -363,10 +363,24 @@ impl<'doc> Estimator<'doc> {
                 Size::Known(*multiplier)
             }
             // A pattern can reach fields that have no such argument. Those keep the built-in ones.
-            Some((Multiplier::Argument(argument), rule)) if field.definition.argument_by_name(argument).is_some() => {
-                self.used(&format!("multiplier from `{argument}`"), rule);
+            Some((Multiplier::Argument { name, default }, rule))
+                if field.definition.argument_by_name(name).is_some() =>
+            {
                 takes_a_size = true;
-                self.size_argument(field, &[argument.as_str()])
+                match (self.size_argument(field, &[name.as_str()]), default) {
+                    // Left out, by a variable with no value too: the server applies its own page size.
+                    (Size::Unresolved(_) | Size::Absent, Some(default)) => {
+                        self.used(
+                            &format!("multiplier {default}, the default when `{name}` is left out"),
+                            rule,
+                        );
+                        Size::Known(*default)
+                    }
+                    (size, _) => {
+                        self.used(&format!("multiplier from `{name}`"), rule);
+                        size
+                    }
+                }
             }
             _ => self.size_argument(field, &SIZE_ARGUMENTS),
         };

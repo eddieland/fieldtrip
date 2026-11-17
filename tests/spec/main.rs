@@ -25,6 +25,8 @@ mod cost_argument;
 #[cfg(test)]
 mod cost_checks;
 #[cfg(test)]
+mod cost_default;
+#[cfg(test)]
 mod cost_map;
 #[cfg(test)]
 mod cost_patterns;

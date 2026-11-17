@@ -309,6 +309,7 @@ name it on the endpoint with `costs = "acme.costs.toml"`. The path is relative t
 "Query.products"      = { multiplier = 500 }      # this list has about 500 items
 "Query.viewer.orders" = { multiplier = 2 }        # an exact path from the root
 "User.orders"         = { multiplier = "take" }   # the list is sized by its `take` argument
+"Query.invoices"      = { multiplier = "first", default = 1000 }   # and holds 1,000 when `first` is left out
 "*.reviews"           = { multiplier = 3 }        # `reviews` on any type
 "Mutation.refund"     = { cost = 100 }            # this mutation is expensive
 "User.email"          = { cost = 2 }              # so is this scalar
@@ -323,6 +324,11 @@ name it on the endpoint with `costs = "acme.costs.toml"`. The path is relative t
 - **`multiplier`** replaces the size of a list. A number wins even over a size the operation gives, so use it for
   lists whose real size you know. A string names the argument that carries the size. On a field that is not a list,
   the multiplier bounds the lists directly inside it, which is how pages and connections work.
+- **`default`** goes with a multiplier that names an argument. It is the size when the operation leaves the argument
+  out, which is the page size your server applies on its own when the schema doesn't declare one. A default the
+  schema does declare still wins. A rule only applies to fields that have the argument, so one line,
+  `"*.*" = { multiplier = "first", default = 100 }`, covers every paged field, and a more specific rule can give
+  another size to the few that differ.
 - **When several rules match**, `cost` and `multiplier` are each taken from the most specific rule that sets them:
   the one with the most parts, then the fewest `*`, then a name nearest the field.
 

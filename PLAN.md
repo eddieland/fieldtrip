@@ -260,3 +260,10 @@ cargo test --workspace --all-features
   that is not a GraphQL name, `skip`, `include`, `defer` or `stream`, or `client_directives` on an endpoint with no
   `operations` stop the server at startup.
   Done when: `cargo test client_directives`
+- [x] **48. A default for a multiplier's argument.** A rule such as `{ multiplier = "first", default = 100 }` sizes
+  the list by `first` when the operation gives it, and by 100 when it is left out, given as null, or given as a
+  variable with no value, with nothing assumed. The estimate says which it used. A default the schema declares for
+  the argument wins over the rule's. On a field that is not a list the default bounds the lists inside it, and a
+  pattern with stars gives it only to fields that have the argument. `default` without a multiplier that names an
+  argument, or one that is not a whole number, stops the server at startup.
+  Done when: `cargo test cost_default`
