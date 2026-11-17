@@ -342,8 +342,9 @@ fn a_page_without_the_connection_stops_it_and_says_why() {
     assert!(
         reply.text.contains(
             "\nStopped after page 2: its response has no `pageInfo` at `data.users`, so there is no cursor to go on \
-             from. Read that page's `errors`, and check that the path leads to the object that selects `pageInfo`. The \
-             last cursor was \"c1\"."
+             from. Read that page's `errors`, and check that the path leads to the object that selects `pageInfo`. For \
+             an API that pages by another field, such as `nextToken`, name it with `paginate.cursor`. The last \
+             cursor was \"c1\"."
         ),
         "{}",
         reply.text

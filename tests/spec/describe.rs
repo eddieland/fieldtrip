@@ -41,14 +41,14 @@ type User implements Node {
   nickname: String @deprecated(reason: \"Use name.\")
 }
 # member of: SearchResult
-# used by: Query.viewer, Query.user, Mutation.deactivateUser, Order.customer, Review.author, UserConnection.nodes
+# used by: Query.viewer, Query.user, Mutation.deactivateUser, Order.customer, Review.author, UserConnection.nodes, UserPage.items
 # paths from Query:
 #   Query.viewer
 #   Query.user
 #   Query.search{... on User}
 #   Query.node{... on User}
 #   Query.users.nodes
-#   and 4 more, from other fields of Query
+#   and 5 more, from other fields of Query
 ";
     assert_eq!(
         describe("User"),

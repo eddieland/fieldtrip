@@ -297,7 +297,11 @@ struct ExecuteArguments {
                        the last page or `max_pages`. The user approves all of it once, at the worst-case cost. An \
                        object such as `{\"path\": \"data.repository.issues\", \"max_pages\": 5}`. The query must \
                        declare the cursor variable, pass it to the connection, and select \
-                       `pageInfo { hasNextPage endCursor }`. It cannot be combined with `save`."
+                       `pageInfo { hasNextPage endCursor }`. For an API that pages by another field, name it with \
+                       `cursor`, as in `{\"path\": \"data.listItems\", \"cursor\": \"nextToken\", \"variable\": \
+                       \"nextToken\"}`, and add `more` when a separate field such as `hasMore` says whether another \
+                       page follows. Paging by offset or page number has no cursor to follow: use `execute_batch` \
+                       with one set of variables for each page. It cannot be combined with `save`."
     )]
     paginate: Option<PaginateArguments>,
 }
@@ -324,6 +328,20 @@ struct PaginateArguments {
                        `after` unless given. Its value in `variables`, if any, is where the first page starts."
     )]
     variable: Option<String>,
+    /// The field that holds the cursor.
+    #[schemars(
+        description = "Optional, for an API that does not page the Relay way. The field that holds the cursor of \
+                       the next page, relative to the object at `path`, such as `nextToken`, or `paging.next` for \
+                       one further in. `pageInfo.endCursor` unless given. With `cursor` and no `more`, a null \
+                       cursor means the last page."
+    )]
+    cursor: Option<String>,
+    /// The field that says whether another page follows.
+    #[schemars(
+        description = "Optional, with `cursor`. The field that is `true` while another page follows, relative to \
+                       the object at `path`, such as `hasMore`. `pageInfo.hasNextPage` unless `cursor` is given."
+    )]
+    more: Option<String>,
 }
 
 /// A finished tool call with `text` as its result.
@@ -811,6 +829,7 @@ impl Fieldtrip {
             .map(|paginate| {
                 Follow::parse(
                     &paginate.path,
+                    (paginate.cursor.as_deref(), paginate.more.as_deref()),
                     paginate.variable.as_deref(),
                     paginate.max_pages,
                     name,
@@ -938,8 +957,10 @@ impl Fieldtrip {
                        it will run, the first few sets of variables and the total estimated cost, and the result \
                        says so when they were not asked. Pass the GraphQL text as `operation`, or the name of a \
                        saved operation as `operation_name`, and the sets as `variables`. Check the query with \
-                       `estimate_cost` first. Queries only: a mutation is refused, because the user approves each \
-                       mutation on its own with `execute`. The user's config caps the number of runs, 100 unless \
+                       `estimate_cost` first. It also fetches several pages of an API that pages by offset or page \
+                       number: pass one set for each page, such as `{\"offset\": 0}`, `{\"offset\": 20}`. Queries \
+                       only: a mutation is refused, because the user approves each mutation on its own with \
+                       `execute`. The user's config caps the number of runs, 100 unless \
                        they changed it. The runs are sent one after another, in order. The result has one section \
                        for each run, starting with `[0]` for the first set, with the HTTP status and time, then \
                        that run's `errors` in full, then its `data`, cut to fit its share of the result: pass \
@@ -1359,6 +1380,8 @@ impl<'call> Paged<'call> {
             "path": self.follow.path,
             "variable": self.follow.variable,
             "max_pages": self.follow.max_pages,
+            "cursor": self.follow.cursor_name(),
+            "more": self.follow.more_name(),
         })
     }
 
@@ -1396,11 +1419,15 @@ enum Stop {
     /// The last page was reached.
     Done,
     /// `max_pages` pages were sent for and there are more, after this cursor.
-    Capped(String),
+    Capped(serde_json::Value),
     /// The page has no `pageInfo` at the path.
     Missing,
     /// The page's `pageInfo` lacks `hasNextPage`, or `endCursor` when there are more pages.
     Unselected,
+    /// The page has no value at the cursor field the calling agent named.
+    NoCursor,
+    /// The page has no true or false at the flag the calling agent named.
+    NoFlag,
     /// The page ended with the cursor it started from.
     Stuck,
     /// The page's response was too large to read.
@@ -1412,39 +1439,60 @@ enum Stop {
 impl Stop {
     /// One line for the calling agent: why it stopped after `pages` pages, and how to go on. `last` is the cursor
     /// the last request carried.
-    fn line(&self, pages: usize, follow: &Follow, last: Option<&str>) -> String {
+    fn line(&self, pages: usize, follow: &Follow, last: Option<&serde_json::Value>) -> String {
         let path = &follow.path;
         let variable = &follow.variable;
+        let cursor_name = follow.cursor_name();
         let plural = if pages == 1 { "" } else { "s" };
-        let from = last.map_or_else(String::new, |cursor| {
-            format!(" The last cursor was {}.", serde_json::Value::from(cursor))
-        });
+        let from = last.map_or_else(String::new, |cursor| format!(" The last cursor was {cursor}."));
         match self {
             Self::Done => {
-                format!("That was every page: `{path}` has `hasNextPage: false` after {pages} page{plural}.")
+                let says = follow
+                    .more_name()
+                    .map_or_else(|| format!("a null `{cursor_name}`"), |more| format!("`{more}: false`"));
+                format!("That was every page: `{path}` has {says} after {pages} page{plural}.")
             }
-            Self::Capped(cursor) => format!(
-                "More pages remain: `{path}` still has `hasNextPage: true` after {pages} page{plural}, which is the \
-                 `max_pages` given. Its `endCursor` is {}. To go on, call again with `{variable}` set to it in \
-                 `variables`.",
-                serde_json::Value::from(cursor.as_str())
+            Self::Capped(cursor) => {
+                let says = follow
+                    .more_name()
+                    .map_or_else(|| format!("a `{cursor_name}`"), |more| format!("`{more}: true`"));
+                format!(
+                    "More pages remain: `{path}` still has {says} after {pages} page{plural}, which is the \
+                     `max_pages` given. Its `{cursor_name}` is {cursor}. To go on, call again with `{variable}` set \
+                     to it in `variables`."
+                )
+            }
+            Self::Missing if follow.is_named() => format!(
+                "Stopped after page {pages}: its response has no object at `{path}`, so there is no cursor to go on \
+                 from. Read that page's `errors`, and check that the path leads to the object that holds \
+                 `{cursor_name}`.{from}"
             ),
             Self::Missing => format!(
                 "Stopped after page {pages}: its response has no `pageInfo` at `{path}`, so there is no cursor to go \
                  on from. Read that page's `errors`, and check that the path leads to the object that selects \
-                 `pageInfo`.{from}"
+                 `pageInfo`. For an API that pages by another field, such as `nextToken`, name it with \
+                 `paginate.cursor`.{from}"
             ),
             Self::Unselected => format!(
                 "Stopped after page {pages}: the `pageInfo` at `{path}` has no `hasNextPage`, or no `endCursor` to go \
                  on from. Select both, as `pageInfo {{ hasNextPage endCursor }}`.{from}"
             ),
+            Self::NoCursor => format!(
+                "Stopped after page {pages}: the object at `{path}` has no `{cursor_name}` to go on from. Select it \
+                 in the query, or correct `paginate.cursor`.{from}"
+            ),
+            Self::NoFlag => format!(
+                "Stopped after page {pages}: the object at `{path}` has no `{}`, which should say whether another \
+                 page follows. Select it in the query, or correct `paginate.more`.{from}",
+                follow.more_name().unwrap_or_default()
+            ),
             Self::Stuck => format!(
-                "Stopped after page {pages}: it gave the same `endCursor` as the page before, so the query does not \
-                 seem to pass `${variable}` to the connection at `{path}`.{from}"
+                "Stopped after page {pages}: it gave the same `{cursor_name}` as the page before, so the query does \
+                 not seem to pass `${variable}` to the field at `{path}`.{from}"
             ),
             Self::TooLarge => format!(
-                "Stopped after page {pages}: its response was too large to read, so its `pageInfo` is lost. Ask for \
-                 a smaller page.{from}"
+                "Stopped after page {pages}: its response was too large to read, so its cursor is lost. Ask for a \
+                 smaller page.{from}"
             ),
             Self::Unanswered => format!("Stopped at page {pages}, which got no answer.{from}"),
         }
@@ -1561,16 +1609,18 @@ impl Fieldtrip {
                 Next::Last => break Stop::Done,
                 Next::Missing => break Stop::Missing,
                 Next::Unselected => break Stop::Unselected,
+                Next::NoCursor => break Stop::NoCursor,
+                Next::NoFlag => break Stop::NoFlag,
             };
-            if variables.get(&follow.variable).and_then(serde_json::Value::as_str) == Some(cursor.as_str()) {
+            if variables.get(&follow.variable) == Some(&cursor) {
                 break Stop::Stuck;
             }
             if page == max {
                 break Stop::Capped(cursor);
             }
-            variables.insert(follow.variable.clone(), serde_json::Value::String(cursor));
+            variables.insert(follow.variable.clone(), cursor);
         };
-        let last = variables.get(&follow.variable).and_then(serde_json::Value::as_str);
+        let last = variables.get(&follow.variable).filter(|cursor| !cursor.is_null());
         let head = format!(
             "Sent {} to `{name}` {page} time{}, following the pages of `{}`. Estimated cost: {worst} at \
              most.{unasked}\n{}",

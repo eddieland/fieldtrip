@@ -339,9 +339,11 @@ pub(crate) fn pages_prompt(
     let worst = plan.cost.saturating_mul(u64::try_from(pages).unwrap_or(u64::MAX));
     let _ = write!(
         out,
-        "After the first page, `${}` is the `endCursor` of the page before.\nEstimated cost: {worst} at most, {} for \
-         each page\n\nAccept to send up to {pages} pages. Decline to stop.",
-        follow.variable, plan.cost
+        "After the first page, `${}` is the `{}` of the page before.\nEstimated cost: {worst} at most, {} for each \
+         page\n\nAccept to send up to {pages} pages. Decline to stop.",
+        follow.variable,
+        follow.cursor_name(),
+        plan.cost
     );
     for assumption in &plan.assumptions {
         let _ = write!(out, "\nThe estimate assumes: {assumption}");

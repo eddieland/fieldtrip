@@ -23,9 +23,9 @@ fn returns_the_overview_of_the_fixture() {
 Schema for `store`, read from the file {}.
 \"A small store API. This is the fixture schema for fieldtrip's tests.\"
 
-23 types: 12 objects, 1 interface, 1 union, 4 enums, 4 input objects, 1 scalar
+24 types: 13 objects, 1 interface, 1 union, 4 enums, 4 input objects, 1 scalar
 
-Query (9 fields): viewer, user, users, product, products, search, catalog, productsByIds, node
+Query (10 fields): viewer, user, users, userPage, product, products, search, catalog, productsByIds, node
 Mutation (4 fields): createOrder, cancelOrder, deleteUser (deprecated), deactivateUser
 Subscription (1 field): orderUpdated
 Subscriptions can be described but not executed.
@@ -60,8 +60,8 @@ fn keeps_the_loaded_schema_until_asked_to_refresh() {
     let schema_path = mcp.dir().join("schema.graphql");
     let first = mcp.call("introspect", &json!({ "endpoint": "store" }));
     assert!(
-        first.text.contains("Query (9 fields)"),
-        "the fixture has nine queries: {}",
+        first.text.contains("Query (10 fields)"),
+        "the fixture has ten queries: {}",
         first.text
     );
 
@@ -72,14 +72,14 @@ fn keeps_the_loaded_schema_until_asked_to_refresh() {
 
     let cached = mcp.call("introspect", &json!({ "endpoint": "store" }));
     assert!(
-        cached.text.contains("Query (9 fields)"),
+        cached.text.contains("Query (10 fields)"),
         "without refresh the loaded schema is kept: {}",
         cached.text
     );
 
     let refreshed = mcp.call("introspect", &json!({ "endpoint": "store", "refresh": true }));
     assert!(
-        refreshed.text.contains("Query (10 fields)"),
+        refreshed.text.contains("Query (11 fields)"),
         "refresh reads the file again: {}",
         refreshed.text
     );

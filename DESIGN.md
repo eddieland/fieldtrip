@@ -458,3 +458,16 @@ Settled. To change one, ask the user, then add a new dated line instead of editi
   written to a file.
 - 2026-11-17: The audit log has a line for each page sent, with `page: {page, max}`. A call that was not sent is one
   line, with `page: {max}` and the worst-case cost.
+- 2026-11-17: `paginate` takes `cursor` and `more`, which name the field that holds the next page's cursor and the one
+  that says whether another page follows, each as names joined by `.`, relative to the object at `path`. They cover
+  APIs that page by a `nextToken`, or by a `cursor` beside a `hasMore`. This adds to the line that had `paginate`
+  read `pageInfo` only, which is still what it reads when `cursor` is not given.
+- 2026-11-17: With `cursor` and no `more`, a null cursor is the last page. With `more`, a false flag is. A cursor
+  field that is not in the response stops the run and says to select it, as a missing flag does.
+- 2026-11-17: A cursor is a string or a number, and goes into the variable as it came. This replaces reading only a
+  string `endCursor`.
+- 2026-11-17: The prompt and the result name the field the cursor comes from, and an approval on revision 2026-07-28
+  covers the two field names along with the path and the variable.
+- 2026-11-17: Paging by offset or page number is not followed, since there is no cursor in the response to follow.
+  The tools say to use `execute_batch` with one set of variables for each page.
+- 2026-11-17: Followed pages and batch runs are still not written to result files. `select` is how they stay short.

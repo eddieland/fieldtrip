@@ -36,7 +36,7 @@ fn an_object_lists_its_unions_and_the_fields_that_return_it() {
             "}\n\
              # member of: SearchResult\n\
              # used by: Query.viewer, Query.user, Mutation.deactivateUser, Order.customer, Review.author, \
-             UserConnection.nodes\n"
+             UserConnection.nodes, UserPage.items\n"
         ),
         "the unions, then every field that returns it, root types first and the rest by type name:\n{text}"
     );

@@ -372,3 +372,12 @@ make check
   session is followed unasked, and on revision 2026-07-28 an approval covers exactly the pages that were shown. The
   audit log has a line per page.
   Done when: `cargo test execute_paginate`
+- [x] **62. Cursors that are not Relay's.** `paginate` takes `cursor` and `more`: the field that holds the next
+  page's cursor and the field that says whether another page follows, as names joined by `.`, relative to the object
+  at `path`. With `cursor: "nextToken"` the pages are followed until the token is null, and with a `more` such as
+  `hasMore` until it is false. A cursor that is a number is followed, `endCursor` included, and is sent as a number.
+  The prompt and the result name the field the cursor comes from. A page without the named field stops the run and
+  says which field to select, and a name that is not field names is refused before anything is sent. The
+  descriptions of `paginate` and `execute_batch` say that paging by offset or page number goes through
+  `execute_batch`. The fixture schema gains `Query.userPage`, so the tests that pin the fixture change with it.
+  Done when: `cargo test paginate_cursors`
