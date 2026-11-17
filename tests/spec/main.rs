@@ -85,6 +85,8 @@ mod pagination_hints;
 #[cfg(test)]
 mod protocol_2026;
 #[cfg(test)]
+mod query_paths;
+#[cfg(test)]
 mod read_result;
 #[cfg(test)]
 mod redaction;
@@ -112,6 +114,8 @@ mod skipped_files;
 mod templates;
 #[cfg(test)]
 mod tool_descriptions;
+#[cfg(test)]
+mod type_uses;
 #[cfg(test)]
 mod unauthorized_retry;
 #[cfg(test)]

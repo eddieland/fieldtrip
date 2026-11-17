@@ -35,7 +35,7 @@ const INSTRUCTIONS: &str = "fieldtrip lets you use GraphQL APIs the user has con
      need, run it by its name instead of writing your own, and skip to step 6.\n\
      3. `introspect` once per endpoint shows its query and mutation fields, the API's entry points.\n\
      4. `search_schema` finds a type, field or saved operation by a word. `describe` shows a field's exact \
-     arguments and return type.\n\
+     arguments and return type, and for a type, what uses it and the shortest paths to it from `Query`.\n\
      5. Write one operation and check it with `estimate_cost` until it is valid and cheap. Nothing is sent.\n\
      6. `execute` sends it, or a saved operation named by `operation_name`. The user approves each request unless \
      their config says otherwise.\n\
@@ -561,7 +561,12 @@ impl Fieldtrip {
                        (`User`) or a field (`Query.user`, `Mutation.createOrder`). For a field, the result also \
                        defines the types of its arguments and its return type, which shows the required arguments \
                        (marked `!`), what an input object needs, and what you can select next. An interface or union \
-                       lists its possible types: select their own fields with `... on Type`. Avoid anything marked \
+                       lists its possible types: select their own fields with `... on Type`. A type ends with what \
+                       uses it: the unions it belongs to, then every field that returns it, argument that takes it \
+                       (written `Type.field(argument:)`) and input field that holds it, so you can work back from a \
+                       type you found to where it appears. Then come up to five shortest paths from `Query`, one per \
+                       root field that leads there, such as `Query.search{... on Product}.reviews`: each is a \
+                       selection to write, with `{... on Type}` for an inline fragment. Avoid anything marked \
                        deprecated; its reason names the replacement.",
         annotations(read_only_hint = true, open_world_hint = true)
     )]

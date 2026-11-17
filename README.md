@@ -17,7 +17,8 @@ Rust, that sits between an agent and a GraphQL API and gives the agent four step
 1. **Load the schema** by introspecting the endpoint, or from a `schema.graphql` file when introspection is turned
    off.
 2. **Discover** queries, mutations, types and fields by searching the schema and reading only the parts it needs,
-   or start from the [operations your team has saved](#saved-operations).
+   or start from the [operations your team has saved](#saved-operations). A type comes with what uses it and the
+   shortest paths to it from `Query`, so a type found by a search leads to a query that reaches it.
 3. **Estimate** by validating an operation against the schema and costing it before anything is sent.
 4. **Execute with approval.** You see the exact operation, its variables and its estimated cost, and nothing is sent
    until you approve.

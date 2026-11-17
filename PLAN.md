@@ -326,3 +326,16 @@ make check
   went to a file has `result`, its ID, and `history` lists after its lines the files that still exist, with their
   paths, and counts the ones that are gone.
   Done when: `cargo test result_files`
+- [x] **57. What uses a type.** `describe` of a type ends with the unions it belongs to, as `# member of:`, and then,
+  as `# used by:`, every field that returns it, argument that takes it, written `Type.field(argument:)`, and input
+  field that holds it. Root types come first, then the other types by name, so both schema sources give the same
+  text. At most 30 uses are listed and the rest are counted, a type nothing uses says so, and root types, built-in
+  types and `describe` of a field list none.
+  Done when: `cargo test type_uses`
+- [x] **58. Paths from `Query`.** `describe` of a type that can be selected ends with up to five shortest paths to it
+  from `Query`, one per root field that leads there, shortest first and then in the order of the fields of `Query`,
+  and counts the rest. A step through an interface or union is written `{... on Type}`, as in
+  `Query.node{... on Order}.total`, and costs nothing. A path never goes back through a root type, a type with no path
+  says so, and input objects, root types, built-in types and `describe` of a field have none. Both schema sources give
+  the same paths.
+  Done when: `cargo test query_paths`
