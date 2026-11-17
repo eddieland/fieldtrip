@@ -5,9 +5,18 @@
 //! not by text: long lists keep their first items and long strings their first characters, and each cut is marked
 //! with how much it dropped, so the calling agent knows exactly what is missing.
 
+use std::collections::BTreeMap;
 use std::fmt::Write as _;
 
+use serde_json::value::RawValue;
 use serde_json::{Map, Value};
+
+use crate::config::{Endpoint, show_bytes};
+use crate::http::Reply;
+use crate::results::Stored;
+use crate::select::{self, Selected};
+use crate::shape;
+use crate::text::{capped, capped_after, excerpt};
 
 /// The string lengths a summary tries, longest first. Shorter strings leave room for more list items.
 const STRING_CAPS: [usize; 3] = [2_000, 500, 100];
@@ -307,4 +316,238 @@ pub(crate) fn page_hints(data: &Value) -> Vec<String> {
         ));
     }
     hints
+}
+
+/// The most characters shown of a response that was saved to a file.
+pub(crate) const SAVED_PREVIEW: usize = 4_000;
+
+/// Room kept in a result for the note that follows a summary.
+pub(crate) const NOTE_ROOM: usize = 500;
+
+/// The least room the preview of a saved response gets, however long the `errors` before it are: this much, or a
+/// quarter of what the result may hold when that is less.
+const MIN_PREVIEW: usize = 1_000;
+
+/// The most paths shown of a response's shape.
+const SHAPE_PATHS: usize = 40;
+
+/// The most characters of one line of a response's shape.
+const SHAPE_LINE: usize = 200;
+
+/// The shape of `body`, a response that was written to a file, in at most `budget` characters: a heading, then one
+/// line per path. Empty when the body is not JSON.
+fn shape_of(body: &str, budget: usize) -> String {
+    let Ok(response) = serde_json::from_str::<Value>(body) else {
+        return String::new();
+    };
+    let lines = shape::lines(&response);
+    let mut out = "\nShape of the whole response, one line per path. `nodes[50]` is a list of 50 items, and `select` \
+                   takes one with `nodes[0]` or all with `nodes[*]`:"
+        .to_owned();
+    let mut room = budget.saturating_sub(out.chars().count() + 40);
+    let mut shown = 0;
+    for line in lines.iter().take(SHAPE_PATHS) {
+        let mut line: String = line.chars().take(SHAPE_LINE).collect();
+        if line.chars().count() == SHAPE_LINE {
+            line.push('…');
+        }
+        let length = line.chars().count() + 1;
+        if length > room {
+            break;
+        }
+        room -= length;
+        let _ = write!(out, "\n{line}");
+        shown += 1;
+    }
+    match lines.len() - shown {
+        0 => {}
+        1 => out.push_str("\n… and 1 more path."),
+        more => {
+            let _ = write!(out, "\n… and {more} more paths.");
+        }
+    }
+    out
+}
+
+/// The result of `execute`: `head`, which ends with the errors, then each of the `rest` of the response's parts as
+/// the server wrote it when they fit in the `room`, or a summary of them that is still valid JSON when not. `shape`
+/// follows a summary of a response that was written to a file.
+fn shown(head: String, rest: &[(String, Box<RawValue>)], room: Room, shape: &str) -> String {
+    let limit = room.limit();
+    let mut written = String::new();
+    for (name, value) in rest {
+        let _ = write!(written, "\n{name}: {}", value.get().trim());
+    }
+    let length = head.chars().count() + written.chars().count();
+    if length <= limit {
+        return head + &written;
+    }
+    let parts: Map<String, Value> = rest
+        .iter()
+        .filter_map(|(name, value)| Some((name.clone(), serde_json::from_str(value.get()).ok()?)))
+        .collect();
+    let mut space = limit.saturating_sub(head.chars().count() + NOTE_ROOM + shape.chars().count());
+    if room.is_of_a_file() {
+        // Errors are never cut, and can use the room up. The preview is all the result shows of the rest.
+        space = space.max(MIN_PREVIEW.min(limit / 4));
+    }
+    match summarize(&parts, space) {
+        Some(summary) => {
+            let note = note(&summary, length, room);
+            format!("{head}{}\n{note}{shape}", summary.lines)
+        }
+        None if room.is_of_a_file() => {
+            let limit = limit.saturating_sub(shape.chars().count());
+            capped_after(head, &written, limit, "The file has all of it.") + shape
+        }
+        None => capped_after(head, &written, limit, ASK_FOR_LESS),
+    }
+}
+
+/// What a result shows of the GraphQL response `body`, whose top-level members are `parts`.
+///
+/// `summary` comes first, then a line for each connection with more pages, then `saved_note`. Errors follow, whole,
+/// because they say what went wrong. After them comes the part `select` picked, or `data` and the rest, cut to fit
+/// the `room`, and the shape of the response when a preview of a file was cut.
+pub(crate) fn laid_out(
+    summary: String,
+    saved_note: &str,
+    body: &str,
+    mut parts: BTreeMap<String, Box<RawValue>>,
+    select: Option<&select::Path>,
+    room: Room,
+) -> String {
+    let mut head = summary;
+    let data = parts.get("data").and_then(|data| serde_json::from_str(data.get()).ok());
+    for hint in data.as_ref().map_or_else(Vec::new, page_hints) {
+        let _ = write!(head, "\n{hint}");
+    }
+    head.push_str(saved_note);
+    let errors = parts.remove("errors");
+    let rest = if let Some(path) = select {
+        let picked = serde_json::from_str(body).map_or_else(|_error| Selected::nothing(), |whole| path.select(&whole));
+        let _ = write!(head, "\n{}", picked.line);
+        if let Some(errors) = errors.filter(|_| !path.is_in_errors()) {
+            let _ = write!(head, "\nerrors: {}", errors.get().trim());
+        }
+        picked
+            .value
+            .and_then(|value| serde_json::value::to_raw_value(&value).ok())
+            .map(|value| ("selected".to_owned(), value))
+            .into_iter()
+            .collect()
+    } else {
+        if let Some(errors) = errors {
+            let _ = write!(head, "\nerrors: {}", errors.get().trim());
+        }
+        let data = parts.remove("data").map(|data| ("data".to_owned(), data));
+        data.into_iter().chain(parts).collect::<Vec<_>>()
+    };
+    let shape = match room {
+        Room::Preview(limit) => shape_of(body, limit / 3),
+        Room::Result(_) | Room::Selection(_) | Room::Read(_) => String::new(),
+    };
+    shown(head, &rest, room, &shape)
+}
+
+/// How `execute` says to get a smaller result.
+const ASK_FOR_LESS: &str = "Ask for less: fewer fields, or a smaller page with `first` or `limit`.";
+
+/// How much of a response that is not JSON to quote in an error.
+pub(crate) const EXCERPT: usize = 300;
+
+/// The result of `execute` for `reply`, the answer of `endpoint`.
+///
+/// `summary` is what was sent and how it went, and comes first. `written` is the response's length in characters
+/// and what came of writing it to a file, when that was tried, and `inline` is the most characters of a response
+/// that are shown. With `select` only that part of the response is shown.
+///
+/// # Errors
+///
+/// Returns the text as an error when the answer is not a GraphQL response, or was cut short on an HTTP error.
+pub(crate) fn render(
+    summary: String,
+    reply: &Reply,
+    endpoint: &Endpoint,
+    written: Option<(usize, Result<Stored, String>)>,
+    inline: usize,
+    select: Option<&select::Path>,
+    save: bool,
+) -> Result<String, String> {
+    if reply.cut_short {
+        // Too long to read in full, so it cannot be parsed. The status says whether it is a result.
+        let excerpt = excerpt(&reply.body, EXCERPT);
+        let unsaved = if save {
+            " Nothing was saved, because only part of the body was read."
+        } else {
+            ""
+        };
+        let text = format!(
+            "{summary}\n[The response is larger than {}, the `max_response_bytes` limit for this endpoint, so \
+             fieldtrip read only that much. A cut-off body is not valid JSON, so `data` and `errors` are both \
+             lost. The operation did reach the server, so a mutation has run. Ask for less: fewer fields, or a \
+             smaller page with `first` or `limit`, and page through the rest. The user can raise \
+             `max_response_bytes`.{unsaved}]\n\
+             It began: {excerpt}",
+            show_bytes(endpoint.max_response_bytes)
+        );
+        return if reply.status < 400 { Ok(text) } else { Err(text) };
+    }
+    let (saved_note, room) = match written {
+        Some((length, Ok(stored))) => {
+            let why = if length > inline {
+                format!(
+                    "\nThe response has {} characters, more than the {} that are shown here \
+                     (`max_inline_chars`), so it was saved instead.",
+                    shape::grouped(length),
+                    shape::grouped(inline)
+                )
+            } else {
+                String::new()
+            };
+            let room = if select.is_some() {
+                Room::Selection(inline)
+            } else {
+                Room::Preview(inline.min(SAVED_PREVIEW))
+            };
+            (
+                format!(
+                    "{why}\nSaved the whole response, {} bytes, to {}\n`read_result` with `result: \"{}\"` and a \
+                     `select` path returns any part of it, and sends nothing.",
+                    reply.body.len(),
+                    stored.path.display(),
+                    stored.id
+                ),
+                room,
+            )
+        }
+        Some((_, Err(error))) => (
+            format!("\nThe response was not saved: {error}."),
+            Room::Result(endpoint.max_output_chars),
+        ),
+        None => (String::new(), Room::Result(endpoint.max_output_chars)),
+    };
+    let Ok(parts) = serde_json::from_str::<BTreeMap<String, Box<RawValue>>>(&reply.body) else {
+        let excerpt = excerpt(&reply.body, EXCERPT);
+        return Err(format!(
+            "{summary}{saved_note}\nThe response was not a GraphQL response: {excerpt}"
+        ));
+    };
+    if !parts.contains_key("errors") && !parts.contains_key("data") {
+        return Err(capped(
+            format!(
+                "{summary}{saved_note}\nThe response has neither `data` nor `errors`, so it is not a GraphQL \
+                 response:\n{}",
+                reply.body.trim()
+            ),
+            room.limit(),
+            if room.is_of_a_file() {
+                "The file has all of it."
+            } else {
+                ASK_FOR_LESS
+            },
+        ));
+    }
+
+    Ok(laid_out(summary, &saved_note, &reply.body, parts, select, room))
 }

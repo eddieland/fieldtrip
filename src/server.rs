@@ -14,15 +14,17 @@ use serde::Deserialize;
 use serde_json::value::RawValue;
 use tokio::sync::Mutex;
 
-use crate::approval::{self, Operation, Outstanding, Round};
+use crate::approval::{self, Gate, Outstanding, Returned};
 use crate::audit::{self, Attempt, Audit, Outcome, Verdict};
-use crate::config::{Approval, Config, Endpoint, Mutations, show_bytes, show_duration};
+use crate::config::{Approval, Config, Endpoint, Mutations, show_duration};
 use crate::http::Client;
-use crate::library::{self, Saved};
+use crate::library::Saved;
+use crate::listing::{self, Filters};
 use crate::plan::{Kind, Plan, Variables};
 use crate::results::Results;
 use crate::schema::{Loaded, introspection};
 use crate::suggest::backticked;
+use crate::text::{capped, excerpt};
 use crate::{cache, response, results, select, shape};
 
 /// What the server tells a client about itself and how to use it.
@@ -187,14 +189,8 @@ struct ListOperationsArguments {
     name: Option<String>,
 }
 
-/// How many operations `list_operations` shows in full. Past this, each gets one line.
-const FULL_LISTING: usize = 5;
-
 /// How many saved operations `search_schema` lists before the schema's own matches.
 const SEARCH_OPERATIONS: usize = 10;
-
-/// How many operation names a `list_operations` that matched nothing offers instead.
-const NAMES_OFFERED: usize = 20;
 
 /// Arguments of `estimate_cost`.
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -258,173 +254,6 @@ struct ExecuteArguments {
     save: bool,
 }
 
-/// Cuts `text` to `limit` characters and says so, with `advice` on how to get a smaller result.
-fn capped(text: String, limit: usize, advice: &str) -> String {
-    let length = text.chars().count();
-    if length <= limit {
-        return text;
-    }
-    let mut kept: String = text.chars().take(limit).collect();
-    let _ = write!(
-        kept,
-        "\n[fieldtrip cut this off at {limit} characters. The full result had at least {length}. {advice}]"
-    );
-    kept
-}
-
-/// Like [`capped`], but `head` is always kept whole, and only `rest`, which follows it, is cut.
-fn capped_after(head: String, rest: &str, limit: usize, advice: &str) -> String {
-    let head_length = head.chars().count();
-    let length = head_length + rest.chars().count();
-    if length <= limit {
-        return head + rest;
-    }
-    let mut kept = head;
-    kept.extend(rest.chars().take(limit.saturating_sub(head_length)));
-    let _ = write!(
-        kept,
-        "\n[fieldtrip cut this off at {limit} characters. The full result had at least {length}. Errors are never \
-         cut. {advice}]"
-    );
-    kept
-}
-
-/// The most characters shown of a response that was saved to a file.
-const SAVED_PREVIEW: usize = 4_000;
-
-/// Room kept in a result for the note that follows a summary.
-const NOTE_ROOM: usize = 500;
-
-/// The least room the preview of a saved response gets, however long the `errors` before it are: this much, or a
-/// quarter of what the result may hold when that is less.
-const MIN_PREVIEW: usize = 1_000;
-
-/// The most paths shown of a response's shape.
-const SHAPE_PATHS: usize = 40;
-
-/// The most characters of one line of a response's shape.
-const SHAPE_LINE: usize = 200;
-
-/// The shape of `body`, a response that was written to a file, in at most `budget` characters: a heading, then one
-/// line per path. Empty when the body is not JSON.
-fn shape_of(body: &str, budget: usize) -> String {
-    let Ok(response) = serde_json::from_str::<serde_json::Value>(body) else {
-        return String::new();
-    };
-    let lines = shape::lines(&response);
-    let mut out = "\nShape of the whole response, one line per path. `nodes[50]` is a list of 50 items, and `select` \
-                   takes one with `nodes[0]` or all with `nodes[*]`:"
-        .to_owned();
-    let mut room = budget.saturating_sub(out.chars().count() + 40);
-    let mut shown = 0;
-    for line in lines.iter().take(SHAPE_PATHS) {
-        let mut line: String = line.chars().take(SHAPE_LINE).collect();
-        if line.chars().count() == SHAPE_LINE {
-            line.push('…');
-        }
-        let length = line.chars().count() + 1;
-        if length > room {
-            break;
-        }
-        room -= length;
-        let _ = write!(out, "\n{line}");
-        shown += 1;
-    }
-    match lines.len() - shown {
-        0 => {}
-        1 => out.push_str("\n… and 1 more path."),
-        more => {
-            let _ = write!(out, "\n… and {more} more paths.");
-        }
-    }
-    out
-}
-
-/// The result of `execute`: `head`, which ends with the errors, then each of the `rest` of the response's parts as
-/// the server wrote it when they fit in the `room`, or a summary of them that is still valid JSON when not. `shape`
-/// follows a summary of a response that was written to a file.
-fn shown(head: String, rest: &[(String, Box<RawValue>)], room: response::Room, shape: &str) -> String {
-    let limit = room.limit();
-    let mut written = String::new();
-    for (name, value) in rest {
-        let _ = write!(written, "\n{name}: {}", value.get().trim());
-    }
-    let length = head.chars().count() + written.chars().count();
-    if length <= limit {
-        return head + &written;
-    }
-    let parts: serde_json::Map<String, serde_json::Value> = rest
-        .iter()
-        .filter_map(|(name, value)| Some((name.clone(), serde_json::from_str(value.get()).ok()?)))
-        .collect();
-    let mut space = limit.saturating_sub(head.chars().count() + NOTE_ROOM + shape.chars().count());
-    if room.is_of_a_file() {
-        // Errors are never cut, and can use the room up. The preview is all the result shows of the rest.
-        space = space.max(MIN_PREVIEW.min(limit / 4));
-    }
-    match response::summarize(&parts, space) {
-        Some(summary) => {
-            let note = response::note(&summary, length, room);
-            format!("{head}{}\n{note}{shape}", summary.lines)
-        }
-        None if room.is_of_a_file() => {
-            let limit = limit.saturating_sub(shape.chars().count());
-            capped_after(head, &written, limit, "The file has all of it.") + shape
-        }
-        None => capped_after(head, &written, limit, ASK_FOR_LESS),
-    }
-}
-
-/// What a result shows of the GraphQL response `body`, whose top-level members are `parts`.
-///
-/// `summary` comes first, then a line for each connection with more pages, then `saved_note`. Errors follow, whole,
-/// because they say what went wrong. After them comes the part `select` picked, or `data` and the rest, cut to fit
-/// the `room`, and the shape of the response when a preview of a file was cut.
-fn laid_out(
-    summary: String,
-    saved_note: &str,
-    body: &str,
-    mut parts: BTreeMap<String, Box<RawValue>>,
-    select: Option<&select::Path>,
-    room: response::Room,
-) -> String {
-    let mut head = summary;
-    let data = parts.get("data").and_then(|data| serde_json::from_str(data.get()).ok());
-    for hint in data.as_ref().map_or_else(Vec::new, response::page_hints) {
-        let _ = write!(head, "\n{hint}");
-    }
-    head.push_str(saved_note);
-    let errors = parts.remove("errors");
-    let rest = if let Some(path) = select {
-        let picked =
-            serde_json::from_str(body).map_or_else(|_error| select::Selected::nothing(), |whole| path.select(&whole));
-        let _ = write!(head, "\n{}", picked.line);
-        if let Some(errors) = errors.filter(|_| !path.is_in_errors()) {
-            let _ = write!(head, "\nerrors: {}", errors.get().trim());
-        }
-        picked
-            .value
-            .and_then(|value| serde_json::value::to_raw_value(&value).ok())
-            .map(|value| ("selected".to_owned(), value))
-            .into_iter()
-            .collect()
-    } else {
-        if let Some(errors) = errors {
-            let _ = write!(head, "\nerrors: {}", errors.get().trim());
-        }
-        let data = parts.remove("data").map(|data| ("data".to_owned(), data));
-        data.into_iter().chain(parts).collect::<Vec<_>>()
-    };
-    let shape = match room {
-        response::Room::Preview(limit) => shape_of(body, limit / 3),
-        response::Room::Result(_) | response::Room::Selection(_) | response::Room::Read(_) => String::new(),
-    };
-    shown(head, &rest, room, &shape)
-}
-
-/// How `execute` says to get a smaller result.
-const ASK_FOR_LESS: &str = "Ask for less: fewer fields, or a smaller page with `first` or `limit`.";
-
 /// A finished tool call with `text` as its result.
 fn finished(text: String) -> CallToolResponse {
     CallToolResult::success(vec![ContentBlock::text(text)]).into()
@@ -468,7 +297,7 @@ fn planned(
 ) -> Result<Plan, String> {
     Plan::new(schema, name, endpoint, text, variables).map_err(|error| match saved {
         Some(saved) => saved.broken(name, &error),
-        None => error,
+        None => error.into(),
     })
 }
 
@@ -477,232 +306,6 @@ fn planned(
 fn sendable(saved: Option<&Saved>, variables: &Variables) -> (Variables, Option<String>) {
     saved.map_or_else(|| (variables.clone(), None), |saved| saved.sendable(variables))
 }
-
-/// One saved operation on one line: name, kind, cost or `BROKEN`, variables, the glossary terms it was found
-/// `through` and the start of its description.
-fn summary(schema: &Loaded, name: &str, endpoint: &Endpoint, saved: &Saved, through: &[String]) -> String {
-    let mut line = match saved.plan(schema, name, endpoint) {
-        Ok(plan) => format!("{} ({}, cost {}", saved.name, saved.kind.keyword(), plan.cost),
-        Err(_) => format!("{} ({}, BROKEN: no longer valid", saved.name, saved.kind.keyword()),
-    };
-    if !saved.variables.is_empty() {
-        let _ = write!(line, ", {}", saved.variables.join(", "));
-    }
-    if !through.is_empty() {
-        let _ = write!(line, "; glossary: {}", through.join("; "));
-    }
-    line.push(')');
-    if let Some(description) = &saved.description {
-        let mut short: String = description.chars().take(DESCRIPTION_CHARS).collect();
-        if short.len() < description.len() {
-            short.push('…');
-        }
-        let _ = write!(line, "  \"{short}\"");
-    }
-    line
-}
-
-/// How much of a description [`summary`] shows.
-const DESCRIPTION_CHARS: usize = 100;
-
-/// The filters of a `list_operations` call, checked against the schema.
-struct Filters<'call> {
-    query: &'call str,
-    selectors: Vec<library::Selector>,
-    uses: &'call [String],
-    kind: Option<Kind>,
-}
-
-impl<'call> Filters<'call> {
-    /// Reads the filters of `arguments`.
-    fn new(arguments: &'call ListOperationsArguments, schema: &Loaded) -> Result<Self, String> {
-        let kind = match arguments.kind.as_deref().map(str::trim) {
-            None | Some("") => None,
-            Some("query") => Some(Kind::Query),
-            Some("mutation") => Some(Kind::Mutation),
-            Some(other) => return Err(format!("`kind` is `query` or `mutation`, not `{other}`.")),
-        };
-        let selectors = arguments
-            .uses
-            .iter()
-            .map(|text| library::Selector::parse(text, schema))
-            .collect::<Result<_, String>>()?;
-        Ok(Self {
-            query: arguments.query.as_deref().unwrap_or_default().trim(),
-            selectors,
-            uses: &arguments.uses,
-            kind,
-        })
-    }
-
-    /// Whether no filter was given.
-    const fn are_empty(&self) -> bool {
-        self.query.is_empty() && self.uses.is_empty() && self.kind.is_none()
-    }
-
-    /// The filters in words, such as `"order", using `Order.payment`, mutations only`.
-    fn described(&self) -> String {
-        let mut parts = Vec::new();
-        if !self.query.is_empty() {
-            parts.push(format!("\"{}\"", self.query));
-        }
-        if !self.uses.is_empty() {
-            parts.push(format!("using {}", backticked(self.uses.iter().map(String::as_str))));
-        }
-        if let Some(kind) = self.kind {
-            parts.push(format!("{}s only", kind.keyword()));
-        }
-        parts.join(", ")
-    }
-
-    /// The operations of the `endpoint` that pass every filter, each with the glossary terms it was found through.
-    fn apply<'library>(&self, endpoint: &'library Endpoint, schema: &Loaded) -> Vec<(&'library Saved, Vec<String>)> {
-        endpoint
-            .operations
-            .matching_with(self.query, &endpoint.glossary, schema)
-            .into_iter()
-            .filter(|(saved, _)| self.kind.is_none_or(|kind| saved.kind == kind))
-            .filter(|(saved, _)| saved.uses(schema, &self.selectors))
-            .collect()
-    }
-}
-
-/// The result of `list_operations` for the operations of `endpoint` that pass `filters`, followed by the files left
-/// out of the library: in full with no filter, and as a count with one.
-fn operation_list(schema: &Loaded, name: &str, endpoint: &Endpoint, filters: &Filters<'_>) -> String {
-    let mut out = matching_operations(schema, name, endpoint, filters);
-    let library = &endpoint.operations;
-    let operations = library.operation_files_left_out();
-    let fragments = library.fragment_files_left_out();
-    if operations + fragments == 0 {
-        return out;
-    }
-    if filters.are_empty() {
-        out.push_str(
-            "\nLeft out because something is wrong with them, so `execute` cannot run them. Tell the user, who can \
-             fix these files:\n",
-        );
-        for left_out in library.rejected.iter().chain(library.left_out_fragments()) {
-            let _ = writeln!(out, "- {}", left_out.problem);
-        }
-        return out;
-    }
-    let plural = |count: usize, what: &str| format!("{count} {what} file{}", if count == 1 { "" } else { "s" });
-    let counted: Vec<String> = [(operations, "operation"), (fragments, "shared fragment")]
-        .into_iter()
-        .filter(|(count, _)| *count > 0)
-        .map(|(count, what)| plural(count, what))
-        .collect();
-    let _ = writeln!(
-        out,
-        "\n{} {} left out, because something is wrong with them. `list_operations` with no filter lists them.",
-        counted.join(" and "),
-        if operations + fragments == 1 { "was" } else { "were" }
-    );
-    out
-}
-
-/// The part of [`operation_list`] about the operations that pass `filters`.
-fn matching_operations(schema: &Loaded, name: &str, endpoint: &Endpoint, filters: &Filters<'_>) -> String {
-    let library = &endpoint.operations;
-    let total = library.operations.len();
-    let matching = filters.apply(endpoint, schema);
-    let mut out = if filters.are_empty() {
-        let source = library.source.as_ref().map(|source| source.display().to_string());
-        format!(
-            "{total} saved operation{} for `{name}`, from {}.",
-            if total == 1 { "" } else { "s" },
-            source.unwrap_or_default()
-        )
-    } else if matching.is_empty() {
-        let mut out = format!("No saved operation for `{name}` matches {}.", filters.described());
-        if !filters.uses.is_empty() {
-            out.push_str(" An operation marked broken never matches `uses`.");
-        }
-        if total <= NAMES_OFFERED {
-            let names = library.operations.iter().map(|saved| saved.name.as_str());
-            let _ = write!(out, " Its saved operations: {}.", backticked(names));
-        } else {
-            let _ = write!(out, " It has {total}: loosen a filter.");
-        }
-        out.push('\n');
-        return out;
-    } else {
-        format!(
-            "{} of {total} saved operations for `{name}` match {}.",
-            matching.len(),
-            filters.described()
-        )
-    };
-    out.push_str(" Run one with `execute` and `operation_name`, passing the variables it declares.\n");
-    if matching.len() <= FULL_LISTING {
-        for (saved, through) in matching {
-            out.push('\n');
-            listing(&mut out, schema, name, endpoint, saved, &through);
-        }
-        return out;
-    }
-    let _ = writeln!(
-        out,
-        "More than {FULL_LISTING} match, so each is on one line, without its text. Narrow the list with `query`, \
-         `uses` or `kind`, or pass `name` to see one in full.\n"
-    );
-    for (saved, through) in matching {
-        let _ = writeln!(out, "{}", summary(schema, name, endpoint, saved, &through));
-    }
-    out
-}
-
-/// Writes one saved operation for `list_operations`, with the glossary terms it was found `through`.
-fn listing(out: &mut String, schema: &Loaded, name: &str, endpoint: &Endpoint, saved: &Saved, through: &[String]) {
-    let _ = writeln!(out, "{} ({})", saved.name, saved.kind.keyword());
-    if !through.is_empty() {
-        let _ = writeln!(out, "  glossary: {}", through.join("; "));
-    }
-    if let Some(description) = &saved.description {
-        let _ = writeln!(out, "  description: {description}");
-    }
-    let variables = if saved.variables.is_empty() {
-        "none".to_owned()
-    } else {
-        saved.variables.join(", ")
-    };
-    let _ = writeln!(out, "  variables: {variables}");
-    match saved.plan(schema, name, endpoint) {
-        Ok(plan) => {
-            let note = if plan.assumptions.is_empty() {
-                ""
-            } else {
-                ", with sizes assumed: `estimate_cost` with `operation_name` and your variables gives a closer figure"
-            };
-            let _ = writeln!(out, "  estimated cost: {}{note}", plan.cost);
-            if saved.kind == Kind::Mutation && endpoint.mutations == Mutations::Deny {
-                out.push_str("  `execute` refuses it here: the user's config denies mutations for this endpoint.\n");
-            }
-            for line in plan.text.lines() {
-                let _ = writeln!(out, "  {line}");
-            }
-        }
-        Err(error) => {
-            let _ = writeln!(
-                out,
-                "  BROKEN: it no longer validates against the schema, so `execute` will not run it. Tell the user, \
-                 who can fix {}{}.",
-                saved.file.display(),
-                saved.with_fragments()
-            );
-            for problem in library::problems(&error) {
-                let _ = writeln!(out, "  - {problem}");
-            }
-            if let Some(hint) = library::directive_hint(&error) {
-                let _ = writeln!(out, "  {hint}");
-            }
-        }
-    }
-}
-
-/// How much of a response that is not JSON to quote in an error.
-const EXCERPT: usize = 300;
 
 /// How many attempts `history` returns when it is not told.
 const DEFAULT_HISTORY: usize = 20;
@@ -930,16 +533,21 @@ impl Fieldtrip {
                  passing the variables it declares.\n\n",
                 saved.file.display()
             );
-            listing(&mut out, &schema, name, endpoint, saved, &[]);
+            listing::one(&mut out, &schema, name, endpoint, saved, &[]);
             return Ok(capped(
                 out,
                 endpoint.max_output_chars,
                 "The operation is too long to show whole.",
             ));
         }
-        let filters = Filters::new(&arguments, &schema)?;
+        let filters = Filters::new(
+            arguments.query.as_deref(),
+            &arguments.uses,
+            arguments.kind.as_deref(),
+            &schema,
+        )?;
         Ok(capped(
-            operation_list(&schema, name, endpoint, &filters),
+            listing::list(&schema, name, endpoint, &filters),
             endpoint.max_output_chars,
             "Narrow the list with `query`, `uses` or `kind`.",
         ))
@@ -1000,7 +608,11 @@ impl Fieldtrip {
             );
         }
         for (saved, through) in saved.iter().take(SEARCH_OPERATIONS) {
-            let _ = writeln!(operations, "{}", summary(&schema, name, endpoint, saved, through));
+            let _ = writeln!(
+                operations,
+                "{}",
+                listing::summary(&schema, name, endpoint, saved, through)
+            );
         }
         if saved.len() > SEARCH_OPERATIONS {
             let _ = writeln!(
@@ -1142,50 +754,19 @@ impl Fieldtrip {
         };
 
         // Nothing below this point runs unless the human accepted, or the user's config waives the prompt.
-        let (verdict, unasked) = if let Some(waiver) = approval::waiver(endpoint, &plan) {
-            let unasked = format!(" The user was not asked: {}.", waiver.reason);
-            let verdict = Verdict {
-                approval: waiver.label,
-                reason: Some(waiver.reason),
-            };
-            (verdict, unasked)
-        } else {
-            if let Some(client) = approval::auto_accepting(context.client_info().as_ref()) {
-                tracing::warn!("refused an operation on `{name}`: {client} would accept the prompt unseen");
-                let verdict = Verdict {
-                    approval: "unavailable",
-                    reason: Some(format!("{client} accepts approval prompts without showing them")),
-                };
-                self.audit.record(endpoint, &attempt, &verdict, Outcome::NotSent).await;
-                return Err(approval::unseen(name, client));
-            }
-            let prompt = approval::prompt(name, &endpoint.shown_url, &plan, &variables);
-            let decision = if approval::asks_by_round_trip(&context) {
-                let operation = Operation {
-                    endpoint: name,
-                    text: &plan.text,
-                    variables: &variables,
-                };
-                match self
-                    .outstanding
-                    .round(&context, &operation, prompt, state.as_deref(), responses.as_ref())
-                {
-                    Round::Ask(question) => return Ok(question.into()),
-                    Round::Decided(decision) => decision,
-                }
-            } else {
-                approval::ask(&context.peer, prompt).await
-            };
-            let verdict = Verdict {
-                approval: decision.label(),
-                reason: decision.reason(),
-            };
-            if let Err(refusal) = decision.into_result(name) {
-                self.audit.record(endpoint, &attempt, &verdict, Outcome::NotSent).await;
-                return Err(refusal);
-            }
-            (verdict, String::new())
+        let returned = Returned {
+            state: state.as_deref(),
+            responses: responses.as_ref(),
         };
+        let (verdict, unasked) =
+            match approval::gate(&self.outstanding, &context, name, endpoint, &plan, &variables, returned).await {
+                Gate::Open { verdict, unasked } => (verdict, unasked),
+                Gate::Ask(question) => return Ok(question.into()),
+                Gate::Shut { verdict, refusal } => {
+                    self.audit.record(endpoint, &attempt, &verdict, Outcome::NotSent).await;
+                    return Err(refusal);
+                }
+            };
 
         let sent = self
             .http
@@ -1222,93 +803,16 @@ impl Fieldtrip {
         if let Some(note) = &reply.refused_twice {
             let _ = write!(summary, "\n{note}");
         }
-        if reply.cut_short {
-            // Too long to read in full, so it cannot be parsed. The status says whether it is a result.
-            let excerpt: String = reply.body.chars().take(EXCERPT).collect();
-            let unsaved = if arguments.save {
-                " Nothing was saved, because only part of the body was read."
-            } else {
-                ""
-            };
-            let text = format!(
-                "{summary}\n[The response is larger than {}, the `max_response_bytes` limit for this endpoint, so \
-                 fieldtrip read only that much. A cut-off body is not valid JSON, so `data` and `errors` are both \
-                 lost. The operation did reach the server, so a mutation has run. Ask for less: fewer fields, or a \
-                 smaller page with `first` or `limit`, and page through the rest. The user can raise \
-                 `max_response_bytes`.{unsaved}]\n\
-                 It began: {excerpt}",
-                show_bytes(endpoint.max_response_bytes)
-            );
-            return if reply.status < 400 {
-                Ok(finished(text))
-            } else {
-                Err(text)
-            };
-        }
-        let (saved_note, room) = match written {
-            Some((length, Ok(stored))) => {
-                let why = if length > inline {
-                    format!(
-                        "\nThe response has {} characters, more than the {} that are shown here \
-                         (`max_inline_chars`), so it was saved instead.",
-                        shape::grouped(length),
-                        shape::grouped(inline)
-                    )
-                } else {
-                    String::new()
-                };
-                let room = if select.is_some() {
-                    response::Room::Selection(inline)
-                } else {
-                    response::Room::Preview(inline.min(SAVED_PREVIEW))
-                };
-                (
-                    format!(
-                        "{why}\nSaved the whole response, {} bytes, to {}\n`read_result` with `result: \"{}\"` and a \
-                         `select` path returns any part of it, and sends nothing.",
-                        reply.body.len(),
-                        stored.path.display(),
-                        stored.id
-                    ),
-                    room,
-                )
-            }
-            Some((_, Err(error))) => (
-                format!("\nThe response was not saved: {error}."),
-                response::Room::Result(endpoint.max_output_chars),
-            ),
-            None => (String::new(), response::Room::Result(endpoint.max_output_chars)),
-        };
-        let Ok(parts) = serde_json::from_str::<BTreeMap<String, Box<RawValue>>>(&reply.body) else {
-            let excerpt: String = reply.body.chars().take(EXCERPT).collect();
-            return Err(format!(
-                "{summary}{saved_note}\nThe response was not a GraphQL response: {excerpt}"
-            ));
-        };
-        if !parts.contains_key("errors") && !parts.contains_key("data") {
-            return Err(capped(
-                format!(
-                    "{summary}{saved_note}\nThe response has neither `data` nor `errors`, so it is not a GraphQL \
-                     response:\n{}",
-                    reply.body.trim()
-                ),
-                room.limit(),
-                if room.is_of_a_file() {
-                    "The file has all of it."
-                } else {
-                    ASK_FOR_LESS
-                },
-            ));
-        }
-
-        Ok(finished(laid_out(
+        response::render(
             summary,
-            &saved_note,
-            &reply.body,
-            parts,
+            &reply,
+            endpoint,
+            written,
+            inline,
             select.as_ref(),
-            room,
-        )))
+            arguments.save,
+        )
+        .map(finished)
     }
 
     #[tool(
@@ -1348,7 +852,7 @@ impl Fieldtrip {
             stored.path.display()
         );
         let Ok(parts) = serde_json::from_str::<BTreeMap<String, Box<RawValue>>>(&body) else {
-            let excerpt: String = body.chars().take(EXCERPT).collect();
+            let excerpt = excerpt(&body, response::EXCERPT);
             return Err(format!(
                 "{summary}\nThe file does not hold a GraphQL response: it is not JSON, or not a JSON object, so \
                  `select` has nothing to pick from. It begins: {excerpt}"
@@ -1358,9 +862,9 @@ impl Fieldtrip {
         let room = if select.is_some() {
             response::Room::Read(output)
         } else {
-            response::Room::Preview(inline.min(SAVED_PREVIEW))
+            response::Room::Preview(inline.min(response::SAVED_PREVIEW))
         };
-        Ok(laid_out(summary, "", &body, parts, select.as_ref(), room))
+        Ok(response::laid_out(summary, "", &body, parts, select.as_ref(), room))
     }
 
     #[tool(
@@ -1427,7 +931,7 @@ impl Fieldtrip {
 
         // The newest attempts matter most, so when they do not all fit, the oldest are left out.
         let head_room = 400 + notes.chars().count();
-        let mut room = budget.saturating_sub(head_room + NOTE_ROOM);
+        let mut room = budget.saturating_sub(head_room + response::NOTE_ROOM);
         let mut kept = 0;
         for line in recent.iter().rev() {
             let length = line.chars().count() + 1;
@@ -1608,7 +1112,7 @@ impl Fieldtrip {
                     saved.name,
                     saved.file.display(),
                     saved.with_fragments(),
-                    library::problems(&error).join("; ")
+                    error.problems().join("; ")
                 );
             }
         }

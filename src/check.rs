@@ -10,7 +10,7 @@ use std::path::Path;
 
 use crate::config::{Config, Endpoint, Mutations, show_bytes, show_duration};
 use crate::schema::{Loaded, introspection};
-use crate::{approval, cache, http, library, results};
+use crate::{approval, cache, http, results};
 
 /// What the check found.
 #[derive(Debug)]
@@ -289,7 +289,7 @@ fn operations_report(out: &mut Out, name: &str, endpoint: &Endpoint, schema: Opt
                 // endpoint still works, and only that operation is refused.
                 for saved in &endpoint.operations.operations {
                     if let Err(error) = saved.plan(loaded, name, endpoint) {
-                        let problems = library::problems(&error).join("; ");
+                        let problems = error.problems().join("; ");
                         let warning = format!(
                             "`{}` in {}{} no longer validates: {problems}",
                             saved.name,
