@@ -102,6 +102,7 @@ is a pattern over the fields of an operation, and sets a `cost`, a `multiplier`,
 "Query.products"  = { multiplier = 500 }      # an exact path from the root
 "User.orders"     = { multiplier = "take" }   # sized by the `take` argument
 "Query.orders"    = { multiplier = "first", default = 100 }   # and 100 when `first` is left out
+"Query.itemsByIds" = { multiplier = { length = "ids" } }   # one item for each of `ids`. `per = 3` gives three
 "*.reviews"       = { multiplier = 3 }        # `reviews` on any type
 "Mutation.refund" = { cost = 100 }
 ```
@@ -303,3 +304,8 @@ Settled. To change one, ask the user, then add a new dated line instead of editi
   its own, so nothing is assumed. `default` with any other rule stops the server.
 - 2026-11-17: A default the schema declares for the argument still wins over the rule's `default`. The estimate says
   which of the argument and the default it used.
+- 2026-11-17: A `multiplier` written `{ length = "ids" }` sizes a list by how many items the list argument `ids`
+  holds, in the operation or in the variables. `per`, 1 unless set, multiplies it: the items that come back for each
+  one passed in. One value where a list is expected counts as one.
+- 2026-11-17: When that length is not known, as for a variable with no value, the assumed size is used and listed.
+  `introspect` and `check` report a `length` of an argument that no matched field has as a list.

@@ -310,6 +310,8 @@ name it on the endpoint with `costs = "acme.costs.toml"`. The path is relative t
 "Query.viewer.orders" = { multiplier = 2 }        # an exact path from the root
 "User.orders"         = { multiplier = "take" }   # the list is sized by its `take` argument
 "Query.invoices"      = { multiplier = "first", default = 1000 }   # and holds 1,000 when `first` is left out
+"Query.itemsByIds"    = { multiplier = { length = "ids" } }   # one item for each ID passed in
+"Query.linksByIds"    = { multiplier = { length = "ids", per = 3 } }   # about three for each
 "*.reviews"           = { multiplier = 3 }        # `reviews` on any type
 "Mutation.refund"     = { cost = 100 }            # this mutation is expensive
 "User.email"          = { cost = 2 }              # so is this scalar
@@ -324,6 +326,9 @@ name it on the endpoint with `costs = "acme.costs.toml"`. The path is relative t
 - **`multiplier`** replaces the size of a list. A number wins even over a size the operation gives, so use it for
   lists whose real size you know. A string names the argument that carries the size. On a field that is not a list,
   the multiplier bounds the lists directly inside it, which is how pages and connections work.
+  `{ length = "ids" }` takes the size from how many items the list argument `ids` holds, in the operation or in the
+  variables, which suits a batch lookup. `per` multiplies it when each item passed in returns several. Without
+  variables the length isn't known, so the estimate assumes a size and says so.
 - **`default`** goes with a multiplier that names an argument. It is the size when the operation leaves the argument
   out, which is the page size your server applies on its own when the schema doesn't declare one. A default the
   schema does declare still wins. A rule only applies to fields that have the argument, so one line,

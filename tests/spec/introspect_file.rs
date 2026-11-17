@@ -28,7 +28,7 @@ Schema for `store`, read from the file {}.
 
 20 types: 12 objects, 1 interface, 1 union, 3 enums, 2 input objects, 1 scalar
 
-Query (8 fields): viewer, user, users, product, products, search, catalog, node
+Query (9 fields): viewer, user, users, product, products, search, catalog, productsByIds, node
 Mutation (4 fields): createOrder, cancelOrder, deleteUser (deprecated), deactivateUser
 Subscription (1 field): orderUpdated
 Subscriptions can be described but not executed.
@@ -63,8 +63,8 @@ fn keeps_the_loaded_schema_until_asked_to_refresh() {
     let schema_path = mcp.dir().join("schema.graphql");
     let first = mcp.call("introspect", &json!({ "endpoint": "store" }));
     assert!(
-        first.text.contains("Query (8 fields)"),
-        "the fixture has eight queries: {}",
+        first.text.contains("Query (9 fields)"),
+        "the fixture has nine queries: {}",
         first.text
     );
 
@@ -75,14 +75,14 @@ fn keeps_the_loaded_schema_until_asked_to_refresh() {
 
     let cached = mcp.call("introspect", &json!({ "endpoint": "store" }));
     assert!(
-        cached.text.contains("Query (8 fields)"),
+        cached.text.contains("Query (9 fields)"),
         "without refresh the loaded schema is kept: {}",
         cached.text
     );
 
     let refreshed = mcp.call("introspect", &json!({ "endpoint": "store", "refresh": true }));
     assert!(
-        refreshed.text.contains("Query (9 fields)"),
+        refreshed.text.contains("Query (10 fields)"),
         "refresh reads the file again: {}",
         refreshed.text
     );

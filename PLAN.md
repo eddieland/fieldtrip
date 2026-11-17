@@ -267,3 +267,10 @@ cargo test --workspace --all-features
   pattern with stars gives it only to fields that have the argument. `default` without a multiplier that names an
   argument, or one that is not a whole number, stops the server at startup.
   Done when: `cargo test cost_default`
+- [x] **49. Multiplier from a list's length.** A rule such as `{ multiplier = { length = "ids" } }` sizes the list by
+  how many items the list argument holds: written in the operation, passed in `variables`, or declared as a default.
+  `per` multiplies it. One value where a list is expected counts as one. A variable with no value falls back to the
+  assumed size, and the estimate says so. A field without the argument keeps the built-in sizes. `introspect` reports
+  a `length` of an argument that is missing or is not a list. A `length` that is not an argument name, a `per` that
+  is not a whole number, another key in the table, or a `default` next to it stop the server at startup.
+  Done when: `cargo test cost_length`

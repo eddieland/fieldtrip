@@ -382,6 +382,19 @@ impl<'doc> Estimator<'doc> {
                     }
                 }
             }
+            Some((Multiplier::Length { name, per }, rule)) if field.definition.argument_by_name(name).is_some() => {
+                let times = if *per == 1 {
+                    String::new()
+                } else {
+                    format!(", times {per}")
+                };
+                self.used(&format!("multiplier from the length of `{name}`{times}"), rule);
+                takes_a_size = true;
+                match self.length_argument(field, name) {
+                    Size::Known(length) => Size::Known(length.saturating_mul(*per)),
+                    size => size,
+                }
+            }
             _ => self.size_argument(field, &SIZE_ARGUMENTS),
         };
         if !is_list {
@@ -492,6 +505,49 @@ impl<'doc> Estimator<'doc> {
         }
     }
 
+    /// Reads how many items the list argument called `name` gives the field: from the operation, through a
+    /// variable, else from the default the schema declares.
+    fn length_argument(&self, field: &Field, name: &str) -> Size {
+        let given = field
+            .arguments
+            .iter()
+            .find(|argument| argument.name == name)
+            .map(|argument| &*argument.value);
+        let known = match given {
+            Some(Value::Variable(variable)) => {
+                let Some(length) = self.variable_length(variable.as_str()) else {
+                    return Size::Unresolved(variable.to_string());
+                };
+                Some(length)
+            }
+            Some(value) => length(value),
+            None => field
+                .definition
+                .argument_by_name(name)
+                .and_then(|definition| definition.default_value.as_deref())
+                .and_then(length),
+        };
+        known.map_or(Size::Absent, Size::Known)
+    }
+
+    /// The length of a list variable: of what the caller passed, else of the default the operation declares.
+    fn variable_length(&self, name: &str) -> Option<u64> {
+        if let Some(value) = self.variables.get(name) {
+            return match value {
+                serde_json::Value::Null => None,
+                serde_json::Value::Array(items) => Some(count(items.len())),
+                // GraphQL takes one value where a list is expected, as a list of one.
+                _ => Some(1),
+            };
+        }
+        self.operation
+            .variables
+            .iter()
+            .find(|definition| definition.name == name)
+            .and_then(|definition| definition.default_value.as_deref())
+            .and_then(length)
+    }
+
     /// The value of an integer variable: what the caller passed, else the default the operation declares.
     fn variable(&self, name: &str) -> Option<u64> {
         if let Some(value) = self.variables.get(name) {
@@ -510,4 +566,18 @@ impl<'doc> Estimator<'doc> {
 fn integer(value: &Value) -> Option<u64> {
     let Value::Int(int) = value else { return None };
     int.try_to_i32().ok().map(|int| u64::try_from(int).unwrap_or(0))
+}
+
+/// How many items a GraphQL list literal holds. One value where a list is expected is a list of one.
+fn length(value: &Value) -> Option<u64> {
+    match value {
+        Value::Null => None,
+        Value::List(items) => Some(count(items.len())),
+        _ => Some(1),
+    }
+}
+
+/// A count of items as a list size.
+fn count(items: usize) -> u64 {
+    u64::try_from(items).unwrap_or(u64::MAX)
 }

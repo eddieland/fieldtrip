@@ -47,6 +47,13 @@ pub(crate) enum Multiplier {
         /// server applies on its own.
         default: Option<u64>,
     },
+    /// The number of items in the list argument called `name`, times `per`.
+    Length {
+        /// The list argument whose length carries the size.
+        name: String,
+        /// How many items come back for each item passed in.
+        per: u64,
+    },
 }
 
 /// A type followed by field names: `User.orders`, `Query.viewer.orders`, `*.orders`.
@@ -116,6 +123,8 @@ pub(crate) struct Shape<'map> {
     pub(crate) fields: Vec<Option<&'map str>>,
     /// The argument the rule's multiplier names, when it names one.
     pub(crate) argument: Option<&'map str>,
+    /// Whether the multiplier is the length of that argument, which then has to be a list.
+    pub(crate) length: bool,
 }
 
 /// One rule as written in the file.
@@ -172,9 +181,10 @@ impl CostMap {
             anchor: rule.pattern.anchor.name(),
             fields: rule.pattern.fields.iter().map(Part::name).collect(),
             argument: match &rule.multiplier {
-                Some(Multiplier::Argument { name, .. }) => Some(name),
+                Some(Multiplier::Argument { name, .. } | Multiplier::Length { name, .. }) => Some(name),
                 _ => None,
             },
+            length: matches!(rule.multiplier, Some(Multiplier::Length { .. })),
         })
     }
 
@@ -223,6 +233,7 @@ impl Rule {
                 name: argument.clone(),
                 default: None,
             }),
+            Some(toml::Value::Table(table)) => Some(length(table).ok_or_else(|| not_a_multiplier(pattern))?),
             Some(_) => return Err(not_a_multiplier(pattern)),
         };
         let multiplier = match (multiplier, &raw.default) {
@@ -253,16 +264,30 @@ fn whole(value: &toml::Value) -> Option<u64> {
     value.as_integer().and_then(|number| u64::try_from(number).ok())
 }
 
+/// Reads `{ length = "ids" }` or `{ length = "ids", per = 3 }`. `None` when the table is anything else.
+fn length(table: &toml::Table) -> Option<Multiplier> {
+    if table.keys().any(|key| key != "length" && key != "per") {
+        return None;
+    }
+    let name = table.get("length")?.as_str().filter(|name| is_name(name))?;
+    let per = table.get("per").map_or(Some(1), whole)?;
+    Some(Multiplier::Length {
+        name: name.to_owned(),
+        per,
+    })
+}
+
 /// The error for a `cost` that is not a usable number.
 fn not_a_cost(pattern: &str) -> String {
     format!("the `cost` of the rule `{pattern}` must be a whole number, zero or more")
 }
 
-/// The error for a `multiplier` that is neither a usable number nor an argument name.
+/// The error for a `multiplier` that is not a usable number, an argument name or a length.
 fn not_a_multiplier(pattern: &str) -> String {
     format!(
-        "the `multiplier` of the rule `{pattern}` must be a whole number, zero or more, or the name of the argument \
-         that carries the size"
+        "the `multiplier` of the rule `{pattern}` must be a whole number, zero or more, the name of the argument \
+         that carries the size, or the length of a list argument, written `{{ length = \"ids\" }}` or \
+         `{{ length = \"ids\", per = 3 }}` where `per` is a whole number of items for each one passed in"
     )
 }
 
