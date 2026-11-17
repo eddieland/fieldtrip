@@ -14,7 +14,7 @@ use serde::Deserialize;
 use serde_json::value::RawValue;
 use tokio::sync::Mutex;
 
-use crate::approval::{self, Gate, Outstanding, Returned};
+use crate::approval::{self, Approvals, Gate, Request, Returned};
 use crate::audit::{self, Attempt, Audit, Outcome, Verdict};
 use crate::config::{Approval, Config, Endpoint, Mutations, show_duration};
 use crate::http::Client;
@@ -63,8 +63,8 @@ pub(crate) struct Fieldtrip {
     /// Schemas loaded so far, by endpoint name. The lock is held while loading, so each schema loads once.
     schemas: Arc<Mutex<HashMap<String, Arc<Held>>>>,
     http: Client,
-    /// Approval prompts that are waiting for an answer, on protocol revisions that ask by round trip.
-    outstanding: Arc<Outstanding>,
+    /// What is remembered about approvals: prompts waiting for an answer, and queries approved for the session.
+    approvals: Arc<Approvals>,
     /// Where each `execute` attempt is recorded.
     audit: Arc<Audit>,
     /// Where responses too long to show are written.
@@ -378,7 +378,7 @@ impl Fieldtrip {
             config: Arc::new(config),
             schemas: Arc::default(),
             http,
-            outstanding: Arc::default(),
+            approvals: Arc::default(),
             results: Arc::new(results),
             audit: Arc::new(audit),
             tools: Arc::new(tools),
@@ -683,7 +683,10 @@ impl Fieldtrip {
                        with `estimate_cost` first, and use `describe` rather than this tool to explore. The user \
                        approves each request in a prompt that shows the operation exactly as it will be sent, its \
                        variables and its cost, unless their config says otherwise (`list_endpoints` shows who \
-                       approves). Write for that reader: name the operation, pass inputs as variables, and select \
+                       approves). In that prompt the user can approve a query for the rest of the session: it then \
+                       runs without a prompt whatever its variables, and the result says so. So when you run one \
+                       query many times, keep its text the same and change only the variables. Mutations are asked \
+                       about every time. Write for that reader: name the operation, pass inputs as variables, and select \
                        only the fields you need. The result starts with what was sent and its estimated cost, then \
                        a line with the HTTP status, how long the request took, any ID fieldtrip generated for the \
                        request (`sent X-Correlation-Id ...`), and any response headers the user chose to show, such \
@@ -759,19 +762,30 @@ impl Fieldtrip {
         };
 
         // Nothing below this point runs unless the human accepted, or the user's config waives the prompt.
+        let covered = serde_json::Value::Object(variables.clone());
+        let request = Request {
+            tool: "execute",
+            name,
+            endpoint,
+            kind: plan.kind,
+            text: &plan.text,
+            cost: plan.cost,
+            prompt: approval::prompt(name, &endpoint.shown_url, &plan, &variables),
+            covered: &covered,
+            offer_session: plan.kind == Kind::Query,
+        };
         let returned = Returned {
             state: state.as_deref(),
             responses: responses.as_ref(),
         };
-        let (verdict, unasked) =
-            match approval::gate(&self.outstanding, &context, name, endpoint, &plan, &variables, returned).await {
-                Gate::Open { verdict, unasked } => (verdict, unasked),
-                Gate::Ask(question) => return Ok(question.into()),
-                Gate::Shut { verdict, refusal } => {
-                    self.audit.record(endpoint, &attempt, &verdict, Outcome::NotSent).await;
-                    return Err(refusal);
-                }
-            };
+        let (verdict, unasked) = match approval::gate(&self.approvals, &context, request, returned).await {
+            Gate::Open { verdict, unasked } => (verdict, unasked),
+            Gate::Ask(question) => return Ok(question.into()),
+            Gate::Shut { verdict, refusal } => {
+                self.audit.record(endpoint, &attempt, &verdict, Outcome::NotSent).await;
+                return Err(refusal);
+            }
+        };
 
         let sent = self
             .http
@@ -879,7 +893,7 @@ impl Fieldtrip {
                        start of a task that may have been started before, after an interruption, or when the user \
                        asks what was run. Returns the most recent attempts, oldest first, one JSON object per line \
                        with the time, the `session`, the endpoint, the operation's name and text, its variables \
-                       unless the user keeps them out, and `approval`: `accepted`, `auto` or `client` for one that \
+                       unless the user keeps them out, and `approval`: `accepted`, `auto`, `session` or `client` for one that \
                        was sent, with its HTTP `status`, time in `ms` and number of `errors`, or `declined`, \
                        `cancelled`, `unavailable`, `failed` or `denied` with a `reason` for one that was not. The \
                        first line names this session. A response is not in the log, but a line with a `result` \

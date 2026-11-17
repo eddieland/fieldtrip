@@ -339,3 +339,12 @@ make check
   says so, and input objects, root types, built-in types and `describe` of a field have none. Both schema sources give
   the same paths.
   Done when: `cargo test query_paths`
+- [x] **59. Approve a query for the session.** The prompt for a query has one optional field, `approve`, that
+  defaults to "this request only" and offers "this query with any variables, until fieldtrip restarts". An accept
+  that chooses the second lets the same canonical text run on that endpoint with no prompt, whatever its variables,
+  until the server exits, and each such run says the user was not asked and why. An accept that chooses nothing
+  approves one request. Another query, or the same one on another endpoint, is still asked about. A mutation's
+  prompt has no field, and a mutation prompts every time whatever the answer holds. On revision 2026-07-28 the
+  choice comes with the retry, counts only with an accept and with the ticket of its own prompt. The audit log
+  records the later runs as `session`.
+  Done when: `cargo test session_approval`

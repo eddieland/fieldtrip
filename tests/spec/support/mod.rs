@@ -28,6 +28,9 @@ pub(crate) enum Human {
     Absent,
     /// The human accepts every prompt.
     Accepts,
+    /// The human accepts every prompt and answers its field with "for the rest of the session", even on a prompt
+    /// that has no such field.
+    AcceptsForSession,
     /// The human declines every prompt.
     Declines,
     /// The human dismisses every prompt.
@@ -35,6 +38,9 @@ pub(crate) enum Human {
     /// The client says it can show prompts, but answers each one with an error.
     Broken,
 }
+
+/// The value of an approval prompt's field that approves the query for the rest of the session.
+pub(crate) const FOR_SESSION: &str = "this query with any variables, until fieldtrip restarts";
 
 /// The text and error flag of a tool result.
 #[derive(Debug)]
@@ -79,6 +85,7 @@ pub(crate) struct Mcp {
     next_id: u64,
     human: Human,
     prompts: Vec<String>,
+    forms: Vec<Value>,
     dir: TempDir,
     instructions: Option<String>,
     client: String,
@@ -347,6 +354,7 @@ impl Mcp {
             next_id: 0,
             human,
             prompts: Vec::new(),
+            forms: Vec::new(),
             dir,
             instructions: None,
             client: TEST_CLIENT.to_owned(),
@@ -428,6 +436,11 @@ impl Mcp {
         &self.prompts
     }
 
+    /// The form of every approval prompt the server has shown so far: its `requestedSchema`.
+    pub(crate) fn forms(&self) -> &[Value] {
+        &self.forms
+    }
+
     /// Ends the session, waits for the server to exit, and returns everything it wrote to stderr.
     pub(crate) fn finish(mut self) -> String {
         drop(self.stdin.take());
@@ -493,7 +506,18 @@ impl Mcp {
                     .and_then(Value::as_str)
                     .unwrap_or_default();
                 self.prompts.push(prompt.to_owned());
+                self.forms.push(
+                    message
+                        .pointer("/params/requestedSchema")
+                        .cloned()
+                        .unwrap_or(Value::Null),
+                );
                 match self.human {
+                    Human::AcceptsForSession => json!({
+                        "jsonrpc": "2.0",
+                        "id": id,
+                        "result": { "action": "accept", "content": { "approve": FOR_SESSION } },
+                    }),
                     Human::Accepts => {
                         json!({ "jsonrpc": "2.0", "id": id, "result": { "action": "accept", "content": {} } })
                     }

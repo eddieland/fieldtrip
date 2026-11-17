@@ -137,12 +137,16 @@ the operation that will be sent and shows the endpoint, the kind (query or mutat
 variables and the estimated cost. The request is sent only on an explicit accept. Up to MCP revision 2025-11-25 the
 prompt is a request from the server. From 2026-07-28 it is an "input required" result, answered on a retry.
 
+A query's prompt has one optional field, `approve`: "this request only", the default, or "this query with any
+variables, until fieldtrip restarts". A mutation's prompt has no field.
+
 | Situation | Outcome |
 | --- | --- |
 | Human accepts | Sent |
 | Human declines, cancels, or the prompt fails or times out | Not sent |
 | Client has no elicitation support | Not sent |
 | Query with cost at or below `auto_approve_cost` | Sent without a prompt |
+| Query the human approved for the session, with any variables | Sent without a prompt |
 | Endpoint sets `approval = "client"` | Sent without a prompt, mutations included |
 | Mutation, and the endpoint or its template sets `mutations = "deny"` | Not sent, and no prompt is shown |
 | A prompt is needed, and the client is known to accept prompts unseen | Not sent, and no prompt is shown |
@@ -403,3 +407,14 @@ Settled. To change one, ask the user, then add a new dated line instead of editi
   `... on`, then the schema's field order, then possible types by name, so both schema sources answer alike.
 - 2026-11-17: A path never passes through a root type, so a field that returns `Query` is not a way in. A type with no
   path says so. Input objects, root types, built-in types and `describe` of a field have none.
+- 2026-11-17: A query's prompt has one optional field, with which the human approves that query for the rest of the
+  session. This replaces the 2026-11-12 line that gave the prompt no form fields, for queries. A mutation's prompt
+  still has none, and a mutation prompts every time, which the 2026-11-12 line on mutations already says.
+- 2026-11-17: Only an accept that explicitly chooses the session grants it. An accept with the field left out or set
+  to anything else approves the one request, so a client that accepts unseen can grant nothing more.
+- 2026-11-17: A session approval covers one endpoint and one canonical text, by its SHA-256, with any variables,
+  whatever they cost. It is kept in memory and ends when the server does. No tool can grant, list or extend one.
+- 2026-11-17: A run let through by a session approval says so in its result, and the audit log records it as
+  `session`. The accept that granted it is `accepted`, with a reason that says so.
+- 2026-11-17: An approval on revision 2026-07-28 is tied to the tool that asked, as well as to the operation and its
+  variables.

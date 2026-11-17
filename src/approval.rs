@@ -22,8 +22,10 @@ use crate::plan::{Kind, Plan, Variables};
 /// What came of asking.
 #[derive(Debug)]
 enum Decision {
-    /// The human accepted.
+    /// The human accepted this one request.
     Approved,
+    /// The human accepted, and chose to let the same query run for the rest of the session.
+    ApprovedForSession,
     /// The human declined.
     Declined,
     /// The human dismissed the prompt without answering.
@@ -38,7 +40,7 @@ impl Decision {
     /// The word the audit log records for this decision.
     pub(crate) const fn label(&self) -> &'static str {
         match self {
-            Self::Approved => "accepted",
+            Self::Approved | Self::ApprovedForSession => "accepted",
             Self::Declined => "declined",
             Self::Cancelled => "cancelled",
             Self::Unavailable => "unavailable",
@@ -46,10 +48,11 @@ impl Decision {
         }
     }
 
-    /// Why nothing was sent, in a few words, for the audit log. `None` for an approval.
+    /// Why nothing was sent, in a few words, for the audit log. `None` for a plain approval.
     pub(crate) fn reason(&self) -> Option<String> {
         match self {
             Self::Approved => None,
+            Self::ApprovedForSession => Some("the user approved this query for the rest of the session".to_owned()),
             Self::Declined => Some("the user declined".to_owned()),
             Self::Cancelled => Some("the user dismissed the prompt without answering".to_owned()),
             Self::Unavailable => Some("the MCP client cannot show approval prompts".to_owned()),
@@ -61,7 +64,7 @@ impl Decision {
     /// sent to `endpoint` and what to do next.
     pub(crate) fn into_result(self, endpoint: &str) -> Result<(), String> {
         match self {
-            Self::Approved => Ok(()),
+            Self::Approved | Self::ApprovedForSession => Ok(()),
             Self::Declined => Err(format!(
                 "The user declined. Nothing was sent to `{endpoint}`. Do not send this operation again unless the \
                  user asks for it."
@@ -117,8 +120,8 @@ pub(crate) fn refuse_denied_mutation(name: &str, endpoint: &Endpoint, operation:
 }
 
 /// The MCP clients known to accept a prompt with no fields without showing it to anyone, by the `clientInfo.name`
-/// they give, in lowercase, and the name to show. fieldtrip's prompt has no fields, so asking one of these would
-/// approve the operation unseen.
+/// they give, in lowercase, and the name to show. A mutation's prompt has no fields and a query's one field is
+/// optional, so asking one of these would approve the operation unseen.
 const AUTO_ACCEPTING: [(&str, &str); 1] = [("opencode", "OpenCode")];
 
 /// The name of the client, when `client` is one that accepts fieldtrip's prompts without showing them.
@@ -152,23 +155,105 @@ struct Waiver {
     pub(crate) reason: String,
 }
 
-/// Why `plan` may be sent to `endpoint` without asking, when the user's config says so. `None` means ask.
+/// Why an operation of `kind` and estimated `cost` may be sent to `endpoint` without asking, when the user's config
+/// says so, or when the user `approved` this very query for the session. `None` means ask.
 ///
-/// Both ways out are set by the user in the config file. Mutations are only ever waived by `approval = "client"`.
-fn waiver(endpoint: &Endpoint, plan: &Plan) -> Option<Waiver> {
+/// The config's two ways out are set by the user in the config file, and the third by the user in a prompt.
+/// Mutations are only ever waived by `approval = "client"`.
+fn waiver(endpoint: &Endpoint, kind: Kind, cost: u64, approved: bool) -> Option<Waiver> {
     if endpoint.approval == Approval::Client {
         return Some(Waiver {
             label: "client",
             reason: "approval is left to the MCP client for this endpoint".to_owned(),
         });
     }
-    let threshold = endpoint
-        .auto_approve_cost
-        .filter(|threshold| plan.kind == Kind::Query && plan.cost <= *threshold)?;
-    Some(Waiver {
-        label: "auto",
-        reason: format!("the cost is within `auto_approve_cost` ({threshold})"),
+    if kind != Kind::Query {
+        return None;
+    }
+    if let Some(threshold) = endpoint.auto_approve_cost.filter(|threshold| cost <= *threshold) {
+        return Some(Waiver {
+            label: "auto",
+            reason: format!("the cost is within `auto_approve_cost` ({threshold})"),
+        });
+    }
+    approved.then(|| Waiver {
+        label: "session",
+        reason: "they approved this query, with any variables, for the rest of the session".to_owned(),
     })
+}
+
+/// The queries the user has approved for the rest of the session, from the prompt's one field.
+///
+/// An approval covers one endpoint and one canonical text, whatever the variables. It is kept by the SHA-256 the
+/// audit log records, lives in memory only, and so ends when the server does. Mutations are never in here.
+#[derive(Debug, Default)]
+struct Standing {
+    /// Endpoint names with the hash of an approved text.
+    approved: Mutex<HashSet<(String, String)>>,
+}
+
+impl Standing {
+    /// Whether the user approved the query `text` on `endpoint` for the session.
+    fn covers(&self, endpoint: &str, text: &str) -> bool {
+        self.approved
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .contains(&(endpoint.to_owned(), crate::audit::hash(text)))
+    }
+
+    /// Records that the user approved the query `text` on `endpoint` for the session.
+    fn grant(&self, endpoint: &str, text: &str) {
+        self.approved
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert((endpoint.to_owned(), crate::audit::hash(text)));
+    }
+}
+
+/// The name of the prompt's one field, which a query's prompt has and a mutation's does not.
+const SCOPE: &str = "approve";
+/// The field's default: the accept covers the request shown and nothing else.
+const ONCE: &str = "this request only";
+/// The field's other value: the accept also covers later runs of the same query.
+const FOR_SESSION: &str = "this query with any variables, until fieldtrip restarts";
+
+/// The form of an approval prompt. With `offer_session` it has one optional field, which lets the human approve the
+/// query for the rest of the session. Without, it has none.
+///
+/// The field is optional and defaults to one request, so an accept that fills nothing in, as from a client that
+/// accepts without showing the prompt, approves no more than the request it was asked about.
+fn form(offer_session: bool) -> ElicitationSchema {
+    let plain = || ElicitationSchema::new(BTreeMap::new());
+    if !offer_session {
+        return plain();
+    }
+    serde_json::from_value(serde_json::json!({
+        "type": "object",
+        "properties": {
+            SCOPE: {
+                "type": "string",
+                "title": "Approve",
+                "description": "Choose the second to stop being asked about this query: it then runs without a \
+                                prompt, whatever its variables, until fieldtrip restarts.",
+                "enum": [ONCE, FOR_SESSION],
+                "default": ONCE,
+            },
+        },
+    }))
+    .unwrap_or_else(|_error| plain())
+}
+
+/// What an accept approves, from the `content` that came with it. Only an explicit choice of the session, on a
+/// prompt that offered it, is more than the one request.
+fn accepted(offered_session: bool, content: Option<&serde_json::Value>) -> Decision {
+    let chosen = content
+        .and_then(|content| content.get(SCOPE))
+        .and_then(serde_json::Value::as_str);
+    if offered_session && chosen == Some(FOR_SESSION) {
+        Decision::ApprovedForSession
+    } else {
+        Decision::Approved
+    }
 }
 
 /// One line saying who approves operations for `endpoint`, for `list_endpoints`. `unseen` is the name of a client
@@ -199,7 +284,7 @@ pub(crate) fn policy(endpoint: &Endpoint) -> String {
 ///
 /// Everything in it comes from the parsed operation, the variables and the config. It is what will be sent, and
 /// nothing the calling agent wrote about it.
-fn prompt(endpoint: &str, url: &str, plan: &Plan, variables: &Variables) -> String {
+pub(crate) fn prompt(endpoint: &str, url: &str, plan: &Plan, variables: &Variables) -> String {
     let kind = plan.kind.keyword();
     let article = if kind.starts_with(['a', 'e', 'i', 'o', 'u']) {
         "an"
@@ -226,20 +311,20 @@ fn prompt(endpoint: &str, url: &str, plan: &Plan, variables: &Variables) -> Stri
     out
 }
 
-/// Shows `prompt` to the human and waits for the answer. Only [`Decision::Approved`] allows sending.
-async fn ask(peer: &Peer<RoleServer>, prompt: String) -> Decision {
+/// Shows `prompt` to the human and waits for the answer. Only an approval allows sending. With `offer_session` the
+/// prompt has the field that approves a query for the session.
+async fn ask(peer: &Peer<RoleServer>, prompt: String, offer_session: bool) -> Decision {
     if !peer.supported_elicitation_modes().contains(&ElicitationMode::Form) {
         return Decision::Unavailable;
     }
     let request = ElicitRequestParams::FormElicitationParams {
         meta: None,
         message: prompt,
-        // No fields to fill in: the prompt is a plain accept or decline.
-        requested_schema: ElicitationSchema::new(BTreeMap::new()),
+        requested_schema: form(offer_session),
     };
     match peer.create_elicitation(request).await {
         Ok(result) => match result.action {
-            ElicitationAction::Accept => Decision::Approved,
+            ElicitationAction::Accept => accepted(offer_session, result.content.as_ref()),
             ElicitationAction::Decline => Decision::Declined,
             ElicitationAction::Cancel => Decision::Cancelled,
             // The action list can grow. Anything that is not a plain accept is treated as a refusal.
@@ -296,20 +381,52 @@ pub(crate) struct Returned<'call> {
     pub(crate) responses: Option<&'call InputResponses>,
 }
 
-/// Decides whether `plan` may be sent to the endpoint called `name`, asking the human when the config calls for it.
+/// What a tool asks to send, as the approval step sees it.
+pub(crate) struct Request<'call> {
+    /// The tool that asks.
+    pub(crate) tool: &'static str,
+    /// The endpoint's name.
+    pub(crate) name: &'call str,
+    /// The endpoint.
+    pub(crate) endpoint: &'call Endpoint,
+    /// Whether the operation is a query or a mutation.
+    pub(crate) kind: Kind,
+    /// The operation's canonical text.
+    pub(crate) text: &'call str,
+    /// The estimated cost of everything the call would send.
+    pub(crate) cost: u64,
+    /// The prompt to show when the human has to be asked.
+    pub(crate) prompt: String,
+    /// The variables, and whatever else about the call decides what is sent. An approval covers exactly this.
+    pub(crate) covered: &'call serde_json::Value,
+    /// Whether the prompt lets the human approve the query for the rest of the session.
+    pub(crate) offer_session: bool,
+}
+
+/// What the server remembers about approvals between calls.
+#[derive(Debug, Default)]
+pub(crate) struct Approvals {
+    /// Approval prompts that are waiting for an answer, on protocol revisions that ask by round trip.
+    outstanding: Outstanding,
+    /// The queries the user approved for the rest of the session.
+    standing: Standing,
+}
+
+/// Decides whether `request` may be sent, asking the human when the config calls for it.
 ///
-/// This is the only way to a [`Gate::Open`]: the user's config waives the prompt, or the human accepted it. Every
-/// other path ends in a refusal or, on a round-trip revision, in the question itself.
+/// This is the only way to a [`Gate::Open`]: the user's config waives the prompt, the user approved this very query
+/// for the session, or the human accepted the prompt. Every other path ends in a refusal or, on a round-trip
+/// revision, in the question itself.
 pub(crate) async fn gate(
-    outstanding: &Outstanding,
+    approvals: &Approvals,
     context: &RequestContext<RoleServer>,
-    name: &str,
-    endpoint: &Endpoint,
-    plan: &Plan,
-    variables: &Variables,
+    request: Request<'_>,
     returned: Returned<'_>,
 ) -> Gate {
-    if let Some(waiver) = waiver(endpoint, plan) {
+    let Request { name, endpoint, .. } = request;
+    let is_query = request.kind == Kind::Query;
+    let standing = is_query && approvals.standing.covers(name, request.text);
+    if let Some(waiver) = waiver(endpoint, request.kind, request.cost, standing) {
         return Gate::Open {
             unasked: format!(" The user was not asked: {}.", waiver.reason),
             verdict: Verdict {
@@ -328,25 +445,44 @@ pub(crate) async fn gate(
             refusal: unseen(name, client),
         };
     }
-    let prompt = prompt(name, &endpoint.shown_url, plan, variables);
+    let offer_session = request.offer_session && is_query;
     let decision = if asks_by_round_trip(context) {
         let operation = Operation {
+            tool: request.tool,
             endpoint: name,
-            text: &plan.text,
-            variables,
+            text: request.text,
+            variables: request.covered,
         };
-        match outstanding.round(context, &operation, prompt, returned.state, returned.responses) {
+        let round = approvals.outstanding.round(
+            context,
+            &operation,
+            request.prompt,
+            offer_session,
+            returned.state,
+            returned.responses,
+        );
+        match round {
             Round::Ask(question) => return Gate::Ask(question),
             Round::Decided(decision) => decision,
         }
     } else {
-        ask(&context.peer, prompt).await
+        ask(&context.peer, request.prompt, offer_session).await
     };
     let verdict = Verdict {
         approval: decision.label(),
         reason: decision.reason(),
     };
+    let for_session = matches!(decision, Decision::ApprovedForSession);
     match decision.into_result(name) {
+        Ok(()) if for_session => {
+            approvals.standing.grant(name, request.text);
+            Gate::Open {
+                verdict,
+                unasked: " The user approved this query for the rest of the session: until fieldtrip restarts it \
+                          runs without a prompt, whatever its variables."
+                    .to_owned(),
+            }
+        }
         Ok(()) => Gate::Open {
             verdict,
             unasked: String::new(),
@@ -371,7 +507,7 @@ enum Round {
 /// operation. The ticket goes out as the request state and must come back with the answer. An accept counts only
 /// when its ticket is outstanding and its fingerprint matches the operation in the call that carries it.
 #[derive(Debug, Default)]
-pub(crate) struct Outstanding {
+struct Outstanding {
     /// Keys the fingerprints. It is random per process, so a ticket means nothing to another server.
     key: RandomState,
     /// The numbers of the prompts that are waiting for an answer.
@@ -388,6 +524,7 @@ impl Outstanding {
         context: &RequestContext<RoleServer>,
         operation: &Operation<'_>,
         prompt: String,
+        offer_session: bool,
         state: Option<&str>,
         responses: Option<&InputResponses>,
     ) -> Round {
@@ -399,16 +536,17 @@ impl Outstanding {
             return Round::Decided(Decision::Unavailable);
         }
         let Some(responses) = responses else {
-            return Round::Ask(self.ask(operation, prompt));
+            return Round::Ask(self.ask(operation, prompt, offer_session));
         };
         if !self.redeem(state, operation) {
             return Round::Decided(Decision::Failed(
                 "the approval that came back was not given for this operation, or was already used".to_owned(),
             ));
         }
-        let action = responses.get(APPROVAL_KEY).and_then(|response| response.get("action"));
+        let response = responses.get(APPROVAL_KEY);
+        let action = response.and_then(|response| response.get("action"));
         Round::Decided(match action.and_then(|action| action.as_str()) {
-            Some("accept") => Decision::Approved,
+            Some("accept") => accepted(offer_session, response.and_then(|response| response.get("content"))),
             Some("decline") => Decision::Declined,
             Some("cancel") => Decision::Cancelled,
             _ => Decision::Failed("the client did not answer the approval prompt".to_owned()),
@@ -416,7 +554,7 @@ impl Outstanding {
     }
 
     /// Issues a ticket for `operation` and builds the result that asks the human.
-    fn ask(&self, operation: &Operation<'_>, prompt: String) -> InputRequiredResult {
+    fn ask(&self, operation: &Operation<'_>, prompt: String, offer_session: bool) -> InputRequiredResult {
         // A fresh `RandomState` is keyed differently every time, which makes this a number nobody can predict.
         let number = RandomState::new().hash_one(0_u8);
         {
@@ -430,7 +568,7 @@ impl Outstanding {
         let request = ElicitRequest::new(ElicitRequestParams::FormElicitationParams {
             meta: None,
             message: prompt,
-            requested_schema: ElicitationSchema::new(BTreeMap::new()),
+            requested_schema: form(offer_session),
         });
         let requests = BTreeMap::from([(APPROVAL_KEY.to_owned(), InputRequest::Elicitation(request))]);
         InputRequiredResult::new(Some(requests), Some(ticket))
@@ -457,19 +595,25 @@ impl Outstanding {
 
     /// A keyed hash of a ticket number and everything that makes up the operation.
     fn fingerprint(&self, number: u64, operation: &Operation<'_>) -> u64 {
-        let variables = serde_json::Value::Object(operation.variables.clone()).to_string();
-        self.key
-            .hash_one((number, operation.endpoint, operation.text, variables))
+        self.key.hash_one((
+            number,
+            operation.tool,
+            operation.endpoint,
+            operation.text,
+            operation.variables.to_string(),
+        ))
     }
 }
 
-/// What an approval covers: where the operation goes, its canonical text, and its variables.
+/// What an approval covers: the tool that asked, where the operation goes, its canonical text, and its variables.
 #[derive(Debug, Clone, Copy)]
 struct Operation<'call> {
+    /// The tool that asked, so that an approval given to one tool is no use to another.
+    pub(crate) tool: &'static str,
     /// The endpoint's name.
     pub(crate) endpoint: &'call str,
     /// The operation in canonical form, as it is shown and sent.
     pub(crate) text: &'call str,
-    /// The variables that are sent with it.
-    pub(crate) variables: &'call Variables,
+    /// The variables that are sent with it, and whatever else about the call decides what is sent.
+    pub(crate) variables: &'call serde_json::Value,
 }

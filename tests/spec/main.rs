@@ -107,6 +107,8 @@ mod schema_cache;
 #[cfg(test)]
 mod search_schema;
 #[cfg(test)]
+mod session_approval;
+#[cfg(test)]
 mod shared_fragments;
 #[cfg(test)]
 mod skipped_files;

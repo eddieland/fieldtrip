@@ -285,7 +285,7 @@ pub(crate) fn mutation_name(text: &str) -> Option<String> {
 }
 
 /// `sha256:` and the SHA-256 of `text`, in lowercase hex.
-fn hash(text: &str) -> String {
+pub(crate) fn hash(text: &str) -> String {
     let digest = Sha256::digest(text.as_bytes());
     let mut out = String::with_capacity(7 + 64);
     out.push_str("sha256:");
