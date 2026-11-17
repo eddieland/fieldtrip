@@ -20,8 +20,10 @@ fn url_alone_serves_one_introspected_endpoint() {
     );
 
     let described = mcp.call("describe", &json!({ "endpoint": "default", "name": "Money" }));
-    assert_eq!(
-        described.text, "type Money {\n  amountCents: Int!\n  currency: Currency!\n}\n",
+    assert!(
+        described
+            .text
+            .starts_with("type Money {\n  amountCents: Int!\n  currency: Currency!\n}\n"),
         "the schema is loaded by introspection"
     );
     assert_eq!(mock.requests().len(), 1, "one introspection request");

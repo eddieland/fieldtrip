@@ -6,13 +6,13 @@ use apollo_compiler::Name;
 use apollo_compiler::ast::Type;
 use apollo_compiler::schema::ExtendedType;
 
-use super::{Loaded, render};
+use super::{Loaded, references, render};
 use crate::suggest::{backticked, nearest};
 
 /// How many near matches to offer when a name is unknown.
 const SUGGESTIONS: usize = 5;
 
-/// Returns compact SDL for `name`, which is a type name or `Type.field`.
+/// Returns compact SDL for `name`, which is a type name or `Type.field`. A type is followed by what uses it.
 pub(super) fn describe(loaded: &Loaded, name: &str) -> Result<String, String> {
     let name = name.trim();
     match name.split_once('.') {
@@ -20,6 +20,7 @@ pub(super) fn describe(loaded: &Loaded, name: &str) -> Result<String, String> {
             let ty = lookup_type(loaded, name)?;
             let mut out = String::new();
             render::type_definition(&mut out, ty, loaded.implementers.get(name));
+            references::used_by(&mut out, loaded, name);
             Ok(out)
         }
         Some((type_name, field_name)) => describe_field(loaded, type_name.trim(), field_name.trim()),

@@ -4,6 +4,7 @@ mod describe;
 pub(crate) mod introspection;
 mod lint;
 mod overview;
+mod references;
 mod render;
 mod search;
 
@@ -59,6 +60,21 @@ impl Loaded {
     /// The validated schema, for checking operations against.
     pub(crate) const fn schema(&self) -> &Valid<Schema> {
         &self.schema
+    }
+
+    /// The names of the root operation types the schema has, in the order query, mutation, subscription.
+    fn root_names(&self) -> Vec<&str> {
+        let definition = &self.schema.schema_definition;
+        [&definition.query, &definition.mutation, &definition.subscription]
+            .into_iter()
+            .flatten()
+            .map(|root| root.name.as_str())
+            .collect()
+    }
+
+    /// Whether `name` is one of the root operation types.
+    fn is_root(&self, name: &str) -> bool {
+        self.root_names().contains(&name)
     }
 
     /// Whether the schema defines a type called `name`.

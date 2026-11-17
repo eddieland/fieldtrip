@@ -561,8 +561,11 @@ impl Fieldtrip {
                        (`User`) or a field (`Query.user`, `Mutation.createOrder`). For a field, the result also \
                        defines the types of its arguments and its return type, which shows the required arguments \
                        (marked `!`), what an input object needs, and what you can select next. An interface or union \
-                       lists its possible types: select their own fields with `... on Type`. Avoid anything marked \
-                       deprecated; its reason names the replacement.",
+                       lists its possible types: select their own fields with `... on Type`. A type ends with what \
+                       uses it: the unions it belongs to, then every field that returns it, argument that takes it \
+                       (written `Type.field(argument:)`) and input field that holds it, so you can work back from a \
+                       type you found to where it appears. Avoid anything marked deprecated; its reason names the \
+                       replacement.",
         annotations(read_only_hint = true, open_world_hint = true)
     )]
     async fn describe(&self, Parameters(arguments): Parameters<DescribeArguments>) -> ToolResult {

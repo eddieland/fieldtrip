@@ -113,6 +113,8 @@ mod templates;
 #[cfg(test)]
 mod tool_descriptions;
 #[cfg(test)]
+mod type_uses;
+#[cfg(test)]
 mod unauthorized_retry;
 #[cfg(test)]
 mod url_secrets;

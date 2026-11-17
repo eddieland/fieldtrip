@@ -326,3 +326,9 @@ make check
   went to a file has `result`, its ID, and `history` lists after its lines the files that still exist, with their
   paths, and counts the ones that are gone.
   Done when: `cargo test result_files`
+- [x] **57. What uses a type.** `describe` of a type ends with the unions it belongs to, as `# member of:`, and then,
+  as `# used by:`, every field that returns it, argument that takes it, written `Type.field(argument:)`, and input
+  field that holds it. Root types come first, then the other types by name, so both schema sources give the same
+  text. At most 30 uses are listed and the rest are counted, a type nothing uses says so, and root types, built-in
+  types and `describe` of a field list none.
+  Done when: `cargo test type_uses`

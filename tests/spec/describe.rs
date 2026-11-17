@@ -40,6 +40,8 @@ type User implements Node {
   orders(first: Int, last: Int): [Order!]!
   nickname: String @deprecated(reason: \"Use name.\")
 }
+# member of: SearchResult
+# used by: Query.viewer, Query.user, Mutation.deactivateUser, Order.customer, Review.author, UserConnection.nodes
 ";
     assert_eq!(
         describe("User"),
@@ -56,6 +58,7 @@ interface Node {
   id: ID!
 }
 # implemented by: User, Product, Order
+# used by: Query.node
 ";
     assert_eq!(describe("Node"), expected, "an interface says which types implement it");
 }
@@ -64,24 +67,24 @@ interface Node {
 fn a_union_an_enum_an_input_and_a_scalar() {
     assert_eq!(
         describe("SearchResult"),
-        "union SearchResult = User | Product\n",
+        "union SearchResult = User | Product\n# used by: Query.search\n",
         "union"
     );
     assert_eq!(
         describe("OrderStatus"),
         "enum OrderStatus {\n  PENDING\n  PAID\n  SHIPPED\n  CANCELLED\n  \
-         REFUNDED @deprecated(reason: \"Refunds are tracked on payments now.\")\n}\n",
+         REFUNDED @deprecated(reason: \"Refunds are tracked on payments now.\")\n}\n# used by: Order.status\n",
         "enum"
     );
     assert_eq!(
         describe("CreateOrderInput"),
         "input CreateOrderInput {\n  items: [OrderItemInput!]!\n  \"Free-text note for the warehouse.\"\n  \
-         note: String\n  currency: Currency = USD\n}\n",
+         note: String\n  currency: Currency = USD\n}\n# used by: Mutation.createOrder(input:)\n",
         "input object, with its default value"
     );
     assert_eq!(
         describe("DateTime"),
-        "\"An ISO 8601 timestamp.\"\nscalar DateTime\n",
+        "\"An ISO 8601 timestamp.\"\nscalar DateTime\n# used by: Order.placedAt\n",
         "scalar"
     );
 }

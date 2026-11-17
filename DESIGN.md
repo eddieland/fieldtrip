@@ -26,7 +26,7 @@ in the user's config, out of the agent's sight and out of its control.
 | `list_operations` | `endpoint`, `query?`, `uses?`, `kind?`, `name?` | Saved operations: name, kind, description, variables, cost, text |
 | `introspect` | `endpoint`, `refresh?` | Overview: root types, counts, query and mutation names |
 | `search_schema` | `endpoint`, `query` | Glossary targets, then ranked matches as one-line signatures |
-| `describe` | `endpoint`, `name` (`Type` or `Type.field`) | That definition as compact SDL |
+| `describe` | `endpoint`, `name` (`Type` or `Type.field`) | That definition as compact SDL. A type adds what uses it |
 | `estimate_cost` | `endpoint`, `operation` or `operation_name`, `variables?` | Validation errors, or cost, depth, breakdown, assumptions |
 | `execute` | `endpoint`, `operation` or `operation_name`, `variables?`, `select?`, `save?` | Status, `errors`, then the rest, or a file's path with a preview |
 | `read_result` | `result`, `select?` | Part of a response `execute` wrote to a file, by a path. Sends nothing |
@@ -388,3 +388,10 @@ Settled. To change one, ask the user, then add a new dated line instead of editi
   session's `<result>.json`, so the log holds no path.
 - 2026-11-17: `history` still gives the lines as written. After them it lists the files that still exist for the lines
   shown, and counts those that are gone. This adds to the 2026-11-14 line on `history`.
+- 2026-11-17: `describe` of a type ends with what uses it: `# member of:` names the unions it belongs to, then
+  `# used by:` lists every field that returns it, argument that takes it, as `Type.field(argument:)`, and input field
+  that holds it, lists and `!` aside. A type nothing uses says so. `describe` of a field is unchanged.
+- 2026-11-17: Uses are ordered by the root types, query, mutation and subscription, then the other types by name, and
+  by field order within a type, so an introspected schema and a schema file answer alike. At most 30 are listed and
+  the rest are counted. Root types and built-in types list none.
+- 2026-11-17: Directive arguments are not uses, since an introspected schema carries no directive definitions.

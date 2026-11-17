@@ -246,8 +246,10 @@ fn the_other_tools_work_on_this_revision() {
     let described = client.call("describe", &json!({ "endpoint": "store", "name": "Money" }));
     let estimated = client.call("estimate_cost", &arguments(QUERY));
 
-    assert_eq!(
-        described.text, "type Money {\n  amountCents: Int!\n  currency: Currency!\n}\n",
+    assert!(
+        described
+            .text
+            .starts_with("type Money {\n  amountCents: Int!\n  currency: Currency!\n}\n"),
         "describe"
     );
     assert!(
