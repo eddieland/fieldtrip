@@ -167,7 +167,8 @@ context than the rest of a task. A longer response is written whole to a file, a
 
 The file is in `fieldtrip/responses` under your cache directory (`$XDG_CACHE_HOME` or `~/.cache`), in a directory for
 that run of the server, and is named after the endpoint. Header values are removed from it as from any response, and
-only you can read it. The agent can also choose what it gets, without changing what you approve:
+only you can read it. A file is deleted a day after it was written. `result_ttl`, at the top of the config next to
+`audit_log`, sets another time in seconds. The agent can also choose what it gets, without changing what you approve:
 
 - `select` picks part of the response with a path such as `data.repository.pullRequests.nodes[*].number`.
 - `save` writes the response to a file whatever its size.
@@ -211,7 +212,7 @@ mutations   = "deny"
 ```
 
 An endpoint takes `schema`, `headers`, `costs`, `glossary`, `assumed_list_size`, `timeout`, `response_headers`,
-the three `max_` limits and `audit_variables` from its template unless it sets them itself. Headers merge by name, and the endpoint's win.
+the four `max_` limits and `audit_variables` from its template unless it sets them itself. Headers merge by name, and the endpoint's win.
 `approval`, `auto_approve_cost`, `url` and `description` are never taken from a template, so an endpoint that forgets
 them asks before every operation. `mutations` is the other way round: a template can set `mutations = "deny"`, and an
 endpoint that names it can't set it back to `"prompt"`, so forgetting the setting on one endpoint never opens writes.
@@ -248,7 +249,8 @@ readable by you alone, fieldtrip never rotates or deletes it, and a log that can
 
 With an audit log, the agent also gets a read-only `history` tool. It returns the latest attempts from the log, for
 the endpoints in your config, so an agent starting a new session can see what was already run or declined before it
-repeats anything. Responses are never in the log, only what was sent and how it went.
+repeats anything. Responses are never in the log, only what was sent and how it went. When a response went to a file,
+its line has `result`, the file's ID, and `history` lists the files that still exist, which `read_result` can read.
 
 ### Checking a config
 

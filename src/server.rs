@@ -23,7 +23,7 @@ use crate::plan::{Kind, Plan, Variables};
 use crate::results::Results;
 use crate::schema::{Loaded, introspection};
 use crate::suggest::backticked;
-use crate::{cache, response, select, shape};
+use crate::{cache, response, results, select, shape};
 
 /// What the server tells a client about itself and how to use it.
 const INSTRUCTIONS: &str = "fieldtrip lets you use GraphQL APIs the user has configured, reading the real schema \
@@ -768,12 +768,15 @@ impl Fieldtrip {
         if audit.path().is_none() {
             tools.remove_route("history");
         }
+        let results = Results::new(audit.session(), config.result_ttl);
+        // Earlier sessions leave their files behind, so the ones that are too old are cleared out now.
+        results.sweep();
         Self {
             config: Arc::new(config),
             schemas: Arc::default(),
             http,
             outstanding: Arc::default(),
-            results: Arc::new(Results::new(audit.session())),
+            results: Arc::new(results),
             audit: Arc::new(audit),
             tools: Arc::new(tools),
         }
@@ -1188,7 +1191,23 @@ impl Fieldtrip {
             .http
             .post(endpoint, &plan.payload(&variables), endpoint.max_response_bytes)
             .await;
-        let outcome = sent.as_ref().map_or_else(Outcome::Failed, Outcome::Answered);
+        // A response too long to show is written to a file whole, so nothing has to be sent again to see the rest.
+        // It is written before the attempt is recorded, so the audit log can name the file.
+        let inline = endpoint.inline_limit();
+        let written = sent
+            .as_ref()
+            .ok()
+            .filter(|reply| !reply.cut_short)
+            .map(|reply| (reply, reply.body.chars().count()))
+            .filter(|(_, length)| arguments.save || *length > inline)
+            .map(|(reply, length)| (length, self.results.write(name, &reply.body)));
+        let result = written
+            .as_ref()
+            .and_then(|(_, stored)| stored.as_ref().ok())
+            .map(|stored| stored.id.as_str());
+        let outcome = sent
+            .as_ref()
+            .map_or_else(Outcome::Failed, |reply| Outcome::Answered(reply, result));
         self.audit.record(endpoint, &attempt, &verdict, outcome).await;
         let reply = sent.map_err(String::from)?;
         let mut summary = format!(
@@ -1226,45 +1245,39 @@ impl Fieldtrip {
                 Err(text)
             };
         }
-        // A response too long to show is written to a file whole, so nothing has to be sent again to see the rest.
-        let inline = endpoint.inline_limit();
-        let length = reply.body.chars().count();
-        let (saved_note, room) = if arguments.save || length > inline {
-            match self.results.write(name, &reply.body) {
-                Ok(stored) => {
-                    let why = if length > inline {
-                        format!(
-                            "\nThe response has {} characters, more than the {} that are shown here \
-                             (`max_inline_chars`), so it was saved instead.",
-                            shape::grouped(length),
-                            shape::grouped(inline)
-                        )
-                    } else {
-                        String::new()
-                    };
-                    let room = if select.is_some() {
-                        response::Room::Selection(inline)
-                    } else {
-                        response::Room::Preview(inline.min(SAVED_PREVIEW))
-                    };
-                    (
-                        format!(
-                            "{why}\nSaved the whole response, {} bytes, to {}\n`read_result` with `result: \"{}\"` \
-                             and a `select` path returns any part of it, and sends nothing.",
-                            reply.body.len(),
-                            stored.path.display(),
-                            stored.id
-                        ),
-                        room,
+        let (saved_note, room) = match written {
+            Some((length, Ok(stored))) => {
+                let why = if length > inline {
+                    format!(
+                        "\nThe response has {} characters, more than the {} that are shown here \
+                         (`max_inline_chars`), so it was saved instead.",
+                        shape::grouped(length),
+                        shape::grouped(inline)
                     )
-                }
-                Err(error) => (
-                    format!("\nThe response was not saved: {error}."),
-                    response::Room::Result(endpoint.max_output_chars),
-                ),
+                } else {
+                    String::new()
+                };
+                let room = if select.is_some() {
+                    response::Room::Selection(inline)
+                } else {
+                    response::Room::Preview(inline.min(SAVED_PREVIEW))
+                };
+                (
+                    format!(
+                        "{why}\nSaved the whole response, {} bytes, to {}\n`read_result` with `result: \"{}\"` and a \
+                         `select` path returns any part of it, and sends nothing.",
+                        reply.body.len(),
+                        stored.path.display(),
+                        stored.id
+                    ),
+                    room,
+                )
             }
-        } else {
-            (String::new(), response::Room::Result(endpoint.max_output_chars))
+            Some((_, Err(error))) => (
+                format!("\nThe response was not saved: {error}."),
+                response::Room::Result(endpoint.max_output_chars),
+            ),
+            None => (String::new(), response::Room::Result(endpoint.max_output_chars)),
         };
         let Ok(parts) = serde_json::from_str::<BTreeMap<String, Box<RawValue>>>(&reply.body) else {
             let excerpt: String = reply.body.chars().take(EXCERPT).collect();
@@ -1360,8 +1373,11 @@ impl Fieldtrip {
                        unless the user keeps them out, and `approval`: `accepted`, `auto` or `client` for one that \
                        was sent, with its HTTP `status`, time in `ms` and number of `errors`, or `declined`, \
                        `cancelled`, `unavailable`, `failed` or `denied` with a `reason` for one that was not. The \
-                       first line names this session. Responses are not recorded: run the operation again to see \
-                       data. Do not send again what the user declined unless they ask for it.",
+                       first line names this session. A response is not in the log, but a line with a `result` \
+                       is an attempt whose response was written to a file: the files that still exist are listed \
+                       after the lines, and `read_result` reads them without sending anything. For any other \
+                       attempt, run the operation again to see data. Do not send again what the user declined \
+                       unless they ask for it.",
         annotations(read_only_hint = true, open_world_hint = false)
     )]
     fn history(&self, Parameters(arguments): Parameters<HistoryArguments>) -> ToolResult {
@@ -1429,6 +1445,7 @@ impl Fieldtrip {
         for line in shown {
             let _ = write!(out, "\n{line}");
         }
+        out.push_str(&self.result_files(shown));
         let dropped = recent.len() - kept;
         if dropped > 0 {
             let attempts = if dropped == 1 { "attempt" } else { "attempts" };
@@ -1514,6 +1531,47 @@ impl Fieldtrip {
             },
             |(_, endpoint)| (endpoint.max_output_chars, endpoint.inline_limit()),
         )
+    }
+
+    /// A note for `history` about the attempts in `lines` whose response was written to a file: which files are
+    /// still there, and how many are gone. Empty when no line names a result.
+    fn result_files(&self, lines: &[String]) -> String {
+        self.results.sweep();
+        let mut there = Vec::new();
+        let mut gone = 0_usize;
+        for line in lines {
+            let Ok(entry) = serde_json::from_str::<serde_json::Value>(line) else {
+                continue;
+            };
+            let text = |key: &str| entry.get(key).and_then(serde_json::Value::as_str);
+            let (Some(session), Some(id)) = (text("session"), text("result")) else {
+                continue;
+            };
+            match results::existing(session, id) {
+                Some(path) => there.push(format!("`{id}` in {}", path.display())),
+                None => gone += 1,
+            }
+        }
+        let deleted = match gone {
+            0 => String::new(),
+            1 => " 1 other has been deleted.".to_owned(),
+            many => format!(" {many} others have been deleted."),
+        };
+        let kept = show_duration(self.config.result_ttl);
+        if there.is_empty() && gone == 0 {
+            String::new()
+        } else if there.is_empty() {
+            format!(
+                "\n[The responses these attempts name by `result` were in files that have been deleted, which \
+                 happens {kept} after one is written (`result_ttl`). Run an operation again to see its data.]"
+            )
+        } else {
+            format!(
+                "\n[Responses still in files, named by `result` above. `read_result` returns any part of one \
+                 without sending anything: {}.{deleted} A file is deleted {kept} after it is written (`result_ttl`).]",
+                there.join(", ")
+            )
+        }
     }
 
     /// Looks up an endpoint by name.

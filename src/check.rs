@@ -10,7 +10,7 @@ use std::path::Path;
 
 use crate::config::{Config, Endpoint, Mutations, show_bytes, show_duration};
 use crate::schema::{Loaded, introspection};
-use crate::{approval, cache, http, library};
+use crate::{approval, cache, http, library, results};
 
 /// What the check found.
 #[derive(Debug)]
@@ -41,6 +41,12 @@ pub(crate) async fn check(config: &Config, http: Option<&http::Client>) -> Repor
     if let Some(log) = &config.audit_log {
         let _ = writeln!(text, "Audit log: {}", log.display());
     }
+    let _ = writeln!(
+        text,
+        "Result files: {}, deleted after {}",
+        results::root().display(),
+        show_duration(config.result_ttl)
+    );
     let mut problems = 0;
     let mut warnings = 0;
     if config.endpoints.is_empty() {

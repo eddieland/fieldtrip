@@ -36,6 +36,7 @@ in the user's config, out of the agent's sight and out of its control.
 
 ```toml
 audit_log = "~/.local/state/fieldtrip/audit.jsonl"   # optional: one JSON line per `execute` attempt
+result_ttl = 86400                           # optional, seconds a response file is kept, default 1 day
 
 [templates.acme]                             # optional: settings that several endpoints share
 costs             = "acme.costs.toml"        # optional cost map, relative to this file
@@ -377,3 +378,13 @@ Settled. To change one, ask the user, then add a new dated line instead of editi
   then in those of earlier sessions.
 - 2026-11-17: What `read_result` selects is held to the `max_output_chars` of the endpoint the result is named after,
   not to `max_inline_chars`, because the calling agent asked for that part.
+- 2026-11-17: A response file is deleted `result_ttl` seconds after it was written, a day unless set, at the top of
+  the config like `audit_log`, since every endpoint's files share one directory. Zero stops the server.
+- 2026-11-17: Nothing runs in the background. Old files are deleted at startup, before a file is written, and before
+  one is looked for, whichever session wrote them. A session's directory goes with its last file.
+- 2026-11-17: Only `.json` files in `fieldtrip/responses` and in the directories directly inside it are deleted, which
+  includes what `save` wrote there before sessions had directories. Links are not followed.
+- 2026-11-17: An audit line for an attempt whose response went to a file has `result`, the file's ID. The file is that
+  session's `<result>.json`, so the log holds no path.
+- 2026-11-17: `history` still gives the lines as written. After them it lists the files that still exist for the lines
+  shown, and counts those that are gone. This adds to the 2026-11-14 line on `history`.

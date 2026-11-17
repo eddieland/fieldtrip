@@ -320,3 +320,12 @@ cargo test --workspace --all-features
   results. A result of an earlier session is found by its ID. `execute` names the ID and the tool where it says the
   response was saved, and the instructions say to read a result rather than send the operation again.
   Done when: `cargo test read_result`
+- [x] **56. Response files are deleted, and `history` lists them.** A response file is deleted `result_ttl` seconds
+  after it was written, a day unless the top of the config sets it: at startup, before the next file is written, and
+  before `read_result` looks for one, whichever session wrote it. An emptied directory of another session is removed,
+  a file `save` wrote before sessions had directories is deleted the same way, and a file fieldtrip did not write is
+  left alone. `read_result` on a deleted result says how long files are kept. `result_ttl = 0` stops the server, and
+  `fieldtrip check` shows the directory and the time. With `audit_log` set, the line for an attempt whose response
+  went to a file has `result`, its ID, and `history` lists after its lines the files that still exist, with their
+  paths, and counts the ones that are gone.
+  Done when: `cargo test result_files`

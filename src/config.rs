@@ -78,6 +78,8 @@ pub(crate) struct Config {
     pub(crate) endpoints: BTreeMap<String, Endpoint>,
     /// The file each `execute` attempt is recorded in, as an absolute path. `None` records nothing.
     pub(crate) audit_log: Option<PathBuf>,
+    /// How long a response written to a file is kept before it is deleted.
+    pub(crate) result_ttl: Duration,
 }
 
 /// One GraphQL endpoint.
@@ -158,6 +160,9 @@ const FLAG_ENDPOINT: &str = "default";
 /// The `schema_ttl` of an endpoint that does not set one: a day.
 const DEFAULT_SCHEMA_TTL: Duration = Duration::from_hours(24);
 
+/// The `result_ttl` of a config that does not set one: a day, which outlasts a task and not much more.
+const DEFAULT_RESULT_TTL: Duration = Duration::from_hours(24);
+
 /// The `timeout` of an endpoint that does not set one.
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -203,6 +208,7 @@ const HIDDEN: &str = "<redacted>";
 #[serde(deny_unknown_fields)]
 struct RawConfig {
     audit_log: Option<PathBuf>,
+    result_ttl: Option<u64>,
     #[serde(default)]
     endpoints: BTreeMap<String, RawEndpoint>,
     #[serde(default)]
@@ -386,6 +392,7 @@ impl Config {
             path: None,
             endpoints: BTreeMap::from([(FLAG_ENDPOINT.to_owned(), endpoint)]),
             audit_log: None,
+            result_ttl: DEFAULT_RESULT_TTL,
         })
     }
 
@@ -406,6 +413,12 @@ impl Config {
                 problem,
             }
         };
+        if raw.result_ttl == Some(0) {
+            return Err(invalid("`result_ttl`".to_owned())(
+                "it is in seconds and must be at least 1. Response files are deleted that long after they are written"
+                    .to_owned(),
+            ));
+        }
         let templates = raw
             .templates
             .into_iter()
@@ -428,6 +441,7 @@ impl Config {
             path: Some(path.to_path_buf()),
             endpoints,
             audit_log: raw.audit_log.map(|log| resolve(&log, base)),
+            result_ttl: raw.result_ttl.map_or(DEFAULT_RESULT_TTL, Duration::from_secs),
         })
     }
 }

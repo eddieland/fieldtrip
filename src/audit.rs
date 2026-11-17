@@ -70,8 +70,8 @@ pub(crate) struct Verdict {
 pub(crate) enum Outcome<'reply> {
     /// Nothing was sent.
     NotSent,
-    /// The endpoint answered.
-    Answered(&'reply Reply),
+    /// The endpoint answered. The second item is the ID of the result, when the response was written to a file.
+    Answered(&'reply Reply, Option<&'reply str>),
     /// The request was made, or was about to be, and no answer came. It says why.
     Failed(&'reply Failed),
 }
@@ -232,7 +232,7 @@ impl Audit {
         }
         match outcome {
             Outcome::NotSent => {}
-            Outcome::Answered(reply) => {
+            Outcome::Answered(reply, result) => {
                 entry.insert("status".to_owned(), json!(reply.status));
                 entry.insert("ms".to_owned(), json!(reply.elapsed.as_millis()));
                 let errors = (!reply.cut_short)
@@ -241,6 +241,9 @@ impl Audit {
                     .map(|parsed| parsed.errors.map_or(0, |errors| errors.len()));
                 entry.insert("errors".to_owned(), json!(errors));
                 insert_sent(&mut entry, &reply.sent);
+                if let Some(result) = result {
+                    entry.insert("result".to_owned(), json!(result));
+                }
                 if !reply.headers.is_empty() {
                     let headers: Map<String, Value> = reply
                         .headers

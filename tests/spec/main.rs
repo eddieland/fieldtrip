@@ -97,6 +97,8 @@ mod response_spill;
 #[cfg(test)]
 mod response_summary;
 #[cfg(test)]
+mod result_files;
+#[cfg(test)]
 mod saved_operations;
 #[cfg(test)]
 mod schema_cache;
