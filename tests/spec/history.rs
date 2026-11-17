@@ -3,7 +3,7 @@
 
 use serde_json::{Value, json};
 
-use crate::support::{Human, Launch, Mcp, MockServer, Reply};
+use crate::support::{Human, Launch, Mcp, MockServer, Reply, store_config};
 
 const QUERY: &str = "query Me { viewer { name } }";
 
@@ -66,10 +66,7 @@ fn this_session(reply: &Reply) -> String {
 #[test]
 fn it_is_offered_only_with_an_audit_log() {
     let mock = mock();
-    let without = format!(
-        "[endpoints.store]\nurl = \"{}\"\nschema = \"schema.graphql\"\n",
-        mock.url()
-    );
+    let without = store_config(&mock, "");
     let mut mcp = Mcp::start(&without);
     assert!(!mcp.tools().contains(&"history".to_owned()), "{:?}", mcp.tools());
     assert!(
@@ -125,13 +122,13 @@ fn it_lists_this_session_and_earlier_ones_oldest_first() {
         .human(Human::Declines)
         .start();
     let reply = execute(&mut mcp, "store", QUERY);
-    assert!(reply.is_error, "{}", reply.text);
+    reply.failed();
     let reply = execute(&mut mcp, "admin", QUERY);
-    assert!(!reply.is_error, "{}", reply.text);
+    reply.succeeded();
 
     let reply = mcp.call("history", &json!({}));
 
-    assert!(!reply.is_error, "{}", reply.text);
+    reply.succeeded();
     let entries = entries(&reply);
     assert_eq!(entries.len(), 3, "{}", reply.text);
     assert_eq!(entries[0]["operation"], "Before");
@@ -173,7 +170,7 @@ fn it_filters_by_endpoint_and_shows_only_configured_ones() {
     assert_eq!(operations, [json!("One"), json!("Three")], "{}", reply.text);
 
     let reply = mcp.call("history", &json!({ "endpoint": "elsewhere" }));
-    assert!(reply.is_error, "{}", reply.text);
+    reply.failed();
     assert!(
         reply.text.contains("`admin`") && reply.text.contains("`store`"),
         "names the endpoints there are: {}",
@@ -210,7 +207,7 @@ fn an_empty_log_says_so() {
 
     let reply = mcp.call("history", &json!({}));
 
-    assert!(!reply.is_error, "{}", reply.text);
+    reply.succeeded();
     assert!(reply.text.contains("no `execute` attempts"), "{}", reply.text);
     assert_eq!(this_session(&reply).len(), 16, "the session is named");
 }
@@ -231,7 +228,7 @@ fn a_long_history_is_cut_from_the_oldest_end() {
 
     let reply = mcp.call("history", &json!({ "endpoint": "store", "limit": 40 }));
 
-    assert!(!reply.is_error, "{}", reply.text);
+    reply.succeeded();
     assert!(reply.text.chars().count() <= 3000, "{}", reply.text.chars().count());
     let entries = entries(&reply);
     assert!(!entries.is_empty(), "{}", reply.text);

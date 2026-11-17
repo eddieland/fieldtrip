@@ -5,7 +5,7 @@
 
 use serde_json::{Value, json};
 
-use crate::support::{Human, Launch, MockServer, SdkClient};
+use crate::support::{Human, Launch, MockServer, SdkClient, store_config};
 
 /// A saved query whose `$precision` is used only by a listed directive, and whose `$full` is used by one too, but
 /// also by `@include`, which stays.
@@ -30,10 +30,10 @@ const ORDERS: &str = "fragment Orders on User { orders(first: $count) @round(dig
 
 /// The `store` endpoint, sending operations to `mock`, with the directives above listed.
 fn launch(mock: &MockServer) -> Launch {
-    let config = format!(
-        "[endpoints.store]\nurl = \"{}\"\nschema = \"schema.graphql\"\noperations = \"queries\"\n\
+    let config = store_config(
+        mock,
+        "operations = \"queries\"\n\
          fragments = \"queries/fragments\"\nclient_directives = [\"round\", \"mask\"]\n",
-        mock.url()
     );
     Launch::new(&config)
         .file("queries/get_user.graphql", GET_USER)
@@ -61,7 +61,7 @@ fn a_variable_only_a_removed_directive_used_is_dropped() {
     let mut mcp = launch(&mock).human(Human::Accepts).start();
 
     let listed = mcp.call("list_operations", &json!({ "endpoint": "store", "name": "GetUser" }));
-    assert!(!listed.is_error, "{}", listed.text);
+    listed.succeeded();
     assert!(!listed.text.contains("BROKEN"), "{}", listed.text);
     assert!(
         listed.text.contains("  variables: $id: ID!, $full: Boolean! = false\n"),
@@ -74,7 +74,7 @@ fn a_variable_only_a_removed_directive_used_is_dropped() {
         "execute",
         &json!({ "endpoint": "store", "operation_name": "GetUser", "variables": { "id": "u-1" } }),
     );
-    assert!(!reply.is_error, "{}", reply.text);
+    reply.succeeded();
     assert!(!reply.text.contains("precision"), "nothing to note: {}", reply.text);
     let body = sent(&mock);
     let query = body["query"].as_str().expect("a query string");
@@ -93,7 +93,7 @@ fn the_one_line_list_shows_the_variables_that_are_left() {
 
     let found = mcp.call("search_schema", &json!({ "endpoint": "store", "query": "GetUser" }));
 
-    assert!(!found.is_error, "{}", found.text);
+    found.succeeded();
     assert!(
         found.text.contains("$id: ID!, $full: Boolean! = false)"),
         "{}",
@@ -116,7 +116,7 @@ fn a_dropped_variable_passed_to_execute_is_noted_and_not_sent() {
         }),
     );
 
-    assert!(!reply.is_error, "{}", reply.text);
+    reply.succeeded();
     for expected in ["`$precision`", "`@round`", "is not sent"] {
         assert!(
             reply.text.contains(expected),
@@ -148,7 +148,7 @@ fn a_dropped_variable_is_left_out_on_revision_2026_too() {
         }),
     );
 
-    assert!(!reply.is_error, "{}", reply.text);
+    reply.succeeded();
     assert!(reply.text.contains("`$precision`"), "{}", reply.text);
     assert_eq!(sent(&mock)["variables"], json!({ "id": "u-1" }));
     let prompts = client.prompts();
@@ -169,7 +169,7 @@ fn estimate_cost_notes_a_dropped_variable() {
         }),
     );
 
-    assert!(!reply.is_error, "{}", reply.text);
+    reply.succeeded();
     assert!(reply.text.contains("Valid query `GetUser`"), "{}", reply.text);
     assert!(
         reply.text.contains("`$precision`") && reply.text.contains("`@round`"),
@@ -196,7 +196,7 @@ fn a_variable_that_was_already_unused_still_breaks_the_operation() {
         "execute",
         &json!({ "endpoint": "store", "operation_name": "Unused", "variables": { "id": "u-1" } }),
     );
-    assert!(reply.is_error, "{}", reply.text);
+    reply.failed();
     assert!(reply.text.contains("$never"), "{}", reply.text);
     assert_eq!(mock.requests().len(), 0, "nothing is sent");
 }
@@ -215,7 +215,7 @@ fn shared_fragments_count_on_both_sides() {
         }),
     );
 
-    assert!(!reply.is_error, "{}", reply.text);
+    reply.succeeded();
     assert!(reply.text.contains("`$style`"), "{}", reply.text);
     assert!(!reply.text.contains("`$count`"), "{}", reply.text);
     let body = sent(&mock);

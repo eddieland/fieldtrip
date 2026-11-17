@@ -6,7 +6,7 @@
 
 use serde_json::{Value, json};
 
-use crate::support::{Human, Launch, MockServer};
+use crate::support::{Human, Launch, MockServer, store_config};
 
 /// A saved query that uses listed directives on the operation, a variable, a field, a fragment spread, an inline
 /// fragment and a fragment of its own, alongside `@include`, which the server must still see.
@@ -45,10 +45,12 @@ const USES: [&str; 7] = [
 
 /// The `store` endpoint with `settings`, sending operations to `mock`.
 fn config(mock: &MockServer, settings: &str) -> String {
-    format!(
-        "[endpoints.store]\nurl = \"{}\"\nschema = \"schema.graphql\"\noperations = \"queries\"\n\
-         fragments = \"queries/fragments\"\n{settings}",
-        mock.url()
+    store_config(
+        mock,
+        &format!(
+            "operations = \"queries\"\n\
+         fragments = \"queries/fragments\"\n{settings}"
+        ),
     )
 }
 
@@ -84,7 +86,7 @@ fn listed_directives_are_removed_before_the_prompt_and_the_request() {
         &json!({ "endpoint": "store", "operation_name": "GetOrders", "variables": { "id": "u-1" } }),
     );
 
-    assert!(!reply.is_error, "{}", reply.text);
+    reply.succeeded();
     let query = sent(&mock);
     assert!(
         query.starts_with("query GetOrders($id: ID!, $full: Boolean! = false) {"),
@@ -126,7 +128,7 @@ fn a_mutation_loses_its_listed_directive_too() {
         }),
     );
 
-    assert!(!reply.is_error, "{}", reply.text);
+    reply.succeeded();
     let query = sent(&mock);
     assert!(
         query.starts_with("mutation SaveOrder($input: CreateOrderInput!) {"),
@@ -139,7 +141,7 @@ fn list_operations_and_estimate_cost_see_the_text_without_them() {
     let mut mcp = launch(&config(&MockServer::unreachable(), LISTED)).start();
 
     let reply = mcp.call("list_operations", &json!({ "endpoint": "store", "name": "GetOrders" }));
-    assert!(!reply.is_error, "{}", reply.text);
+    reply.succeeded();
     assert!(!reply.text.contains("BROKEN"), "{}", reply.text);
     assert!(
         reply.text.contains("description: A user's orders, a page at a time."),
@@ -159,7 +161,7 @@ fn list_operations_and_estimate_cost_see_the_text_without_them() {
         "estimate_cost",
         &json!({ "endpoint": "store", "operation_name": "GetOrders", "variables": { "id": "u-1" } }),
     );
-    assert!(!reply.is_error, "{}", reply.text);
+    reply.succeeded();
     assert!(reply.text.contains("Valid query `GetOrders`"), "{}", reply.text);
 }
 
@@ -180,7 +182,7 @@ fn a_directive_that_is_not_listed_is_still_an_error() {
         "execute",
         &json!({ "endpoint": "store", "operation_name": "Typo", "variables": { "id": "u-1" } }),
     );
-    assert!(reply.is_error, "{}", reply.text);
+    reply.failed();
     assert!(reply.text.contains("@paginatd"), "{}", reply.text);
     assert!(
         reply.text.contains("`client_directives`"),
@@ -211,7 +213,7 @@ fn an_operation_the_agent_writes_is_validated_as_written() {
         &json!({ "endpoint": "store", "operation": "query Mine @paginated { viewer { id } }" }),
     );
 
-    assert!(reply.is_error, "{}", reply.text);
+    reply.failed();
     assert!(reply.text.contains("@paginated"), "{}", reply.text);
     assert_eq!(mcp.prompts().len(), 0, "the human is not asked");
     assert_eq!(mock.requests().len(), 0, "nothing is sent");
@@ -232,7 +234,7 @@ fn a_template_can_hold_the_list() {
         "execute",
         &json!({ "endpoint": "store", "operation_name": "GetOrders", "variables": { "id": "u-1" } }),
     );
-    assert!(!reply.is_error, "{}", reply.text);
+    reply.succeeded();
     assert!(!sent(&mock).contains("@paginated"));
 }
 
@@ -306,11 +308,7 @@ fn a_bad_list_stops_the_server() {
         }
     }
 
-    let stderr = Launch::new(&format!(
-        "[endpoints.store]\nurl = \"{}\"\nschema = \"schema.graphql\"\n{LISTED}",
-        mock.url()
-    ))
-    .fails_to_start();
+    let stderr = Launch::new(&store_config(&mock, LISTED)).fails_to_start();
     assert!(stderr.contains("endpoint `store`"), "{stderr}");
     assert!(
         stderr.contains("`client_directives`") && stderr.contains("`operations`"),

@@ -5,7 +5,7 @@
 
 use serde_json::json;
 
-use crate::support::{Human, Launch, Mcp, MockServer};
+use crate::support::{Human, Launch, Mcp, MockServer, store_config};
 
 /// A query that costs 1.
 const CHEAP_QUERY: &str = "{ viewer { name } }";
@@ -18,10 +18,7 @@ const MUTATION_COSTING_10: &str = "mutation { deleteUser(id: \"u-1\") }";
 
 /// Starts a server whose `store` endpoint has `settings` and sends operations to `mock`.
 fn start(mock: &MockServer, settings: &str, human: Human) -> Mcp {
-    let config = format!(
-        "[endpoints.store]\nurl = \"{}\"\nschema = \"schema.graphql\"\n{settings}",
-        mock.url()
-    );
+    let config = store_config(mock, settings);
     Launch::new(&config).human(human).start()
 }
 

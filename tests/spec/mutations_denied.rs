@@ -5,18 +5,10 @@
 use rmcp::model::CallToolResponse;
 use serde_json::{Value, json};
 
-use crate::support::{Human, Launch, Mcp, MockServer, SdkClient, sdk_reply};
+use crate::support::{Human, Launch, Mcp, MockServer, SdkClient, sdk_reply, store_config};
 
 const QUERY: &str = "{ viewer { name } }";
 const MUTATION: &str = "mutation Remove { deleteUser(id: \"u-1\") }";
-
-/// The `store` endpoint with `settings`, sending operations to `mock`.
-fn config(mock: &MockServer, settings: &str) -> String {
-    format!(
-        "[endpoints.store]\nurl = \"{}\"\nschema = \"schema.graphql\"\n{settings}",
-        mock.url()
-    )
-}
 
 /// A mock that answers any operation with some data.
 fn mock() -> MockServer {
@@ -47,7 +39,7 @@ fn assert_refused(text: &str, endpoint: &str) {
 #[test]
 fn a_mutation_is_refused_with_no_prompt_and_nothing_sent() {
     let mock = mock();
-    let mut mcp = Launch::new(&config(&mock, "mutations = \"deny\"\n"))
+    let mut mcp = Launch::new(&store_config(&mock, "mutations = \"deny\"\n"))
         .human(Human::Accepts)
         .start();
 
@@ -62,7 +54,7 @@ fn a_mutation_is_refused_with_no_prompt_and_nothing_sent() {
 #[test]
 fn approval_left_to_the_client_does_not_open_writes() {
     let mock = mock();
-    let mut mcp = Mcp::start(&config(&mock, "approval = \"client\"\nmutations = \"deny\"\n"));
+    let mut mcp = Mcp::start(&store_config(&mock, "approval = \"client\"\nmutations = \"deny\"\n"));
 
     let reply = mcp.call("execute", &arguments("store", MUTATION));
 
@@ -74,7 +66,7 @@ fn approval_left_to_the_client_does_not_open_writes() {
 #[test]
 fn a_mutation_is_refused_before_it_is_validated() {
     let mock = mock();
-    let mut mcp = Launch::new(&config(&mock, "mutations = \"deny\"\n"))
+    let mut mcp = Launch::new(&store_config(&mock, "mutations = \"deny\"\n"))
         .human(Human::Accepts)
         .start();
 
@@ -93,7 +85,7 @@ fn a_mutation_is_refused_before_it_is_validated() {
 #[test]
 fn a_document_with_a_mutation_among_other_operations_is_refused() {
     let mock = mock();
-    let mut mcp = Launch::new(&config(&mock, "mutations = \"deny\"\n"))
+    let mut mcp = Launch::new(&store_config(&mock, "mutations = \"deny\"\n"))
         .human(Human::Accepts)
         .start();
     let document = format!("query Read {QUERY}\n{MUTATION}");
@@ -109,7 +101,7 @@ fn a_document_with_a_mutation_among_other_operations_is_refused() {
 #[test]
 fn queries_are_unaffected() {
     let mock = mock();
-    let mut mcp = Launch::new(&config(&mock, "mutations = \"deny\"\n"))
+    let mut mcp = Launch::new(&store_config(&mock, "mutations = \"deny\"\n"))
         .human(Human::Accepts)
         .start();
 
@@ -123,7 +115,7 @@ fn queries_are_unaffected() {
 #[test]
 fn a_mutation_is_refused_on_revision_2026_07_28_without_asking_for_input() {
     let mock = mock();
-    let client = SdkClient::start(&Launch::new(&config(&mock, "mutations = \"deny\"\n")).human(Human::Accepts));
+    let client = SdkClient::start(&Launch::new(&store_config(&mock, "mutations = \"deny\"\n")).human(Human::Accepts));
 
     let response = client.call_once("execute", &arguments("store", MUTATION), None);
 
@@ -144,7 +136,7 @@ fn a_mutation_is_refused_on_revision_2026_07_28_without_asking_for_input() {
 #[test]
 fn estimate_cost_still_works_and_says_execute_will_refuse() {
     let mock = mock();
-    let mut mcp = Mcp::start(&config(&mock, "mutations = \"deny\"\n"));
+    let mut mcp = Mcp::start(&store_config(&mock, "mutations = \"deny\"\n"));
 
     let reply = mcp.call("estimate_cost", &arguments("store", MUTATION));
 
@@ -174,7 +166,7 @@ fn estimate_cost_still_works_and_says_execute_will_refuse() {
 #[test]
 fn introspect_lists_mutations_and_marks_them_unavailable() {
     let mock = MockServer::unreachable();
-    let mut mcp = Mcp::start(&config(&mock, "mutations = \"deny\"\n"));
+    let mut mcp = Mcp::start(&store_config(&mock, "mutations = \"deny\"\n"));
 
     let reply = mcp.call("introspect", &json!({ "endpoint": "store" }));
 
@@ -213,7 +205,7 @@ fn list_endpoints_shows_which_endpoints_deny_mutations() {
 #[test]
 fn fieldtrip_check_shows_mutations_denied() {
     let mock = MockServer::unreachable();
-    let checked = Launch::new(&config(&mock, "mutations = \"deny\"\n")).check();
+    let checked = Launch::new(&store_config(&mock, "mutations = \"deny\"\n")).check();
 
     assert!(
         checked.passed,
@@ -288,7 +280,7 @@ fn an_endpoint_can_deny_what_its_template_allows() {
 fn an_unknown_setting_is_refused_at_startup() {
     let mock = mock();
 
-    let stderr = Launch::new(&config(&mock, "mutations = \"never\"\n")).fails_to_start();
+    let stderr = Launch::new(&store_config(&mock, "mutations = \"never\"\n")).fails_to_start();
 
     assert!(stderr.contains("`mutations`"), "names the setting: {stderr}");
     assert!(

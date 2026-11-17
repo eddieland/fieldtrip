@@ -7,17 +7,14 @@
 use rmcp::model::{CallToolResponse, InputRequest, InputResponses};
 use serde_json::{Value, json};
 
-use crate::support::{Human, Launch, MockServer, Retry, SdkClient};
+use crate::support::{Human, Launch, MockServer, Retry, SdkClient, store_config};
 
 const QUERY: &str = "{ viewer { name } }";
 const MUTATION: &str = "mutation { deleteUser(id: \"u-1\") }";
 
 /// Starts a server whose `store` endpoint has `settings`, with a 2026-07-28 client that answers as `human` does.
 fn start(mock: &MockServer, settings: &str, human: Human) -> SdkClient {
-    let config = format!(
-        "[endpoints.store]\nurl = \"{}\"\nschema = \"schema.graphql\"\n{settings}",
-        mock.url()
-    );
+    let config = store_config(mock, settings);
     SdkClient::start(&Launch::new(&config).human(human))
 }
 

@@ -5,15 +5,12 @@
 
 use serde_json::json;
 
-use crate::support::{Mcp, MockServer};
+use crate::support::{Mcp, MockServer, store_config};
 
 /// Estimates `operation` on the fixture endpoint and returns the error text, failing if the tool succeeded.
 fn rejection(operation: &str) -> String {
     let mock = MockServer::unreachable();
-    let mut mcp = Mcp::start(&format!(
-        "[endpoints.store]\nurl = \"{}\"\nschema = \"schema.graphql\"\n",
-        mock.url()
-    ));
+    let mut mcp = Mcp::start(&store_config(&mock, ""));
     let reply = mcp.call("estimate_cost", &json!({ "endpoint": "store", "operation": operation }));
     assert!(
         reply.is_error,

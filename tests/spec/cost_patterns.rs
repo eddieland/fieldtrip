@@ -2,15 +2,12 @@
 
 use serde_json::json;
 
-use crate::support::{Launch, MockServer};
+use crate::support::{Launch, MockServer, store_config};
 
 /// Estimates `operation` under `map` and returns the text, failing on a tool error.
 fn estimate(map: &str, operation: &str) -> String {
     let mock = MockServer::unreachable();
-    let config = format!(
-        "[endpoints.store]\nurl = \"{}\"\nschema = \"schema.graphql\"\ncosts = \"store.costs.toml\"\n",
-        mock.url()
-    );
+    let config = store_config(&mock, "costs = \"store.costs.toml\"\n");
     let mut mcp = Launch::new(&config).file("store.costs.toml", map).start();
     let reply = mcp.call("estimate_cost", &json!({ "endpoint": "store", "operation": operation }));
     assert!(

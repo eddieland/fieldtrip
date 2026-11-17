@@ -18,6 +18,15 @@ fn a_url_without_a_host_is_refused() {
 }
 
 #[test]
+fn an_endpoint_without_a_url_is_refused() {
+    let stderr = refused("schema = \"schema.graphql\"\n");
+
+    assert!(stderr.contains("endpoint `store`"), "names the endpoint: {stderr}");
+    assert!(stderr.contains("`url` is missing"), "names the setting: {stderr}");
+    assert!(stderr.contains("url = \"https://"), "shows what to write: {stderr}");
+}
+
+#[test]
 fn a_schema_file_that_is_not_there_is_refused() {
     let stderr = refused("url = \"http://localhost:9/graphql\"\nschema = \"missing.graphql\"\n");
 

@@ -153,7 +153,7 @@ fn a_401_with_no_command_to_run_again_is_reported_as_before() {
 
     let reply = mcp.call("introspect", &json!({ "endpoint": "live" }));
 
-    assert!(reply.is_error, "{}", reply.text);
+    reply.failed();
     assert!(!reply.text.contains("twice"), "there was no retry: {}", reply.text);
     assert_eq!(mock.requests().len(), 1);
 }

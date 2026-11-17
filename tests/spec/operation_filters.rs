@@ -4,7 +4,7 @@
 
 use serde_json::{Value, json};
 
-use crate::support::{Launch, Mcp, MockServer};
+use crate::support::{Launch, Mcp, MockServer, store_config};
 
 /// Saved operations that touch different parts of the fixture schema, by file name.
 const OPERATIONS: [(&str, &str); 6] = [
@@ -38,10 +38,7 @@ const OPERATIONS: [(&str, &str); 6] = [
 /// A server for the `store` endpoint with [`OPERATIONS`] saved, plus `extra` files.
 fn start(extra: &[(String, String)]) -> Mcp {
     let mock = MockServer::unreachable();
-    let mut launch = Launch::new(&format!(
-        "[endpoints.store]\nurl = \"{}\"\nschema = \"schema.graphql\"\noperations = \"operations\"\n",
-        mock.url()
-    ));
+    let mut launch = Launch::new(&store_config(&mock, "operations = \"operations\"\n"));
     for (file, text) in OPERATIONS {
         launch = launch.file(&format!("operations/{file}"), text);
     }
@@ -58,7 +55,7 @@ fn list(mcp: &mut Mcp, filters: &Value) -> String {
         arguments.extend(filters.clone());
     }
     let reply = mcp.call("list_operations", &arguments);
-    assert!(!reply.is_error, "{}", reply.text);
+    reply.succeeded();
     reply.text
 }
 
@@ -151,28 +148,28 @@ fn a_pattern_with_an_unknown_name_suggests_the_nearest() {
     let mut mcp = start(&[]);
 
     let reply = mcp.call("list_operations", &json!({ "endpoint": "store", "uses": ["Ordr"] }));
-    assert!(reply.is_error, "{}", reply.text);
+    reply.failed();
     assert!(reply.text.contains("Nearest types: `Order`"), "{}", reply.text);
 
     let reply = mcp.call(
         "list_operations",
         &json!({ "endpoint": "store", "uses": ["User.ordrs"] }),
     );
-    assert!(reply.is_error, "{}", reply.text);
+    reply.failed();
     assert!(reply.text.contains("Nearest fields: `orders`"), "{}", reply.text);
 
     let reply = mcp.call(
         "list_operations",
         &json!({ "endpoint": "store", "uses": ["User..orders"] }),
     );
-    assert!(reply.is_error, "{}", reply.text);
+    reply.failed();
     assert!(reply.text.contains("is not a pattern"), "{}", reply.text);
 
     let reply = mcp.call(
         "list_operations",
         &json!({ "endpoint": "store", "kind": "subscription" }),
     );
-    assert!(reply.is_error, "{}", reply.text);
+    reply.failed();
     assert!(reply.text.contains("`query` or `mutation`"), "{}", reply.text);
 }
 
@@ -206,14 +203,14 @@ fn name_shows_one_operation_in_full() {
     );
 
     let reply = mcp.call("list_operations", &json!({ "endpoint": "store", "name": "NodeOrdr" }));
-    assert!(reply.is_error, "{}", reply.text);
+    reply.failed();
     assert!(reply.text.contains("Nearest names: `NodeOrder`"), "{}", reply.text);
 
     let reply = mcp.call(
         "list_operations",
         &json!({ "endpoint": "store", "name": "NodeOrder", "kind": "query" }),
     );
-    assert!(reply.is_error, "{}", reply.text);
+    reply.failed();
     assert!(reply.text.contains("Give `name` alone"), "{}", reply.text);
 }
 
@@ -231,7 +228,7 @@ fn search_schema_lists_at_most_ten_saved_operations() {
 
     let reply = mcp.call("search_schema", &json!({ "endpoint": "store", "query": "viewer" }));
 
-    assert!(!reply.is_error, "{}", reply.text);
+    reply.succeeded();
     assert_eq!(reply.text.matches("ViewerReport").count(), 10, "{}", reply.text);
     assert!(reply.text.contains("And 2 more."), "{}", reply.text);
     assert!(

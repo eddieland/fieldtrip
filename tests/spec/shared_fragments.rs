@@ -5,7 +5,7 @@
 
 use serde_json::{Value, json};
 
-use crate::support::{Human, Launch, MockServer};
+use crate::support::{Human, Launch, MockServer, store_config};
 
 /// A saved query that spreads two shared fragments, one of which spreads a third.
 const USER_ORDERS: &str = "# A user and their recent orders.\n\
@@ -32,10 +32,12 @@ const UNUSED: &str = "fragment ProductFields on Product { id title }\n";
 
 /// The `store` endpoint with `settings`, sending operations to `mock`.
 fn config(mock: &MockServer, settings: &str) -> String {
-    format!(
-        "[endpoints.store]\nurl = \"{}\"\nschema = \"schema.graphql\"\noperations = \"queries\"\n\
-         fragments = \"queries/fragments\"\n{settings}",
-        mock.url()
+    store_config(
+        mock,
+        &format!(
+            "operations = \"queries\"\n\
+         fragments = \"queries/fragments\"\n{settings}"
+        ),
     )
 }
 
@@ -73,7 +75,7 @@ fn execute_sends_and_shows_the_shared_fragments() {
         &json!({ "endpoint": "store", "operation_name": "UserOrders", "variables": { "id": "u-1" } }),
     );
 
-    assert!(!reply.is_error, "{}", reply.text);
+    reply.succeeded();
     let query = sent(&mock);
     assert!(query.starts_with("query UserOrders($id: ID!) {"), "{query}");
     for fragment in [
@@ -107,7 +109,7 @@ fn list_operations_and_estimate_cost_see_the_full_text() {
     let mut mcp = launch(&config(&MockServer::unreachable(), "")).start();
 
     let reply = mcp.call("list_operations", &json!({ "endpoint": "store", "name": "UserOrders" }));
-    assert!(!reply.is_error, "{}", reply.text);
+    reply.succeeded();
     assert!(!reply.text.contains("BROKEN"), "{}", reply.text);
     assert!(
         reply.text.contains("description: A user and their recent orders."),
@@ -120,7 +122,7 @@ fn list_operations_and_estimate_cost_see_the_full_text() {
         "estimate_cost",
         &json!({ "endpoint": "store", "operation_name": "UserOrders", "variables": { "id": "u-1" } }),
     );
-    assert!(!reply.is_error, "{}", reply.text);
+    reply.succeeded();
     assert!(reply.text.contains("Valid query `UserOrders`"), "{}", reply.text);
 
     let reply = mcp.call(
@@ -144,7 +146,7 @@ fn a_fragment_in_the_operations_own_file_wins() {
         &json!({ "endpoint": "store", "operation_name": "LocalUser", "variables": { "id": "u-1" } }),
     );
 
-    assert!(!reply.is_error, "{}", reply.text);
+    reply.succeeded();
     let query = sent(&mock);
     assert!(query.contains("fragment UserFields on User {\n  id\n}"), "{query}");
     assert_eq!(query.matches("fragment UserFields").count(), 1, "{query}");
@@ -164,7 +166,7 @@ fn a_missing_fragment_marks_the_operation_broken() {
         "execute",
         &json!({ "endpoint": "store", "operation_name": "Lost", "variables": { "id": "u-1" } }),
     );
-    assert!(reply.is_error, "{}", reply.text);
+    reply.failed();
     assert!(reply.text.contains("Missing"), "{}", reply.text);
     assert_eq!(mcp.prompts().len(), 0, "the human is not asked");
     assert_eq!(mock.requests().len(), 0, "nothing is sent");
@@ -183,7 +185,7 @@ fn an_operation_the_agent_writes_stays_self_contained() {
         }),
     );
 
-    assert!(reply.is_error, "{}", reply.text);
+    reply.failed();
     assert!(reply.text.contains("UserFields"), "{}", reply.text);
     assert_eq!(mcp.prompts().len(), 0, "the human is not asked");
     assert_eq!(mock.requests().len(), 0, "nothing is sent");
@@ -203,7 +205,7 @@ fn a_template_can_hold_the_fragments() {
         "execute",
         &json!({ "endpoint": "store", "operation_name": "UserOrders", "variables": { "id": "u-1" } }),
     );
-    assert!(!reply.is_error, "{}", reply.text);
+    reply.succeeded();
     assert!(sent(&mock).contains("fragment Contact on User"));
 }
 
@@ -262,11 +264,8 @@ fn a_missing_directory_or_no_operations_stop_the_server() {
             vec!["`fragments` names", "is not a directory"],
         ),
         (
-            Launch::new(&format!(
-                "[endpoints.store]\nurl = \"{}\"\nschema = \"schema.graphql\"\nfragments = \"queries/fragments\"\n",
-                mock.url()
-            ))
-            .file("queries/fragments/user.graphql", USER_FRAGMENTS),
+            Launch::new(&store_config(&mock, "fragments = \"queries/fragments\"\n"))
+                .file("queries/fragments/user.graphql", USER_FRAGMENTS),
             vec!["`fragments`", "`operations`"],
         ),
     ];

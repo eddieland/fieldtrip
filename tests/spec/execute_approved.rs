@@ -2,14 +2,14 @@
 
 use serde_json::{Value, json};
 
-use crate::support::{Human, Launch, Mcp, MockServer, Response};
+use crate::support::{Human, Launch, Mcp, MockServer, Response, store_config};
 
 /// Starts a server whose `store` endpoint reads the fixture schema and sends operations to `mock`.
 fn start(mock: &MockServer, human: Human) -> Mcp {
-    let config = format!(
-        "[endpoints.store]\nurl = \"{}\"\nschema = \"schema.graphql\"\n\n\
+    let config = store_config(
+        mock,
+        "\n\
          [endpoints.store.headers]\nX-Client = \"spec\"\n",
-        mock.url()
     );
     Launch::new(&config).human(human).start()
 }

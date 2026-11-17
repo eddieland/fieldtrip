@@ -4,17 +4,14 @@
 
 use serde_json::json;
 
-use crate::support::{Human, Launch, Mcp, MockServer};
+use crate::support::{Human, Launch, Mcp, MockServer, store_config};
 
 /// A query and a mutation. Neither may be sent without an accept.
 const OPERATIONS: [&str; 2] = ["{ viewer { name } }", "mutation { deleteUser(id: \"u-1\") }"];
 
 /// Starts a server whose `store` endpoint reads the fixture schema and would send operations to `mock`.
 fn start(mock: &MockServer, human: Human) -> Mcp {
-    let config = format!(
-        "[endpoints.store]\nurl = \"{}\"\nschema = \"schema.graphql\"\n",
-        mock.url()
-    );
+    let config = store_config(mock, "");
     Launch::new(&config).human(human).start()
 }
 

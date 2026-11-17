@@ -7,18 +7,10 @@
 
 use serde_json::{Value, json};
 
-use crate::support::{Human, Launch, Mcp, MockServer, SdkClient};
+use crate::support::{Human, Launch, Mcp, MockServer, SdkClient, store_config};
 
 const QUERY: &str = "query Viewer { viewer { name } }";
 const MUTATION: &str = "mutation Delete { deleteUser(id: \"u-1\") }";
-
-/// A config whose `store` endpoint has `settings`.
-fn config(mock: &MockServer, settings: &str) -> String {
-    format!(
-        "[endpoints.store]\nurl = \"{}\"\nschema = \"schema.graphql\"\n{settings}",
-        mock.url()
-    )
-}
 
 /// A mock that answers any operation with some data.
 fn mock() -> MockServer {
@@ -27,7 +19,7 @@ fn mock() -> MockServer {
 
 /// Starts a server with an OpenCode client that would accept every prompt.
 fn opencode(mock: &MockServer, settings: &str) -> Mcp {
-    Launch::new(&config(mock, settings))
+    Launch::new(&store_config(mock, settings))
         .client("opencode")
         .human(Human::Accepts)
         .start()
@@ -59,7 +51,7 @@ fn execute_refuses_instead_of_asking_opencode() {
 
     let reply = mcp.call("execute", &arguments(QUERY));
 
-    assert!(reply.is_error, "{}", reply.text);
+    reply.failed();
     assert_refused(&reply.text);
     assert!(mcp.prompts().is_empty(), "no prompt is sent: {:?}", mcp.prompts());
     assert_eq!(mock.requests().len(), 0, "nothing is sent");
@@ -68,12 +60,14 @@ fn execute_refuses_instead_of_asking_opencode() {
 #[test]
 fn execute_refuses_instead_of_asking_opencode_on_2026_07_28() {
     let mock = mock();
-    let launch = Launch::new(&config(&mock, "")).client("opencode").human(Human::Accepts);
+    let launch = Launch::new(&store_config(&mock, ""))
+        .client("opencode")
+        .human(Human::Accepts);
     let client = SdkClient::start(&launch);
 
     let reply = client.call("execute", &arguments(QUERY));
 
-    assert!(reply.is_error, "{}", reply.text);
+    reply.failed();
     assert_refused(&reply.text);
     assert!(client.prompts().is_empty(), "no prompt is sent: {:?}", client.prompts());
     assert_eq!(mock.requests().len(), 0, "nothing is sent");
@@ -82,14 +76,14 @@ fn execute_refuses_instead_of_asking_opencode_on_2026_07_28() {
 #[test]
 fn the_name_is_matched_ignoring_case() {
     let mock = mock();
-    let mut mcp = Launch::new(&config(&mock, ""))
+    let mut mcp = Launch::new(&store_config(&mock, ""))
         .client("OpenCode")
         .human(Human::Accepts)
         .start();
 
     let reply = mcp.call("execute", &arguments(QUERY));
 
-    assert!(reply.is_error, "{}", reply.text);
+    reply.failed();
     assert_eq!(mock.requests().len(), 0, "nothing is sent");
 }
 
@@ -100,7 +94,7 @@ fn approval_left_to_the_client_still_runs() {
 
     let reply = mcp.call("execute", &arguments(MUTATION));
 
-    assert!(!reply.is_error, "{}", reply.text);
+    reply.succeeded();
     assert_eq!(
         mock.requests().len(),
         1,
@@ -117,7 +111,7 @@ fn a_query_within_auto_approve_cost_still_runs_but_a_mutation_does_not() {
     let mutation = mcp.call("execute", &arguments(MUTATION));
 
     assert!(!query.is_error, "no prompt was needed: {}", query.text);
-    assert!(mutation.is_error, "{}", mutation.text);
+    mutation.failed();
     assert_refused(&mutation.text);
     assert!(mcp.prompts().is_empty(), "no prompt is sent: {:?}", mcp.prompts());
     assert_eq!(mock.requests().len(), 1, "only the query is sent");
@@ -128,7 +122,7 @@ fn list_endpoints_says_execute_will_refuse() {
     let mock = mock();
     let config = format!(
         "{}\n[endpoints.dev]\nurl = \"{}\"\nschema = \"schema.graphql\"\napproval = \"client\"\n",
-        config(&mock, ""),
+        store_config(&mock, ""),
         mock.url()
     );
     let mut mcp = Launch::new(&config).client("opencode").human(Human::Accepts).start();
@@ -166,11 +160,11 @@ fn a_warning_is_logged_when_opencode_connects() {
 #[test]
 fn other_clients_are_asked_as_before() {
     let mock = mock();
-    let mut mcp = Launch::new(&config(&mock, "")).human(Human::Accepts).start();
+    let mut mcp = Launch::new(&store_config(&mock, "")).human(Human::Accepts).start();
 
     let reply = mcp.call("execute", &arguments(QUERY));
 
-    assert!(!reply.is_error, "{}", reply.text);
+    reply.succeeded();
     assert_eq!(mcp.prompts().len(), 1, "asked once");
     assert_eq!(mock.requests().len(), 1);
 }
@@ -178,7 +172,7 @@ fn other_clients_are_asked_as_before() {
 #[test]
 fn the_refusal_is_recorded_in_the_audit_log() {
     let mock = mock();
-    let config = format!("audit_log = \"audit.jsonl\"\n\n{}", config(&mock, ""));
+    let config = format!("audit_log = \"audit.jsonl\"\n\n{}", store_config(&mock, ""));
     let mut mcp = Launch::new(&config).client("opencode").human(Human::Accepts).start();
 
     mcp.call("execute", &arguments(QUERY));

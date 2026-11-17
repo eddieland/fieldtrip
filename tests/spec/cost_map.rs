@@ -5,7 +5,7 @@
 
 use serde_json::json;
 
-use crate::support::{Human, Launch, Mcp, MockServer};
+use crate::support::{Human, Launch, Mcp, MockServer, store_config};
 
 /// Starts a server whose `store` endpoint reads the fixture schema and uses `map` as its cost map.
 fn start(map: &str) -> Mcp {
@@ -14,10 +14,7 @@ fn start(map: &str) -> Mcp {
 
 /// Starts a server on `mock` with `map` as the cost map, `settings` on the endpoint, and a human who answers.
 fn start_with(mock: &MockServer, map: &str, settings: &str, human: Human) -> Mcp {
-    let config = format!(
-        "[endpoints.store]\nurl = \"{}\"\nschema = \"schema.graphql\"\ncosts = \"store.costs.toml\"\n{settings}",
-        mock.url()
-    );
+    let config = store_config(mock, &format!("costs = \"store.costs.toml\"\n{settings}"));
     Launch::new(&config).file("store.costs.toml", map).human(human).start()
 }
 

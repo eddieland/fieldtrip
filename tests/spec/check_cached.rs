@@ -7,7 +7,7 @@ use std::time::{Duration, SystemTime};
 use serde_json::json;
 use tempfile::TempDir;
 
-use crate::support::{Checked, FixtureApi, Launch, MockServer, Response};
+use crate::support::{Checked, FixtureApi, Launch, MockServer, Response, store_config};
 
 const COSTS: &str = "\"Query.products\" = { multiplier = 50 }\n";
 const TYPO: &str = "\"Query.products\" = { multiplier = 50 }\n\"Product.nope\" = { cost = 1 }\n";
@@ -267,10 +267,7 @@ fn introspect_that_fails_is_a_problem() {
 #[test]
 fn introspect_sends_nothing_to_an_endpoint_with_a_schema_file() {
     let mock = MockServer::unreachable();
-    let config = format!(
-        "[endpoints.store]\nurl = \"{}\"\nschema = \"schema.graphql\"\n",
-        mock.url()
-    );
+    let config = store_config(&mock, "");
 
     let checked = Launch::new(&config).check_with(&["--introspect"]);
 

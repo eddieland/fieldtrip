@@ -4,7 +4,7 @@
 
 use serde_json::{Value, json};
 
-use crate::support::{Human, Launch, MockServer};
+use crate::support::{Human, Launch, MockServer, store_config};
 
 /// A good saved query, which spreads a good shared fragment.
 const USER: &str = "query UserById($id: ID!) {\n  user(id: $id) { name ...Contact }\n}\n";
@@ -17,10 +17,10 @@ const CLASH: &str = "query UsesClash { viewer { ...Clashing } }\n";
 
 /// The `store` endpoint, sending operations to `mock`.
 fn config(mock: &MockServer) -> String {
-    format!(
-        "[endpoints.store]\nurl = \"{}\"\nschema = \"schema.graphql\"\noperations = \"operations\"\n\
+    store_config(
+        mock,
+        "operations = \"operations\"\n\
          fragments = \"fragments\"\n",
-        mock.url()
     )
 }
 
@@ -50,7 +50,7 @@ fn the_good_operations_load_and_the_bad_files_are_listed() {
 
     let reply = mcp.call("list_operations", &json!({ "endpoint": "store" }));
 
-    assert!(!reply.is_error, "{}", reply.text);
+    reply.succeeded();
     let text = &reply.text;
     assert!(text.starts_with("1 saved operation for `store`"), "{text}");
     assert!(text.contains("UserById (query)"), "{text}");
@@ -76,7 +76,7 @@ fn a_filtered_list_points_to_the_files_left_out() {
 
     let reply = mcp.call("list_operations", &json!({ "endpoint": "store", "query": "user" }));
 
-    assert!(!reply.is_error, "{}", reply.text);
+    reply.succeeded();
     assert!(reply.text.contains("UserById"), "{}", reply.text);
     assert!(
         reply
@@ -94,7 +94,7 @@ fn a_name_two_files_share_runs_neither() {
     let mut mcp = launch(&config(&mock)).human(Human::Accepts).start();
 
     let reply = mcp.call("execute", &json!({ "endpoint": "store", "operation_name": "Viewer" }));
-    assert!(reply.is_error, "{}", reply.text);
+    reply.failed();
     assert!(reply.text.contains("viewer.graphql"), "{}", reply.text);
     assert!(reply.text.contains("viewer_copy.graphql"), "{}", reply.text);
 
@@ -102,7 +102,7 @@ fn a_name_two_files_share_runs_neither() {
         "execute",
         &json!({ "endpoint": "store", "operation_name": "UsesClash" }),
     );
-    assert!(reply.is_error, "{}", reply.text);
+    reply.failed();
     assert!(reply.text.contains("`Clashing`"), "{}", reply.text);
 
     assert_eq!(mcp.prompts().len(), 0, "the human is not asked");
@@ -186,16 +186,13 @@ fn startup_logs_each_file_left_out() {
 
 #[test]
 fn a_library_of_only_bad_files_still_lists_them() {
-    let config = format!(
-        "[endpoints.store]\nurl = \"{}\"\nschema = \"schema.graphql\"\noperations = \"operations\"\n",
-        MockServer::unreachable().url()
-    );
+    let config = store_config(&MockServer::unreachable(), "operations = \"operations\"\n");
     let mut mcp = Launch::new(&config)
         .file("operations/anonymous.graphql", "{ viewer { name } }\n")
         .start();
 
     let reply = mcp.call("list_operations", &json!({ "endpoint": "store" }));
-    assert!(!reply.is_error, "{}", reply.text);
+    reply.succeeded();
     assert!(
         reply.text.starts_with("0 saved operations for `store`"),
         "{}",
