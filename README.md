@@ -171,6 +171,9 @@ only you can read it. The agent can also choose what it gets, without changing w
 
 - `select` picks part of the response with a path such as `data.repository.pullRequests.nodes[*].number`.
 - `save` writes the response to a file whatever its size.
+- `read_result` returns part of a response that is in a file, by the same kind of path, without sending anything. So
+  the agent can look at one part after another of a response it was sent once. It reads only the files fieldtrip
+  wrote, under `fieldtrip/responses`, and refuses any other path.
 
 When a connection in the response has `pageInfo.hasNextPage: true`, the result points it out with its cursor, so the
 agent pages through it instead of asking for a bigger page.

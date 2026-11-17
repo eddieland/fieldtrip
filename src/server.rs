@@ -35,7 +35,11 @@ const INSTRUCTIONS: &str = "fieldtrip lets you use GraphQL APIs the user has con
      4. `search_schema` finds a type, field or saved operation by a word. `describe` shows a field's exact \
      arguments and return type.\n\
      5. Write one operation and check it with `estimate_cost` until it is valid and cheap. Nothing is sent.\n\
-     6. `execute` sends it, or a saved operation named by `operation_name`. The user approves each request unless their config says otherwise.\n\
+     6. `execute` sends it, or a saved operation named by `operation_name`. The user approves each request unless \
+     their config says otherwise.\n\
+     7. A response too long to show is written to a file, and `execute` returns its path, a preview and its shape. \
+     `read_result` then returns any part of it by a path, without sending anything: use it rather than running the \
+     operation again.\n\
      GraphQL habits that matter here: take every field and argument name from the schema, never from memory. \
      Select only the fields you need, since there is no wildcard. Name the operation and pass inputs as \
      variables, not as values pasted into the text: the user reads both when approving. Give lists a page size, \
@@ -371,6 +375,53 @@ fn shown(head: String, rest: &[(String, Box<RawValue>)], room: response::Room, s
     }
 }
 
+/// What a result shows of the GraphQL response `body`, whose top-level members are `parts`.
+///
+/// `summary` comes first, then a line for each connection with more pages, then `saved_note`. Errors follow, whole,
+/// because they say what went wrong. After them comes the part `select` picked, or `data` and the rest, cut to fit
+/// the `room`, and the shape of the response when a preview of a file was cut.
+fn laid_out(
+    summary: String,
+    saved_note: &str,
+    body: &str,
+    mut parts: BTreeMap<String, Box<RawValue>>,
+    select: Option<&select::Path>,
+    room: response::Room,
+) -> String {
+    let mut head = summary;
+    let data = parts.get("data").and_then(|data| serde_json::from_str(data.get()).ok());
+    for hint in data.as_ref().map_or_else(Vec::new, response::page_hints) {
+        let _ = write!(head, "\n{hint}");
+    }
+    head.push_str(saved_note);
+    let errors = parts.remove("errors");
+    let rest = if let Some(path) = select {
+        let picked =
+            serde_json::from_str(body).map_or_else(|_error| select::Selected::nothing(), |whole| path.select(&whole));
+        let _ = write!(head, "\n{}", picked.line);
+        if let Some(errors) = errors.filter(|_| !path.is_in_errors()) {
+            let _ = write!(head, "\nerrors: {}", errors.get().trim());
+        }
+        picked
+            .value
+            .and_then(|value| serde_json::value::to_raw_value(&value).ok())
+            .map(|value| ("selected".to_owned(), value))
+            .into_iter()
+            .collect()
+    } else {
+        if let Some(errors) = errors {
+            let _ = write!(head, "\nerrors: {}", errors.get().trim());
+        }
+        let data = parts.remove("data").map(|data| ("data".to_owned(), data));
+        data.into_iter().chain(parts).collect::<Vec<_>>()
+    };
+    let shape = match room {
+        response::Room::Preview(limit) => shape_of(body, limit / 3),
+        response::Room::Result(_) | response::Room::Selection(_) | response::Room::Read(_) => String::new(),
+    };
+    shown(head, &rest, room, &shape)
+}
+
 /// How `execute` says to get a smaller result.
 const ASK_FOR_LESS: &str = "Ask for less: fewer fields, or a smaller page with `first` or `limit`.";
 
@@ -673,6 +724,25 @@ struct HistoryArguments {
         description = "Optional. How many of the most recent attempts to return, from 1 to 100. Defaults to 20."
     )]
     limit: Option<usize>,
+}
+
+/// Arguments of `read_result`.
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+struct ReadResultArguments {
+    /// The result to read.
+    #[schemars(
+        description = "The ID of a response that `execute` wrote to a file, such as `acme-prod-1b4e28ba9f3c`, or \
+                       the file's path. Both are in `execute`'s result, where it says the response was saved. No \
+                       other file can be read."
+    )]
+    result: String,
+    /// A path that picks part of the response.
+    #[schemars(description = "A path that picks part of the saved response, such as \
+                       `data.repository.issues.nodes[*].number`, written as for `execute`: it starts at `data`, \
+                       `errors` or `extensions`, names are joined by `.`, `[0]` takes one item of a list and `[*]` \
+                       every item. Take the names from the shape `execute` showed. Leave it out to see the preview \
+                       and the shape again.")]
+    select: Option<String>,
 }
 
 /// Arguments of `introspect`.
@@ -1003,8 +1073,8 @@ impl Fieldtrip {
                        long to show is written whole to a file instead: the result gives the file's path, `errors` \
                        in full, a preview that is still valid JSON, with long lists and strings cut and each cut \
                        marked with what it dropped, and the shape of the response, one line per path with its type \
-                       and size. Nothing was lost, so do not send the operation again to see more. To get one part \
-                       in the result, pass `select`. Pass `save` to have a short response written to a file too. A \
+                       and size. Nothing was lost, so do not send the operation again to see more: `read_result` returns \
+                       any part of the file by a path. To get one part in this result, pass `select`. Pass `save` to have a short response written to a file too. A \
                        connection with \
                        `hasNextPage: true` is pointed out with its cursor: page through it with `after` rather than \
                        raising `first`. A response \
@@ -1179,9 +1249,11 @@ impl Fieldtrip {
                     };
                     (
                         format!(
-                            "{why}\nSaved the whole response, {} bytes, to {}",
+                            "{why}\nSaved the whole response, {} bytes, to {}\n`read_result` with `result: \"{}\"` \
+                             and a `select` path returns any part of it, and sends nothing.",
                             reply.body.len(),
-                            stored.path.display()
+                            stored.path.display(),
+                            stored.id
                         ),
                         room,
                     )
@@ -1194,7 +1266,7 @@ impl Fieldtrip {
         } else {
             (String::new(), response::Room::Result(endpoint.max_output_chars))
         };
-        let Ok(mut parts) = serde_json::from_str::<BTreeMap<String, Box<RawValue>>>(&reply.body) else {
+        let Ok(parts) = serde_json::from_str::<BTreeMap<String, Box<RawValue>>>(&reply.body) else {
             let excerpt: String = reply.body.chars().take(EXCERPT).collect();
             return Err(format!(
                 "{summary}{saved_note}\nThe response was not a GraphQL response: {excerpt}"
@@ -1216,39 +1288,66 @@ impl Fieldtrip {
             ));
         }
 
-        // Errors come first and whole, because they say what went wrong. What follows them is cut to fit.
-        let mut head = summary;
-        let data = parts.get("data").and_then(|data| serde_json::from_str(data.get()).ok());
-        for hint in data.as_ref().map_or_else(Vec::new, response::page_hints) {
-            let _ = write!(head, "\n{hint}");
-        }
-        head.push_str(&saved_note);
-        let errors = parts.remove("errors");
-        let rest = if let Some(path) = &select {
-            let picked = serde_json::from_str(&reply.body)
-                .map_or_else(|_error| select::Selected::nothing(), |whole| path.select(&whole));
-            let _ = write!(head, "\n{}", picked.line);
-            if let Some(errors) = errors.filter(|_| !path.is_in_errors()) {
-                let _ = write!(head, "\nerrors: {}", errors.get().trim());
-            }
-            picked
-                .value
-                .and_then(|value| serde_json::value::to_raw_value(&value).ok())
-                .map(|value| ("selected".to_owned(), value))
-                .into_iter()
-                .collect()
+        Ok(finished(laid_out(
+            summary,
+            &saved_note,
+            &reply.body,
+            parts,
+            select.as_ref(),
+            room,
+        )))
+    }
+
+    #[tool(
+        title = "Read part of a saved GraphQL response",
+        description = "Return part of a response that `execute` wrote to a file because it was too long to show, or \
+                       because you passed `save`. Use it instead of running the operation again when you want to \
+                       look at another part: it reads the file and sends nothing to the endpoint, so it needs no \
+                       approval and costs the API nothing. Pass the result ID or the path from `execute`'s result \
+                       as `result`, and a `select` path such as `data.repository.issues.nodes[*].number`, using the \
+                       names in the shape `execute` showed. It returns `errors` in full, then the selected part as \
+                       JSON. A selection too long for one result is cut by structure, with each cut marked: narrow \
+                       the path, for instance to one item with `[0]`, to get a part whole. Without `select` it \
+                       returns the preview and the shape again. A path that matches nothing says what is there. The \
+                       file holds the response as it was when it arrived: to see current data, run the operation \
+                       again with `execute`.",
+        annotations(read_only_hint = true, open_world_hint = false)
+    )]
+    fn read_result(&self, Parameters(arguments): Parameters<ReadResultArguments>) -> ToolResult {
+        let select = arguments
+            .select
+            .as_deref()
+            .map(select::Path::parse)
+            .transpose()
+            .map_err(|error| error.replace(" Nothing was sent.", ""))?;
+        let stored = self.results.find(&arguments.result)?;
+        let body = std::fs::read_to_string(&stored.path).map_err(|error| {
+            format!(
+                "Could not read the result `{}` at {}: {error}",
+                stored.id,
+                stored.path.display()
+            )
+        })?;
+        let summary = format!(
+            "Result `{}`: {} bytes, in {}. Nothing was sent to the endpoint.",
+            stored.id,
+            shape::grouped(body.len()),
+            stored.path.display()
+        );
+        let Ok(parts) = serde_json::from_str::<BTreeMap<String, Box<RawValue>>>(&body) else {
+            let excerpt: String = body.chars().take(EXCERPT).collect();
+            return Err(format!(
+                "{summary}\nThe file does not hold a GraphQL response: it is not JSON, or not a JSON object, so \
+                 `select` has nothing to pick from. It begins: {excerpt}"
+            ));
+        };
+        let (output, inline) = self.limits_of(&stored.id);
+        let room = if select.is_some() {
+            response::Room::Read(output)
         } else {
-            if let Some(errors) = errors {
-                let _ = write!(head, "\nerrors: {}", errors.get().trim());
-            }
-            let data = parts.remove("data").map(|data| ("data".to_owned(), data));
-            data.into_iter().chain(parts).collect::<Vec<_>>()
+            response::Room::Preview(inline.min(SAVED_PREVIEW))
         };
-        let shape = match room {
-            response::Room::Preview(limit) => shape_of(&reply.body, limit / 3),
-            response::Room::Result(_) | response::Room::Selection(_) => String::new(),
-        };
-        Ok(finished(shown(head, &rest, room, &shape)))
+        Ok(laid_out(summary, "", &body, parts, select.as_ref(), room))
     }
 
     #[tool(
@@ -1394,6 +1493,27 @@ impl Fieldtrip {
         } else {
             INSTRUCTIONS.to_owned()
         }
+    }
+
+    /// The `max_output_chars` and the inline limit that apply to the result called `id`: those of the endpoint it
+    /// is named after, or the smallest of any endpoint when that one is no longer configured.
+    fn limits_of(&self, id: &str) -> (usize, usize) {
+        let endpoints = &self.config.endpoints;
+        let named = endpoints
+            .iter()
+            .filter(|(name, _)| id.strip_prefix(name.as_str()).is_some_and(|rest| rest.starts_with('-')))
+            .max_by_key(|(name, _)| name.len());
+        named.map_or_else(
+            || {
+                let smallest =
+                    |limit: fn(&Endpoint) -> usize| endpoints.values().map(limit).min().unwrap_or(usize::MAX);
+                (
+                    smallest(|endpoint| endpoint.max_output_chars),
+                    smallest(Endpoint::inline_limit),
+                )
+            },
+            |(_, endpoint)| (endpoint.max_output_chars, endpoint.inline_limit()),
+        )
     }
 
     /// Looks up an endpoint by name.

@@ -312,3 +312,11 @@ cargo test --workspace --all-features
   selection is shown, cut when it is longer than the limit itself. The limit never exceeds `max_output_chars`, one
   under 1,000 stops the server, and `fieldtrip check` shows it. `save` still forces a file at any size.
   Done when: `cargo test response_spill`
+- [x] **55. `read_result`.** A read-only `read_result` tool takes `result`, the ID or the path that `execute` gave
+  for a response it wrote to a file, and an optional `select` path, and returns `errors` in full and then that part of
+  the file, without a request to the endpoint. A selection too long for `max_output_chars` is cut like any summary, a
+  path that misses says what is there, and with no path the preview and the shape come back. A path outside
+  fieldtrip's responses directory is refused, however it is written, and an unknown ID is answered with this session's
+  results. A result of an earlier session is found by its ID. `execute` names the ID and the tool where it says the
+  response was saved, and the instructions say to read a result rather than send the operation again.
+  Done when: `cargo test read_result`

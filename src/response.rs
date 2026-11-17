@@ -155,19 +155,21 @@ pub(crate) enum Room {
     /// The response was written to a file, and the result shows the part `select` picked, up to this many
     /// characters, the endpoint's `max_inline_chars`.
     Selection(usize),
+    /// `read_result` shows the part of a file that `select` picked, up to this many characters, `max_output_chars`.
+    Read(usize),
 }
 
 impl Room {
     /// The most characters the result holds.
     pub(crate) const fn limit(self) -> usize {
         match self {
-            Self::Result(limit) | Self::Preview(limit) | Self::Selection(limit) => limit,
+            Self::Result(limit) | Self::Preview(limit) | Self::Selection(limit) | Self::Read(limit) => limit,
         }
     }
 
     /// Whether the whole response is in a file, so that what is shown is never all there is.
     pub(crate) const fn is_of_a_file(self) -> bool {
-        matches!(self, Self::Preview(_) | Self::Selection(_))
+        matches!(self, Self::Preview(_) | Self::Selection(_) | Self::Read(_))
     }
 }
 
@@ -181,11 +183,16 @@ pub(crate) fn note(summary: &Summary, length: usize, room: Room) -> String {
         ),
         Room::Preview(limit) => (
             format!("more than the {limit} shown of a saved response"),
-            "The file has all of it.",
+            "The file has all of it, and `read_result` returns any part of it.",
         ),
         Room::Selection(limit) => (
             format!("more than the {limit} shown of a selection (`max_inline_chars`)"),
-            "The file has all of it. Pick a smaller part with a longer `select` path.",
+            "The file has all of it. `read_result` shows more of a selection, and a longer `select` path picks a \
+             smaller part.",
+        ),
+        Room::Read(limit) => (
+            format!("more than the {limit} it holds here (`max_output_chars`)"),
+            "The file has all of it. Pick a smaller part with a longer `select` path, such as one item with `[0]`.",
         ),
     };
     let mut cuts = Vec::new();

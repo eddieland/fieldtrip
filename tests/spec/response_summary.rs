@@ -39,7 +39,7 @@ fn parts(reply: &Reply) -> (Vec<(String, Value)>, String) {
     let lines: Vec<&str> = reply
         .text
         .lines()
-        .skip_while(|line| !line.starts_with("Saved the whole response, "))
+        .skip_while(|line| !line.starts_with("`read_result` with "))
         .skip(1)
         .take_while(|line| !line.starts_with("Shape of the whole response"))
         .collect();

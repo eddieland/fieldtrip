@@ -29,6 +29,7 @@ in the user's config, out of the agent's sight and out of its control.
 | `describe` | `endpoint`, `name` (`Type` or `Type.field`) | That definition as compact SDL |
 | `estimate_cost` | `endpoint`, `operation` or `operation_name`, `variables?` | Validation errors, or cost, depth, breakdown, assumptions |
 | `execute` | `endpoint`, `operation` or `operation_name`, `variables?`, `select?`, `save?` | Status, `errors`, then the rest, or a file's path with a preview |
+| `read_result` | `result`, `select?` | Part of a response `execute` wrote to a file, by a path. Sends nothing |
 | `history` | `endpoint?`, `limit?` | The latest `execute` attempts from the audit log. Only offered with `audit_log` |
 
 ## Config shape
@@ -367,3 +368,12 @@ Settled. To change one, ask the user, then add a new dated line instead of editi
 - 2026-11-17: A response file goes in a directory of the session's own, `fieldtrip/responses/<session>`, in the cache
   directory, and is named by the endpoint and an ID fieldtrip makes for it. This refines the 2026-11-13 line on `save`,
   which still forces a file at any size.
+- 2026-11-17: `read_result` takes a result, by the ID or the path `execute` gave, and a `select` path, and returns that
+  part of the file, after `errors` in full. It sends nothing, so it asks nobody. Without a path it gives the preview
+  and the shape again. No jq: `select` is the one path language.
+- 2026-11-17: `read_result` reads only files under `fieldtrip/responses`, once links and `..` are followed. The calling
+  agent is not trusted with a path to anything else, so any other path is refused, whatever the file holds.
+- 2026-11-17: A result's ID is its file's name without `.json`. An ID is looked for in this session's directory first,
+  then in those of earlier sessions.
+- 2026-11-17: What `read_result` selects is held to the `max_output_chars` of the endpoint the result is named after,
+  not to `max_inline_chars`, because the calling agent asked for that part.

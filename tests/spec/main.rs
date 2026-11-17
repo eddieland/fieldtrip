@@ -85,6 +85,8 @@ mod pagination_hints;
 #[cfg(test)]
 mod protocol_2026;
 #[cfg(test)]
+mod read_result;
+#[cfg(test)]
 mod redaction;
 #[cfg(test)]
 mod response_limits;
