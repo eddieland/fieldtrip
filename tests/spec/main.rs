@@ -47,6 +47,8 @@ mod estimate_cost;
 #[cfg(test)]
 mod execute_approved;
 #[cfg(test)]
+mod execute_batch;
+#[cfg(test)]
 mod execute_refused;
 #[cfg(test)]
 mod execute_save;

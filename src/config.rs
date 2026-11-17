@@ -125,6 +125,8 @@ pub(crate) struct Endpoint {
     /// The longest response `execute` shows in its result. A longer one is written to a file, and the result
     /// previews it. [`Endpoint::inline_limit`] is what applies.
     pub(crate) max_inline_chars: usize,
+    /// The most requests one call may send under a single approval: the runs of `execute_batch`.
+    pub(crate) max_batch: usize,
     /// Who approves an operation before it is sent.
     pub(crate) approval: Approval,
     /// Queries with an estimated cost at or below this are sent without asking. Mutations always ask.
@@ -183,6 +185,9 @@ const DEFAULT_MAX_INLINE_CHARS: usize = 10_000;
 /// The smallest `max_output_chars` and `max_inline_chars` allowed. A smaller result cannot hold a useful summary
 /// of a response.
 const MIN_OUTPUT_CHARS: u64 = 1_000;
+
+/// The `max_batch` of an endpoint that does not set one.
+const DEFAULT_MAX_BATCH: usize = 100;
 
 /// A mebibyte.
 pub(crate) const MIB: usize = 1024 * 1024;
@@ -246,6 +251,7 @@ struct RawTable {
     max_response_bytes: Option<u64>,
     max_output_chars: Option<u64>,
     max_inline_chars: Option<u64>,
+    max_batch: Option<u64>,
     audit_variables: Option<bool>,
 }
 
@@ -272,6 +278,7 @@ struct Template {
     max_response_bytes: Option<usize>,
     max_output_chars: Option<usize>,
     max_inline_chars: Option<usize>,
+    max_batch: Option<usize>,
     audit_variables: Option<bool>,
 }
 
@@ -440,6 +447,7 @@ impl Template {
             max_response_bytes: byte_limit("max_response_bytes", raw.max_response_bytes)?,
             max_output_chars: output_limit("max_output_chars", raw.max_output_chars)?,
             max_inline_chars: output_limit("max_inline_chars", raw.max_inline_chars)?,
+            max_batch: batch_limit(raw.max_batch)?,
             audit_variables: raw.audit_variables,
         })
     }
@@ -544,6 +552,9 @@ impl Endpoint {
             max_inline_chars: output_limit("max_inline_chars", raw.max_inline_chars)?
                 .or(template.max_inline_chars)
                 .unwrap_or(DEFAULT_MAX_INLINE_CHARS),
+            max_batch: batch_limit(raw.max_batch)?
+                .or(template.max_batch)
+                .unwrap_or(DEFAULT_MAX_BATCH),
             audit_variables: raw.audit_variables.or(template.audit_variables).unwrap_or(true),
             approval,
             auto_approve_cost: raw.auto_approve_cost,
@@ -816,6 +827,15 @@ fn output_limit(key: &str, chars: Option<u64>) -> Result<Option<usize>, String> 
         ));
     }
     Ok(Some(usize::try_from(chars).unwrap_or(usize::MAX)))
+}
+
+/// Checks `max_batch`.
+fn batch_limit(runs: Option<u64>) -> Result<Option<usize>, String> {
+    let Some(runs) = runs else { return Ok(None) };
+    if runs == 0 {
+        return Err("`max_batch` is the most requests one call may send and must be at least 1".to_owned());
+    }
+    Ok(Some(usize::try_from(runs).unwrap_or(usize::MAX)))
 }
 
 /// `bytes` for a person to read: `32 MiB`, `512 KiB`, or `1000 bytes`.

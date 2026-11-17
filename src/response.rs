@@ -166,13 +166,19 @@ pub(crate) enum Room {
     Selection(usize),
     /// `read_result` shows the part of a file that `select` picked, up to this many characters, `max_output_chars`.
     Read(usize),
+    /// The result holds several responses, and each gets at most this many characters of it.
+    Share(usize),
 }
 
 impl Room {
     /// The most characters the result holds.
     pub(crate) const fn limit(self) -> usize {
         match self {
-            Self::Result(limit) | Self::Preview(limit) | Self::Selection(limit) | Self::Read(limit) => limit,
+            Self::Result(limit)
+            | Self::Preview(limit)
+            | Self::Selection(limit)
+            | Self::Read(limit)
+            | Self::Share(limit) => limit,
         }
     }
 
@@ -189,6 +195,10 @@ pub(crate) fn note(summary: &Summary, length: usize, room: Room) -> String {
         Room::Result(limit) => (
             format!("more than the {limit} it holds here (`max_output_chars`)"),
             "Ask for less with fewer fields or a smaller page, or pick one part with `select`.",
+        ),
+        Room::Share(limit) => (
+            format!("more than the {limit} that each response gets of a result that holds several"),
+            "Ask for less with fewer fields or a smaller page, pick one part with `select`, or send fewer at once.",
         ),
         Room::Preview(limit) => (
             format!("more than the {limit} shown of a saved response"),
@@ -445,7 +455,7 @@ pub(crate) fn laid_out(
     };
     let shape = match room {
         Room::Preview(limit) => shape_of(body, limit / 3),
-        Room::Result(_) | Room::Selection(_) | Room::Read(_) => String::new(),
+        Room::Result(_) | Room::Selection(_) | Room::Read(_) | Room::Share(_) => String::new(),
     };
     shown(head, &rest, room, &shape)
 }
@@ -550,4 +560,37 @@ pub(crate) fn render(
     }
 
     Ok(laid_out(summary, &saved_note, &reply.body, parts, select, room))
+}
+
+/// One response of a call that sends several, under `label`, such as `[0]`: the status line, then `errors` in full,
+/// then the rest or the part `select` picks, in `share` characters. Nothing is written to a file. A response that
+/// is not GraphQL is shown as what is wrong with it.
+pub(crate) fn section(
+    label: &str,
+    reply: &Reply,
+    endpoint: &Endpoint,
+    select: Option<&select::Path>,
+    share: usize,
+) -> String {
+    let mut head = format!("{label} {}", reply.metadata());
+    if let Some(note) = &reply.refused_twice {
+        let _ = write!(head, "\n{note}");
+    }
+    if reply.cut_short {
+        return format!(
+            "{head}\n[The response is larger than {}, the `max_response_bytes` limit for this endpoint, so it could \
+             not be read whole and `data` and `errors` are both lost. Ask for fewer fields.]",
+            show_bytes(endpoint.max_response_bytes)
+        );
+    }
+    let parts = serde_json::from_str::<BTreeMap<String, Box<RawValue>>>(&reply.body)
+        .ok()
+        .filter(|parts| parts.contains_key("errors") || parts.contains_key("data"));
+    let Some(parts) = parts else {
+        return format!(
+            "{head}\nThe response was not a GraphQL response: {}",
+            excerpt(&reply.body, EXCERPT)
+        );
+    };
+    laid_out(head, "", &reply.body, parts, select, Room::Share(share))
 }

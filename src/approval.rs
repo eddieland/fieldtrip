@@ -311,6 +311,46 @@ pub(crate) fn prompt(endpoint: &str, url: &str, plan: &Plan, variables: &Variabl
     out
 }
 
+/// How many sets of variables the prompt for a batch shows. The rest are counted.
+const BATCH_SAMPLE: usize = 5;
+
+/// The text of the approval prompt for a batch: `plan` sent once for each of `sets`, at a `total` estimated cost of
+/// which `costliest` is the most one run costs.
+///
+/// Like [`prompt`], it holds nothing the calling agent wrote but the operation and the variables. The sets are
+/// numbered as the result numbers them, from 0, and past the first few they are only counted.
+pub(crate) fn batch_prompt(
+    endpoint: &str,
+    url: &str,
+    plan: &Plan,
+    sets: &[Variables],
+    total: u64,
+    costliest: u64,
+) -> String {
+    let runs = sets.len();
+    let mut out = format!(
+        "fieldtrip wants to send a {} to `{endpoint}` ({url}) {runs} times, once for each set of variables.\n\n{}\n\n\
+         Variables, {runs} sets:\n",
+        plan.kind.keyword(),
+        plan.text
+    );
+    for (index, variables) in sets.iter().enumerate().take(BATCH_SAMPLE) {
+        let _ = writeln!(out, "[{index}] {}", serde_json::Value::Object(variables.clone()));
+    }
+    if runs > BATCH_SAMPLE {
+        let _ = writeln!(out, "… and {} more sets, which are not shown.", runs - BATCH_SAMPLE);
+    }
+    let _ = write!(
+        out,
+        "Estimated cost: {total} in total, {costliest} for the costliest run\n\nAccept to send all {runs}. Decline to \
+         stop."
+    );
+    for assumption in &plan.assumptions {
+        let _ = write!(out, "\nThe estimate assumes: {assumption}");
+    }
+    out
+}
+
 /// Shows `prompt` to the human and waits for the answer. Only an approval allows sending. With `offer_session` the
 /// prompt has the field that approves a query for the session.
 async fn ask(peer: &Peer<RoleServer>, prompt: String, offer_session: bool) -> Decision {

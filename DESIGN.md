@@ -29,6 +29,7 @@ in the user's config, out of the agent's sight and out of its control.
 | `describe` | `endpoint`, `name` (`Type` or `Type.field`) | That definition as compact SDL. A type adds what uses it and paths to it from `Query` |
 | `estimate_cost` | `endpoint`, `operation` or `operation_name`, `variables?` | Validation errors, or cost, depth, breakdown, assumptions |
 | `execute` | `endpoint`, `operation` or `operation_name`, `variables?`, `select?`, `save?` | Status, `errors`, then the rest, or a file's path with a preview |
+| `execute_batch` | `endpoint`, `operation` or `operation_name`, `variables` (a list of sets), `select?` | One section per run: status, `errors`, then the rest or a summary |
 | `read_result` | `result`, `select?` | Part of a response `execute` wrote to a file, by a path. Sends nothing |
 | `history` | `endpoint?`, `limit?` | The latest `execute` attempts from the audit log. Only offered with `audit_log` |
 
@@ -51,6 +52,7 @@ max_schema_bytes  = 33554432                 # optional, default 32 MiB, read of
 max_response_bytes = 8388608                 # optional, default 8 MiB, read of a response to `execute`
 max_output_chars  = 40000                    # optional, default 40,000, characters in one tool result
 max_inline_chars  = 10000                    # optional, default 10,000, a longer response goes to a file
+max_batch         = 100                      # optional, default 100, runs in one `execute_batch`
 audit_variables   = false                    # optional, default true: leave variables out of the audit log
 schema_ttl        = 86400                    # optional, seconds a schema is cached, default 1 day
 
@@ -73,8 +75,8 @@ X-Api-Key = { env = "ACME_API_KEY" }
 ```
 
 An endpoint takes `schema`, `schema_ttl`, `headers`, `costs`, `glossary`, `operations`, `fragments`, `client_directives`,
-`assumed_list_size`, `timeout`, `response_headers`, the four `max_` limits and `audit_variables` from its template
-unless it sets them.
+`assumed_list_size`, `timeout`, `response_headers`, the four `max_` limits, `max_batch` and `audit_variables` from its
+template unless it sets them.
 Headers merge by name, ignoring case, and the endpoint's win.
 `url`, `description`, `approval` and `auto_approve_cost` are only ever set on the endpoint. `mutations` comes from the
 template too, but an endpoint can only make it stricter. A path may start with `~/`.
@@ -147,6 +149,8 @@ variables, until fieldtrip restarts". A mutation's prompt has no field.
 | Client has no elicitation support | Not sent |
 | Query with cost at or below `auto_approve_cost` | Sent without a prompt |
 | Query the human approved for the session, with any variables | Sent without a prompt |
+| `execute_batch` | One prompt for all its runs, or none when the total cost is waived as a query's is |
+| `execute_batch` with a mutation | Not sent, and no prompt is shown |
 | Endpoint sets `approval = "client"` | Sent without a prompt, mutations included |
 | Mutation, and the endpoint or its template sets `mutations = "deny"` | Not sent, and no prompt is shown |
 | A prompt is needed, and the client is known to accept prompts unseen | Not sent, and no prompt is shown |
@@ -418,3 +422,21 @@ Settled. To change one, ask the user, then add a new dated line instead of editi
   `session`. The accept that granted it is `accepted`, with a reason that says so.
 - 2026-11-17: An approval on revision 2026-07-28 is tied to the tool that asked, as well as to the operation and its
   variables.
+- 2026-11-17: `execute_batch` sends one query once for each set in a list of variables, under one approval. It is a
+  tool of its own, so the approval covers the batch and `execute` stays one request for one approval.
+- 2026-11-17: A batch's prompt shows the canonical text, the number of runs, the first five sets of variables and
+  the total estimated cost. The sets past the fifth are counted, not shown. This is the one place where the human
+  approves variables they were not shown, and it refines the 2026-11-12 line that the prompt shows the variables.
+- 2026-11-17: A batch is queries only. A mutation is refused with no prompt, whatever `approval` says, since each
+  mutation is approved on its own.
+- 2026-11-17: `auto_approve_cost` is compared with a batch's total cost. A query approved for the session runs as a
+  batch unasked. A batch's prompt has no field, so accepting one never approves the query for the session.
+- 2026-11-17: `max_batch`, 100 unless an endpoint or its template sets it, caps the runs of one batch. Zero stops
+  the server.
+- 2026-11-17: Every set is validated and costed before anyone is asked. The runs are sent in order, one at a time.
+  A run's GraphQL `errors` do not stop the batch. A run that gets no answer does, and the rest are not sent.
+- 2026-11-17: A batch's result has a section per run, numbered from 0 by the position of its set, and each gets an
+  equal share of `max_output_chars`, summarized as any response is. `select` applies to every run. There is no
+  `save`, and no run's response is written to a file, whatever `max_inline_chars` is.
+- 2026-11-17: The audit log has a line for each run that was sent, with `batch: {run, of}`. A batch that was not sent
+  is one line, with every set under `variables` and `batch: {of}`.

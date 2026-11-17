@@ -15,7 +15,7 @@ use serde_json::value::RawValue;
 use tokio::sync::Mutex;
 
 use crate::approval::{self, Approvals, Gate, Request, Returned};
-use crate::audit::{self, Attempt, Audit, Outcome, Verdict};
+use crate::audit::{self, Attempt, Audit, Outcome, Series, Verdict};
 use crate::config::{Approval, Config, Endpoint, Mutations, show_duration};
 use crate::http::Client;
 use crate::library::Saved;
@@ -39,7 +39,9 @@ const INSTRUCTIONS: &str = "fieldtrip lets you use GraphQL APIs the user has con
      5. Write one operation and check it with `estimate_cost` until it is valid and cheap. Nothing is sent.\n\
      6. `execute` sends it, or a saved operation named by `operation_name`. The user approves each request unless \
      their config says otherwise.\n\
-     7. A response too long to show is written to a file, and `execute` returns its path, a preview and its shape. \
+     7. `execute_batch` sends one query once for each of many sets of variables, with a single approval. Use it \
+     instead of calling `execute` in a loop.\n\
+     8. A response too long to show is written to a file, and `execute` returns its path, a preview and its shape. \
      `read_result` then returns any part of it by a path, without sending anything: use it rather than running the \
      operation again.\n\
      GraphQL habits that matter here: take every field and argument name from the schema, never from memory. \
@@ -212,6 +214,41 @@ struct EstimateArguments {
     #[serde(default)]
     variables: Variables,
 }
+
+/// Arguments of `execute_batch`.
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+struct BatchArguments {
+    /// The endpoint name, as listed by `list_endpoints`.
+    endpoint: String,
+    /// The GraphQL document.
+    #[schemars(description = OPERATION)]
+    operation: Option<String>,
+    /// The name of a saved operation.
+    #[schemars(description = OPERATION_NAME)]
+    operation_name: Option<String>,
+    /// One set of variables for each run.
+    #[schemars(description = "A JSON list with one object of variables for each run, such as \
+                       `[{\"id\": \"1\"}, {\"id\": \"2\"}]`. The query is sent once for each, in this order, and the \
+                       result numbers the runs by their position in this list, from 0. Every set is checked against \
+                       the declared types before the user is asked or anything is sent.")]
+    variables: Vec<Variables>,
+    /// A path that picks part of each response.
+    #[schemars(
+        description = "Optional. A path that picks part of each response once it arrives, as `select` does for \
+                       `execute`, such as `data.user.name`. With many runs it keeps the result short. `errors` is \
+                       still shown in full for each run."
+    )]
+    select: Option<String>,
+}
+
+/// One run of a batch: the variables it is sent with and what it is estimated to cost.
+struct Run {
+    variables: Variables,
+    cost: u64,
+}
+
+/// The fewest characters a run of a batch gets of the result, however many runs there are.
+const MIN_SHARE: usize = 300;
 
 /// Arguments of `execute`.
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -729,23 +766,7 @@ impl Fieldtrip {
             arguments.operation_name.as_deref(),
         )?;
         // Before the schema is loaded, so a denied mutation causes no request of any kind.
-        if let Err(refusal) = approval::refuse_denied_mutation(name, endpoint, text) {
-            let operation = audit::mutation_name(text);
-            let attempt = Attempt {
-                endpoint: name,
-                kind: Kind::Mutation,
-                operation: operation.as_deref(),
-                text,
-                variables: &arguments.variables,
-                cost: None,
-            };
-            let verdict = Verdict {
-                approval: "denied",
-                reason: Some("mutations are turned off for this endpoint by `mutations = \"deny\"`".to_owned()),
-            };
-            self.audit.record(endpoint, &attempt, &verdict, Outcome::NotSent).await;
-            return Err(refusal);
-        }
+        self.refuse_denied(name, endpoint, text, &arguments.variables).await?;
         let select = arguments.select.as_deref().map(select::Path::parse).transpose()?;
         let schema = self.schema(name, false).await?;
         // From here on the variables are the ones that will be sent, which is what the prompt and the log show.
@@ -759,6 +780,7 @@ impl Fieldtrip {
             text: &plan.text,
             variables: &variables,
             cost: Some(plan.cost),
+            series: Series::Single,
         };
 
         // Nothing below this point runs unless the human accepted, or the user's config waives the prompt.
@@ -832,6 +854,189 @@ impl Fieldtrip {
             arguments.save,
         )
         .map(finished)
+    }
+
+    #[tool(
+        title = "Execute a GraphQL query many times (the user approves once)",
+        description = "Send one query to the endpoint once for each set of variables in a list, and return every \
+                       response. Use it instead of calling `execute` in a loop when you need the same lookup for \
+                       many IDs or inputs: the user is asked once, in a prompt that shows the query, how many times \
+                       it will run, the first few sets of variables and the total estimated cost, and the result \
+                       says so when they were not asked. Pass the GraphQL text as `operation`, or the name of a \
+                       saved operation as `operation_name`, and the sets as `variables`. Check the query with \
+                       `estimate_cost` first. Queries only: a mutation is refused, because the user approves each \
+                       mutation on its own with `execute`. The user's config caps the number of runs, 100 unless \
+                       they changed it. The runs are sent one after another, in order. The result has one section \
+                       for each run, starting with `[0]` for the first set, with the HTTP status and time, then \
+                       that run's `errors` in full, then its `data`, cut to fit its share of the result: pass \
+                       `select` to keep only the part you need. One run's `errors` do not stop the others. A run \
+                       that gets no answer at all stops the batch, and the result says which runs were not sent. \
+                       If the user declines, nothing was sent: do not send it again, ask what they want instead.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = false,
+            open_world_hint = true
+        )
+    )]
+    async fn execute_batch(
+        &self,
+        context: RequestContext<RoleServer>,
+        RequestState(state): RequestState,
+        InputResponses(responses): InputResponses,
+        Parameters(arguments): Parameters<BatchArguments>,
+    ) -> Result<CallToolResponse, String> {
+        let name = &arguments.endpoint;
+        let endpoint = self.endpoint(name)?;
+        let (text, saved) = chosen(
+            name,
+            endpoint,
+            arguments.operation.as_deref(),
+            arguments.operation_name.as_deref(),
+        )?;
+        let no_variables = Variables::new();
+        let first = arguments.variables.first().unwrap_or(&no_variables);
+        self.refuse_denied(name, endpoint, text, first).await?;
+        let select = arguments.select.as_deref().map(select::Path::parse).transpose()?;
+        let count = arguments.variables.len();
+        if count == 0 {
+            return Err(
+                "`variables` is empty. Give a list with one object of variables for each run, such as \
+                 `[{\"id\": \"1\"}, {\"id\": \"2\"}]`. Nothing was sent."
+                    .to_owned(),
+            );
+        }
+        if count > endpoint.max_batch {
+            return Err(format!(
+                "`variables` has {count} sets, and one call to `execute_batch` on `{name}` sends at most {} \
+                 (`max_batch` in the user's config). Nothing was sent. Split the list into smaller batches.",
+                endpoint.max_batch
+            ));
+        }
+        let schema = self.schema(name, false).await?;
+
+        // Every set is planned and checked before anyone is asked, so a batch never stops halfway on a typo.
+        let mut runs = Vec::with_capacity(count);
+        let mut notes: Vec<String> = Vec::new();
+        let mut shown_plan = None;
+        for (index, given) in arguments.variables.iter().enumerate() {
+            let (variables, left_out) = sendable(saved, given);
+            let plan = planned(&schema, name, endpoint, text, saved, &variables)?;
+            if plan.kind == Kind::Mutation {
+                return Err(format!(
+                    "Nothing was sent to `{name}`. `execute_batch` runs queries only, and this is a mutation. The \
+                     user approves each mutation on its own: send them one at a time with `execute`."
+                ));
+            }
+            plan.check_variables(&schema, &variables)
+                .map_err(|error| format!("`variables[{index}]`: {error} Nothing was sent."))?;
+            notes.extend(left_out.filter(|note| !notes.contains(note)));
+            runs.push(Run {
+                variables,
+                cost: plan.cost,
+            });
+            // The costliest run's plan is the one shown, since its assumptions are the ones that matter most.
+            if shown_plan.as_ref().is_none_or(|shown: &Plan| plan.cost > shown.cost) {
+                shown_plan = Some(plan);
+            }
+        }
+        let Some(plan) = shown_plan else {
+            return Err("`variables` is empty. Nothing was sent.".to_owned());
+        };
+        let total = runs.iter().fold(0_u64, |total, run| total.saturating_add(run.cost));
+        let sets: Vec<Variables> = runs.iter().map(|run| run.variables.clone()).collect();
+
+        // Nothing below this point runs unless the human accepted, or the user's config waives the prompt.
+        let covered: serde_json::Value = sets.iter().cloned().map(serde_json::Value::Object).collect();
+        let whole = Attempt {
+            endpoint: name,
+            kind: plan.kind,
+            operation: plan.name.as_deref(),
+            text: &plan.text,
+            variables: &no_variables,
+            cost: Some(total),
+            series: Series::Batch(&sets),
+        };
+        let request = Request {
+            tool: "execute_batch",
+            name,
+            endpoint,
+            kind: plan.kind,
+            text: &plan.text,
+            cost: total,
+            prompt: approval::batch_prompt(name, &endpoint.shown_url, &plan, &sets, total, plan.cost),
+            covered: &covered,
+            offer_session: false,
+        };
+        let returned = Returned {
+            state: state.as_deref(),
+            responses: responses.as_ref(),
+        };
+        let (verdict, unasked) = match approval::gate(&self.approvals, &context, request, returned).await {
+            Gate::Open { verdict, unasked } => (verdict, unasked),
+            Gate::Ask(question) => return Ok(question.into()),
+            Gate::Shut { verdict, refusal } => {
+                self.audit.record(endpoint, &whole, &verdict, Outcome::NotSent).await;
+                return Err(refusal);
+            }
+        };
+
+        let mut out = format!(
+            "Sent {} to `{name}` {count} times, once for each set of variables. Estimated cost: {total} in \
+             total.{unasked}\nEach run below starts with the position of its set in `variables`, from 0.",
+            plan.title()
+        );
+        for note in &notes {
+            let _ = write!(out, "\n{note}");
+        }
+        let limit = endpoint.max_output_chars;
+        let share = (limit.saturating_sub(out.chars().count() + response::NOTE_ROOM) / count).max(MIN_SHARE);
+        let mut answered = 0;
+        for (index, run) in runs.iter().enumerate() {
+            let attempt = Attempt {
+                variables: &run.variables,
+                cost: Some(run.cost),
+                series: Series::Run {
+                    run: index + 1,
+                    of: count,
+                },
+                ..whole
+            };
+            let sent = self
+                .http
+                .post(endpoint, &plan.payload(&run.variables), endpoint.max_response_bytes)
+                .await;
+            let outcome = sent
+                .as_ref()
+                .map_or_else(Outcome::Failed, |reply| Outcome::Answered(reply, None));
+            self.audit.record(endpoint, &attempt, &verdict, outcome).await;
+            let reply = match sent {
+                Ok(reply) => reply,
+                Err(failed) => {
+                    let _ = write!(out, "\n\n[{index}] No answer: {failed}");
+                    let unsent = count - index - 1;
+                    if unsent > 0 {
+                        let _ = write!(
+                            out,
+                            "\n\n[The {unsent} run{} after `[{index}]` {} not sent: a batch stops at the first \
+                             request that gets no answer, since the rest would likely fail the same way.]",
+                            if unsent == 1 { "" } else { "s" },
+                            if unsent == 1 { "was" } else { "were" }
+                        );
+                    }
+                    break;
+                }
+            };
+            answered += 1;
+            let section = response::section(&format!("[{index}]"), &reply, endpoint, select.as_ref(), share);
+            let _ = write!(out, "\n\n{section}");
+        }
+        let out = capped(
+            out,
+            limit.max(count.saturating_mul(MIN_SHARE)),
+            "Pass `select`, or send fewer sets at once.",
+        );
+        if answered == 0 { Err(out) } else { Ok(finished(out)) }
     }
 
     #[tool(
@@ -1026,6 +1231,36 @@ impl Fieldtrip {
 }
 
 impl Fieldtrip {
+    /// Refuses `text` when it holds a mutation and `endpoint` denies them, and records the refusal in the audit log
+    /// with the `variables` given.
+    async fn refuse_denied(
+        &self,
+        name: &str,
+        endpoint: &Endpoint,
+        text: &str,
+        variables: &Variables,
+    ) -> Result<(), String> {
+        let Err(refusal) = approval::refuse_denied_mutation(name, endpoint, text) else {
+            return Ok(());
+        };
+        let operation = audit::mutation_name(text);
+        let attempt = Attempt {
+            endpoint: name,
+            kind: Kind::Mutation,
+            operation: operation.as_deref(),
+            text,
+            variables,
+            cost: None,
+            series: Series::Single,
+        };
+        let verdict = Verdict {
+            approval: "denied",
+            reason: Some("mutations are turned off for this endpoint by `mutations = \"deny\"`".to_owned()),
+        };
+        self.audit.record(endpoint, &attempt, &verdict, Outcome::NotSent).await;
+        Err(refusal)
+    }
+
     /// The server's instructions, which mention `history` only when it is offered.
     fn instructions(&self) -> String {
         if self.audit.path().is_some() {

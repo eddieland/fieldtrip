@@ -348,3 +348,15 @@ make check
   choice comes with the retry, counts only with an accept and with the ticket of its own prompt. The audit log
   records the later runs as `session`.
   Done when: `cargo test session_approval`
+- [x] **60. `execute_batch`.** A tool that takes an endpoint, one query as `operation` or `operation_name`, and a
+  list of sets of variables, and sends the query once for each set, in order, after one prompt that shows the query,
+  the number of runs, the first five sets and the total estimated cost. A batch of three is one prompt and three
+  requests, and the result has a section for each run, numbered from 0, with its status, its `errors` in full and
+  its data, each cut to an equal share of the result. `select` applies to every run. One run's `errors` do not stop
+  the others, and a run that gets no answer stops the batch. A mutation is refused with no prompt. Every set is
+  checked before anyone is asked, and an error names the set. `auto_approve_cost` is compared with the total, a
+  query approved for the session runs unasked, and on revision 2026-07-28 an approval covers exactly the sets that
+  were shown and is no use to `execute`. `max_batch`, 100 unless an endpoint or template sets it, caps the runs,
+  `fieldtrip check` shows it, and zero stops the server. The audit log has a line per run, and one for a batch that
+  was not sent.
+  Done when: `cargo test execute_batch`
