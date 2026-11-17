@@ -227,6 +227,16 @@ This prints what each endpoint resolves to, runs every header command, reads eve
 cost map and saved operation against its schema, without printing a header value or sending anything to an endpoint. It exits non-zero
 when something is wrong. MCP clients often show only "server failed to start", so run it after any config change.
 
+For an endpoint whose schema comes from introspection, `check` uses the copy fieldtrip keeps in its cache, if there
+is one, and says how old it is:
+
+```text
+cost map: costs.toml (37 rules): checked against schema cached 97 min ago: ok
+```
+
+With no copy it says `not checked against a schema`. To have it fetch the schema, which sends a request with the
+endpoint's headers, run `fieldtrip check --introspect`. That also renews the cached copy.
+
 Set `FIELDTRIP_LOG=debug` for more detail on stderr.
 
 [DESIGN.md](DESIGN.md) has the full config shape, the tools, and the approval rules.
@@ -309,6 +319,9 @@ name it on the endpoint with `costs = "acme.costs.toml"`. The path is relative t
 "Query.products"      = { multiplier = 500 }      # this list has about 500 items
 "Query.viewer.orders" = { multiplier = 2 }        # an exact path from the root
 "User.orders"         = { multiplier = "take" }   # the list is sized by its `take` argument
+"Query.invoices"      = { multiplier = "first", default = 1000 }   # and holds 1,000 when `first` is left out
+"Query.itemsByIds"    = { multiplier = { length = "ids" } }   # one item for each ID passed in
+"Query.linksByIds"    = { multiplier = { length = "ids", per = 3 } }   # about three for each
 "*.reviews"           = { multiplier = 3 }        # `reviews` on any type
 "Mutation.refund"     = { cost = 100 }            # this mutation is expensive
 "User.email"          = { cost = 2 }              # so is this scalar
@@ -323,10 +336,19 @@ name it on the endpoint with `costs = "acme.costs.toml"`. The path is relative t
 - **`multiplier`** replaces the size of a list. A number wins even over a size the operation gives, so use it for
   lists whose real size you know. A string names the argument that carries the size. On a field that is not a list,
   the multiplier bounds the lists directly inside it, which is how pages and connections work.
+  `{ length = "ids" }` takes the size from how many items the list argument `ids` holds, in the operation or in the
+  variables, which suits a batch lookup. `per` multiplies it when each item passed in returns several. Without
+  variables the length isn't known, so the estimate assumes a size and says so.
+- **`default`** goes with a multiplier that names an argument. It is the size when the operation leaves the argument
+  out, which is the page size your server applies on its own when the schema doesn't declare one. A default the
+  schema does declare still wins. A rule only applies to fields that have the argument, so one line,
+  `"*.*" = { multiplier = "first", default = 100 }`, covers every paged field, and a more specific rule can give
+  another size to the few that differ.
 - **When several rules match**, `cost` and `multiplier` are each taken from the most specific rule that sets them:
   the one with the most parts, then the fewest `*`, then a name nearest the field.
 
-To check a map, restart the server and call `introspect`: it reports the rules that match nothing in the schema.
+To check a map, run `fieldtrip check`, or call `introspect` after a restart: both report the rules that match nothing
+in the schema.
 `estimate_cost` lists every rule an estimate used. A map that is not valid stops the server at startup.
 
 The map is read once, at startup, and no tool can change it. It does feed `auto_approve_cost`, so a map that makes

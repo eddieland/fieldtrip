@@ -188,8 +188,16 @@ impl Launch {
 
     /// Runs `fieldtrip check` with this launch's config, flags and environment, and returns what it did.
     pub(crate) fn check(self) -> Checked {
+        self.check_with(&[])
+    }
+
+    /// Runs `fieldtrip check` as [`Launch::check`] does, with `flags` after `check`.
+    pub(crate) fn check_with(self, flags: &[&str]) -> Checked {
         let (dir, mut arguments, env) = self.prepare();
-        arguments.insert(0, "check".into());
+        arguments.splice(
+            0..0,
+            std::iter::once("check").chain(flags.iter().copied()).map(Into::into),
+        );
         let arguments: Vec<&std::ffi::OsStr> = arguments.iter().map(AsRef::as_ref).collect();
         let output = server_command(&arguments, &env, dir.path())
             .stdin(Stdio::null())

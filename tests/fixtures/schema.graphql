@@ -26,6 +26,7 @@ type Query {
   "Full-text search across products and users."
   search(text: String!, limit: Int): [SearchResult!]!
   catalog(pageSize: Int): ProductPage!
+  productsByIds(ids: [ID!]!): [Product!]!
   node(id: ID!): Node
 }
 

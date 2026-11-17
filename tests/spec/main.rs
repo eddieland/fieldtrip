@@ -13,6 +13,8 @@ mod audit_log;
 #[cfg(test)]
 mod auto_accept;
 #[cfg(test)]
+mod check_cached;
+#[cfg(test)]
 mod check_command;
 #[cfg(test)]
 mod cli_flags;
@@ -24,6 +26,10 @@ mod config_checks;
 mod cost_argument;
 #[cfg(test)]
 mod cost_checks;
+#[cfg(test)]
+mod cost_default;
+#[cfg(test)]
+mod cost_length;
 #[cfg(test)]
 mod cost_map;
 #[cfg(test)]

@@ -78,6 +78,7 @@ template too, but an endpoint can only make it stricter. A path may start with `
 The config path comes from `--config`, defaulting to `$XDG_CONFIG_HOME/fieldtrip/config.toml` or
 `~/.config/fieldtrip/config.toml`. `--url`, with an optional `--schema`, defines a single endpoint with no headers and
 no file. `fieldtrip check` loads the same configuration, prints what each endpoint resolves to and exits.
+`fieldtrip check --introspect` also fetches the schema of each endpoint that has no `schema` file.
 
 ## The plugs
 
@@ -101,6 +102,8 @@ is a pattern over the fields of an operation, and sets a `cost`, a `multiplier`,
 ```toml
 "Query.products"  = { multiplier = 500 }      # an exact path from the root
 "User.orders"     = { multiplier = "take" }   # sized by the `take` argument
+"Query.orders"    = { multiplier = "first", default = 100 }   # and 100 when `first` is left out
+"Query.itemsByIds" = { multiplier = { length = "ids" } }   # one item for each of `ids`. `per = 3` gives three
 "*.reviews"       = { multiplier = 3 }        # `reviews` on any type
 "Mutation.refund" = { cost = 100 }
 ```
@@ -297,3 +300,19 @@ Settled. To change one, ask the user, then add a new dated line instead of editi
 - 2026-11-16: `skip`, `include`, `defer` and `stream`, a name written with `@`, or one that is not a GraphQL name, stop
   the server, as does `client_directives` on an endpoint with no `operations`. `check` warns about a listed directive
   that no saved operation or shared fragment uses.
+- 2026-11-17: A rule whose `multiplier` names an argument can set `default`: the size when the operation leaves the
+  argument out, gives it as null, or gives a variable with no value. It stands for the page size a server applies on
+  its own, so nothing is assumed. `default` with any other rule stops the server.
+- 2026-11-17: A default the schema declares for the argument still wins over the rule's `default`. The estimate says
+  which of the argument and the default it used.
+- 2026-11-17: A `multiplier` written `{ length = "ids" }` sizes a list by how many items the list argument `ids`
+  holds, in the operation or in the variables. `per`, 1 unless set, multiplies it: the items that come back for each
+  one passed in. One value where a list is expected counts as one.
+- 2026-11-17: When that length is not known, as for a variable with no value, the assumed size is used and listed.
+  `introspect` and `check` report a `length` of an argument that no matched field has as a list.
+- 2026-11-17: `check` checks the cost map and saved operations of an introspected endpoint against the kept copy of
+  its schema, whatever its age, and says how old the copy is. It still sends nothing. This replaces the part of the
+  2026-11-14 line that had `check` use schema files only. With no copy, or `schema_ttl = 0`, they are not checked.
+- 2026-11-17: `check --introspect` introspects each endpoint that has no `schema` file, ignoring any kept copy, and
+  keeps the result as `introspect` does. It is the one way `check` sends anything, and only the user can ask for it.
+  This refines the 2026-11-13 line that `check` sends nothing. An introspection that fails is a problem.

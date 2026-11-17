@@ -76,7 +76,7 @@ pub fn run(args: impl IntoIterator<Item = OsString>) -> ExitCode {
     init_logging();
 
     let outcome = match args.command {
-        Some(Command::Check) => check(&args),
+        Some(Command::Check { introspect }) => check(&args, introspect),
         None => start(&args).map(|()| true),
     };
     match outcome {
@@ -116,13 +116,18 @@ fn init_logging() {
 }
 
 /// Runs `fieldtrip check` and prints its report on stdout, where no MCP session is running. Returns whether the
-/// configuration has no problems.
-fn check(args: &Args) -> Result<bool, Error> {
+/// configuration has no problems. With `introspect`, endpoints with no schema file are asked for their schema.
+fn check(args: &Args, introspect: bool) -> Result<bool, Error> {
     use std::io::Write as _;
 
     let config = Config::load(args)?;
     let runtime = runtime()?;
-    let report = runtime.block_on(check::check(&config));
+    let http = if introspect {
+        Some(http::Client::new().map_err(Error::Http)?)
+    } else {
+        None
+    };
+    let report = runtime.block_on(check::check(&config, http.as_ref()));
     std::io::stdout()
         .lock()
         .write_all(report.text.as_bytes())

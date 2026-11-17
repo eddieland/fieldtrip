@@ -2,14 +2,15 @@
 //!
 //! It answers what an MCP client hides: whether the config loads, what an endpoint takes from its template,
 //! whether every header can be produced, and whether a cost map and the saved operations fit the schema. It never
-//! prints a header value, and it sends nothing to any endpoint.
+//! prints a header value. It sends nothing to any endpoint unless the user passes `--introspect`: for a schema that
+//! comes from introspection it reads the copy in fieldtrip's cache.
 
 use std::fmt::Write as _;
 use std::path::Path;
 
 use crate::config::{Config, Endpoint, Mutations, show_bytes, show_duration};
-use crate::schema::Loaded;
-use crate::{approval, library};
+use crate::schema::{Loaded, introspection};
+use crate::{approval, cache, http, library};
 
 /// What the check found.
 #[derive(Debug)]
@@ -20,8 +21,9 @@ pub(crate) struct Report {
     pub(crate) problems: usize,
 }
 
-/// Checks every endpoint in `config`.
-pub(crate) async fn check(config: &Config) -> Report {
+/// Checks every endpoint in `config`. With `http`, which the user asks for with `--introspect`, an endpoint that has
+/// no schema file is introspected. Without it nothing is sent.
+pub(crate) async fn check(config: &Config, http: Option<&http::Client>) -> Report {
     let mut text = config.path.as_ref().map_or_else(
         || {
             "Config: from --url
@@ -47,7 +49,7 @@ pub(crate) async fn check(config: &Config) -> Report {
     }
     for (name, endpoint) in &config.endpoints {
         let mut out = Out::default();
-        endpoint_report(&mut out, name, endpoint).await;
+        endpoint_report(&mut out, name, endpoint, http).await;
         text.push_str(&out.text);
         problems += out.problems;
         warnings += out.warnings;
@@ -89,8 +91,66 @@ impl Out {
     }
 }
 
-/// Writes what one endpoint resolves to, checking its schema file, cost map and headers.
-async fn endpoint_report(out: &mut Out, name: &str, endpoint: &Endpoint) {
+/// The schema a cost map and the saved operations are checked against.
+struct Against {
+    schema: Loaded,
+    /// Where the schema came from when it is not the endpoint's file, to end a line with: `: checked against ...`.
+    note: String,
+}
+
+/// Finds the schema of an endpoint that has no schema file: by introspection when `http` allows it, else in the cache.
+async fn introspected_schema(out: &mut Out, endpoint: &Endpoint, http: Option<&http::Client>) -> Option<Against> {
+    let caching = !endpoint.schema_ttl.is_zero();
+    let Some(http) = http else {
+        // A copy of any age is better than no check at all, as long as the report says how old it is. One that
+        // does not parse, written by an older fieldtrip perhaps, is as good as none.
+        let kept = caching.then(|| cache::read_schema(&endpoint.url)).flatten();
+        let kept = kept.and_then(|kept| Some((Loaded::from_sdl(&kept.sdl, "it").ok()?, kept.age)));
+        let Some((schema, age)) = kept else {
+            out.line(
+                "schema",
+                "introspection, not checked: check sends nothing to the endpoint",
+            );
+            return None;
+        };
+        let age = show_duration(age);
+        out.line(
+            "schema",
+            format!("introspection, cached {age} ago: check sends nothing to the endpoint"),
+        );
+        return Some(Against {
+            schema,
+            note: format!(": checked against schema cached {age} ago"),
+        });
+    };
+    let what = "introspection, fetched for --introspect";
+    let fetched = match introspection::fetch(http, endpoint).await {
+        Ok(sdl) => Loaded::from_sdl(&sdl, "the introspection result").map(|schema| (schema, sdl)),
+        Err(problem) => Err(problem),
+    };
+    match fetched {
+        Ok((schema, sdl)) => {
+            out.line("schema", format!("{what}: ok"));
+            if caching && let Err(error) = cache::write_schema(&endpoint.url, &endpoint.shown_url, &sdl) {
+                tracing::warn!(
+                    "the schema of {} could not be kept in the cache: {error}",
+                    endpoint.shown_url
+                );
+            }
+            Some(Against {
+                schema,
+                note: ": checked against schema introspected now".to_owned(),
+            })
+        }
+        Err(problem) => {
+            out.problem("schema", what, &problem);
+            None
+        }
+    }
+}
+
+/// Writes what one endpoint resolves to, checking its schema, cost map and headers.
+async fn endpoint_report(out: &mut Out, name: &str, endpoint: &Endpoint, http: Option<&http::Client>) {
     let _ = writeln!(out.text, "\n{name}");
     if let Some(description) = &endpoint.description {
         out.line("description", description);
@@ -122,18 +182,17 @@ async fn endpoint_report(out: &mut Out, name: &str, endpoint: &Endpoint) {
             } else {
                 out.line("schema ttl", show_duration(endpoint.schema_ttl));
             }
-            out.line(
-                "schema",
-                "introspection, not checked: check sends nothing to the endpoint",
-            );
-            None
+            introspected_schema(out, endpoint, http).await
         }
         Some(path) => {
             let what = format!("file {}", path.display());
             match read_schema(path) {
-                Ok(loaded) => {
+                Ok(schema) => {
                     out.line("schema", format!("{what}: ok"));
-                    Some(loaded)
+                    Some(Against {
+                        schema,
+                        note: String::new(),
+                    })
                 }
                 Err(problem) => {
                     out.problem("schema", &what, &problem);
@@ -152,8 +211,9 @@ async fn endpoint_report(out: &mut Out, name: &str, endpoint: &Endpoint) {
         );
         match &schema {
             None => out.line("cost map", format!("{what}: not checked against a schema")),
-            Some(loaded) => {
-                let findings = loaded.cost_map_findings(&endpoint.costs);
+            Some(against) => {
+                let what = format!("{what}{}", against.note);
+                let findings = against.schema.cost_map_findings(&endpoint.costs);
                 if findings.is_empty() {
                     out.line("cost map", format!("{what}: ok"));
                 }
@@ -179,7 +239,7 @@ async fn endpoint_report(out: &mut Out, name: &str, endpoint: &Endpoint) {
 }
 
 /// Writes whether each of the endpoint's saved operations still validates against its schema, when both are there.
-fn operations_report(out: &mut Out, name: &str, endpoint: &Endpoint, schema: Option<&Loaded>) {
+fn operations_report(out: &mut Out, name: &str, endpoint: &Endpoint, schema: Option<&Against>) {
     if let Some(source) = &endpoint.operations.source {
         let count = endpoint.operations.operations.len();
         let what = format!(
@@ -193,7 +253,9 @@ fn operations_report(out: &mut Out, name: &str, endpoint: &Endpoint, schema: Opt
         }
         match schema {
             None => out.line("operations", format!("{what}: not checked against a schema")),
-            Some(loaded) => {
+            Some(against) => {
+                let loaded = &against.schema;
+                let what = format!("{what}{}", against.note);
                 let mut broken = endpoint.operations.rejected.len();
                 // An operation broken by a change to the schema is a warning, as an unmatched cost rule is: the
                 // endpoint still works, and only that operation is refused.

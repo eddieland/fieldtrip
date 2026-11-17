@@ -37,14 +37,18 @@ pub(super) fn report(loaded: &Loaded, costs: &CostMap) -> String {
 pub(super) fn findings(loaded: &Loaded, costs: &CostMap) -> Vec<String> {
     let mut unmatched = Vec::new();
     let mut wrong_argument = Vec::new();
+    let mut not_a_list = Vec::new();
     for shape in costs.shapes() {
         let fields = reached(loaded, &shape);
         if fields.is_empty() {
             unmatched.push(shape.text);
-        } else if let Some(argument) = shape.argument
-            && !fields.iter().any(|field| field.argument_by_name(argument).is_some())
-        {
-            wrong_argument.push((shape.text, argument));
+        } else if let Some(argument) = shape.argument {
+            let mut named = fields.iter().filter_map(|field| field.argument_by_name(argument));
+            if named.clone().next().is_none() {
+                wrong_argument.push((shape.text, argument));
+            } else if shape.length && !named.any(|definition| definition.ty.is_list()) {
+                not_a_list.push((shape.text, argument));
+            }
         }
     }
     let mut findings = Vec::new();
@@ -57,6 +61,11 @@ pub(super) fn findings(loaded: &Loaded, costs: &CostMap) -> Vec<String> {
     for (rule, argument) in wrong_argument {
         findings.push(format!(
             "`{rule}` names the argument `{argument}`, which no field it matches has."
+        ));
+    }
+    for (rule, argument) in not_a_list {
+        findings.push(format!(
+            "`{rule}` takes the length of `{argument}`, which is not a list on any field it matches."
         ));
     }
     findings

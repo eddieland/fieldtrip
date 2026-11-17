@@ -260,3 +260,23 @@ cargo test --workspace --all-features
   that is not a GraphQL name, `skip`, `include`, `defer` or `stream`, or `client_directives` on an endpoint with no
   `operations` stop the server at startup.
   Done when: `cargo test client_directives`
+- [x] **48. A default for a multiplier's argument.** A rule such as `{ multiplier = "first", default = 100 }` sizes
+  the list by `first` when the operation gives it, and by 100 when it is left out, given as null, or given as a
+  variable with no value, with nothing assumed. The estimate says which it used. A default the schema declares for
+  the argument wins over the rule's. On a field that is not a list the default bounds the lists inside it, and a
+  pattern with stars gives it only to fields that have the argument. `default` without a multiplier that names an
+  argument, or one that is not a whole number, stops the server at startup.
+  Done when: `cargo test cost_default`
+- [x] **49. Multiplier from a list's length.** A rule such as `{ multiplier = { length = "ids" } }` sizes the list by
+  how many items the list argument holds: written in the operation, passed in `variables`, or declared as a default.
+  `per` multiplies it. One value where a list is expected counts as one. A variable with no value falls back to the
+  assumed size, and the estimate says so. A field without the argument keeps the built-in sizes. `introspect` reports
+  a `length` of an argument that is missing or is not a list. A `length` that is not an argument name, a `per` that
+  is not a whole number, another key in the table, or a `default` next to it stop the server at startup.
+  Done when: `cargo test cost_length`
+- [x] **50. `check` against the cached schema.** For an endpoint with no `schema` file, `fieldtrip check` checks the
+  cost map and the saved operations against the copy of the schema in fieldtrip's cache, of any age, and each line
+  says how old the copy is. Nothing is sent. With no copy, or with `schema_ttl = 0`, the lines say `not checked` as
+  before. `fieldtrip check --introspect` introspects such endpoints instead, ignoring the copy, and keeps the result.
+  A failure is a problem, and an endpoint with a `schema` file is never contacted.
+  Done when: `cargo test check_cached`

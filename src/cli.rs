@@ -29,7 +29,13 @@ pub(crate) enum Command {
     /// Check the configuration and print what each endpoint resolves to, then exit.
     ///
     /// Every header is resolved, so `env` variables are read and commands run, but no value is printed. Schema
-    /// files are read, and cost maps are checked against them. Nothing is sent to any endpoint. The exit status is
-    /// 0 when nothing is wrong.
-    Check,
+    /// files are read, and cost maps and saved operations are checked against them. For an endpoint whose schema
+    /// comes from introspection, the copy in fieldtrip's cache is used when there is one. Nothing is sent to any
+    /// endpoint unless `--introspect` is given. The exit status is 0 when nothing is wrong.
+    Check {
+        /// Introspect each endpoint that has no `schema` file, instead of using the cached copy of its schema.
+        /// This sends a request, with the endpoint's headers, to each of them.
+        #[arg(long)]
+        introspect: bool,
+    },
 }
