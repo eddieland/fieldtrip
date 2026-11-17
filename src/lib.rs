@@ -11,6 +11,7 @@ mod cli;
 mod config;
 mod costs;
 mod headers;
+mod hints;
 mod http;
 mod library;
 mod plan;

@@ -287,3 +287,9 @@ cargo test --workspace --all-features
   the agent passes a dropped variable to `execute` or `estimate_cost` with `operation_name`, it is left out of the
   prompt, the request and the audit log, and the result says so, naming the directive.
   Done when: `cargo test dropped_variables`
+- [x] **52. Valid names in validation errors.** When an operation names an input object field, an argument or an enum
+  value that does not exist, the error lists the ones that do: input fields and arguments as `name: Type`, with a
+  default where there is one, and enum values by name. A field or directive with no arguments says so. A list of
+  more than 12 puts the nearest names first, then the others in schema order, and counts the ones left out. An
+  unknown output field keeps its nearest names.
+  Done when: `cargo test valid_names`
