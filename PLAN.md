@@ -274,3 +274,9 @@ cargo test --workspace --all-features
   a `length` of an argument that is missing or is not a list. A `length` that is not an argument name, a `per` that
   is not a whole number, another key in the table, or a `default` next to it stop the server at startup.
   Done when: `cargo test cost_length`
+- [x] **50. `check` against the cached schema.** For an endpoint with no `schema` file, `fieldtrip check` checks the
+  cost map and the saved operations against the copy of the schema in fieldtrip's cache, of any age, and each line
+  says how old the copy is. Nothing is sent. With no copy, or with `schema_ttl = 0`, the lines say `not checked` as
+  before. `fieldtrip check --introspect` introspects such endpoints instead, ignoring the copy, and keeps the result.
+  A failure is a problem, and an endpoint with a `schema` file is never contacted.
+  Done when: `cargo test check_cached`
