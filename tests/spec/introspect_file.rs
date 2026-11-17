@@ -26,7 +26,7 @@ fn returns_the_overview_of_the_fixture() {
 Schema for `store`, read from the file {}.
 \"A small store API. This is the fixture schema for fieldtrip's tests.\"
 
-20 types: 12 objects, 1 interface, 1 union, 3 enums, 2 input objects, 1 scalar
+23 types: 12 objects, 1 interface, 1 union, 4 enums, 4 input objects, 1 scalar
 
 Query (9 fields): viewer, user, users, product, products, search, catalog, productsByIds, node
 Mutation (4 fields): createOrder, cancelOrder, deleteUser (deprecated), deactivateUser

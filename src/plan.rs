@@ -12,8 +12,8 @@ use serde_json::Map;
 
 use crate::config::Endpoint;
 use crate::costs::{CostMap, Multiplier, Step};
+use crate::hints;
 use crate::schema::Loaded;
-use crate::suggest::{backticked, nearest};
 
 /// What one object costs.
 const OBJECT_COST: u64 = 1;
@@ -219,10 +219,7 @@ fn invalid_operation(loaded: &Loaded, endpoint: &str, errors: &apollo_compiler::
         let position = diagnostic.line_column_range().map_or_else(String::new, |range| {
             format!("{}:{} ", range.start.line, range.start.column)
         });
-        let _ = write!(out, "- {position}{message}");
-        if let Some(hint) = field_hint(loaded, &message) {
-            let _ = write!(out, ". {hint}");
-        }
+        let _ = write!(out, "- {position}{}", hints::explain(loaded, &message));
         out.push('\n');
     }
     if errors.len() > MAX_ERRORS {
@@ -230,17 +227,6 @@ fn invalid_operation(loaded: &Loaded, endpoint: &str, errors: &apollo_compiler::
     }
     out.push_str("Use `describe` to check the names and types, then try again.");
     out
-}
-
-/// For an unknown-field error, the nearest fields that the type does have.
-///
-/// The validator only gives the error as text, so this reads the type and field names back out of it.
-fn field_hint(loaded: &Loaded, message: &str) -> Option<String> {
-    let rest = message.strip_prefix("type `")?;
-    let (type_name, rest) = rest.split_once("` does not have a field `")?;
-    let (field_name, _) = rest.split_once('`')?;
-    let near = nearest(field_name, loaded.field_names(type_name), 5);
-    (!near.is_empty()).then(|| format!("Nearest fields on `{type_name}`: {}", backticked(near)))
 }
 
 /// Walks an operation and adds up its cost.

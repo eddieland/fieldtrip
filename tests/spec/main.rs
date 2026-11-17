@@ -108,3 +108,5 @@ mod tool_descriptions;
 mod unauthorized_retry;
 #[cfg(test)]
 mod url_secrets;
+#[cfg(test)]
+mod valid_names;

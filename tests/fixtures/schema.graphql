@@ -25,7 +25,7 @@ type Query {
   products: [Product!]!
   "Full-text search across products and users."
   search(text: String!, limit: Int): [SearchResult!]!
-  catalog(pageSize: Int): ProductPage!
+  catalog(pageSize: Int, filter: ProductFilter): ProductPage!
   productsByIds(ids: [ID!]!): [Product!]!
   node(id: ID!): Node
 }
@@ -146,6 +146,39 @@ input CreateOrderInput {
 input OrderItemInput {
   productId: ID!
   quantity: Int! = 1
+}
+
+input ProductFilter {
+  title: StringFilter
+  madeIn: Country
+}
+
+input StringFilter {
+  eq: String
+  ne: String
+  anyOf: [String!]
+  noneOf: [String!]
+}
+
+"Where a product is made. Longer than the lists that error messages print in full."
+enum Country {
+  ARGENTINA
+  AUSTRALIA
+  BRAZIL
+  CANADA
+  CHINA
+  FRANCE
+  GERMANY
+  INDIA
+  ITALY
+  JAPAN
+  KOREA
+  MEXICO
+  NETHERLANDS
+  SPAIN
+  SWEDEN
+  UNITED_KINGDOM
+  UNITED_STATES
 }
 
 "An ISO 8601 timestamp."

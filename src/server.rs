@@ -864,8 +864,9 @@ impl Fieldtrip {
         description = "Validate one query or mutation against the schema and estimate its cost, without sending \
                        anything to the endpoint. Pass the GraphQL text as `operation`, or the name of a saved \
                        operation as `operation_name`. Run it after each change while you write an operation, and before \
-                       `execute`. An invalid operation returns every error with its line and column, and the nearest \
-                       field names for a misspelled one. A valid operation returns the estimated cost, the depth, the \
+                       `execute`. An invalid operation returns every error with its line and column, the nearest \
+                       field names for a misspelled field, and the valid names for an unknown input field, \
+                       argument or enum value. A valid operation returns the estimated cost, the depth, the \
                        cost of each top-level field, the cost-map rules used, and every assumption made. Lists drive \
                        the cost: a list multiplies everything selected under it by its size. An assumption that a \
                        list had no size usually means you should pass `first`, `last` or `limit`, or select less \
