@@ -155,6 +155,19 @@ async fn introspected_schema(out: &mut Out, endpoint: &Endpoint, http: Option<&h
     }
 }
 
+/// Writes the lines for the timeout, the sizes and the limits of `endpoint`.
+fn limits_report(out: &mut Out, endpoint: &Endpoint) {
+    out.line("timeout", format!("{}s", endpoint.timeout.as_secs()));
+    out.line("assumed list size", endpoint.assumed_list_size);
+    if !endpoint.response_headers.is_empty() {
+        out.line("response headers shown", endpoint.response_headers.join(", "));
+    }
+    out.line("max response bytes", show_bytes(endpoint.max_response_bytes));
+    out.line("max output chars", endpoint.max_output_chars);
+    out.line("max inline chars", endpoint.max_inline_chars);
+    out.line("max batch", endpoint.max_batch);
+}
+
 /// Writes what one endpoint resolves to, checking its schema, cost map and headers.
 async fn endpoint_report(out: &mut Out, name: &str, endpoint: &Endpoint, http: Option<&http::Client>) {
     let _ = writeln!(out.text, "\n{name}");
@@ -172,14 +185,7 @@ async fn endpoint_report(out: &mut Out, name: &str, endpoint: &Endpoint, http: O
     if !endpoint.audit_variables {
         out.line("audit variables", "not recorded");
     }
-    out.line("timeout", format!("{}s", endpoint.timeout.as_secs()));
-    out.line("assumed list size", endpoint.assumed_list_size);
-    if !endpoint.response_headers.is_empty() {
-        out.line("response headers shown", endpoint.response_headers.join(", "));
-    }
-    out.line("max response bytes", show_bytes(endpoint.max_response_bytes));
-    out.line("max output chars", endpoint.max_output_chars);
-    out.line("max inline chars", endpoint.max_inline_chars);
+    limits_report(out, endpoint);
 
     let schema = match &endpoint.schema {
         None => {

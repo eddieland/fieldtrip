@@ -47,6 +47,10 @@ mod estimate_cost;
 #[cfg(test)]
 mod execute_approved;
 #[cfg(test)]
+mod execute_batch;
+#[cfg(test)]
+mod execute_paginate;
+#[cfg(test)]
 mod execute_refused;
 #[cfg(test)]
 mod execute_save;
@@ -81,6 +85,8 @@ mod mutations_denied;
 #[cfg(test)]
 mod operation_filters;
 #[cfg(test)]
+mod paginate_cursors;
+#[cfg(test)]
 mod pagination_hints;
 #[cfg(test)]
 mod protocol_2026;
@@ -106,6 +112,8 @@ mod saved_operations;
 mod schema_cache;
 #[cfg(test)]
 mod search_schema;
+#[cfg(test)]
+mod session_approval;
 #[cfg(test)]
 mod shared_fragments;
 #[cfg(test)]

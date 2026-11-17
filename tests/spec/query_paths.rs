@@ -50,11 +50,11 @@ fn the_shortest_paths_come_first_one_per_field_of_query() {
          #   Query.search{... on User}\n\
          #   Query.node{... on User}\n\
          #   Query.users.nodes\n\
-         #   and 4 more, from other fields of Query\n",
+         #   and 5 more, from other fields of Query\n",
         "shortest first, in the order of the fields of Query, through unions and interfaces too:\n{text}"
     );
     assert!(
-        text.contains("UserConnection.nodes\n# paths from Query:\n"),
+        text.contains("UserPage.items\n# paths from Query:\n"),
         "the paths come after the uses:\n{text}"
     );
 }
@@ -69,7 +69,7 @@ fn a_path_goes_through_an_interface_or_a_union_where_that_is_shorter() {
          #   Query.user.orders.total\n\
          #   Query.search{... on User}.orders.total\n\
          #   Query.users.nodes.orders.total\n\
-         #   and 4 more, from other fields of Query\n",
+         #   and 5 more, from other fields of Query\n",
         "a possible type is selected with `... on Type`, which is not a field"
     );
     assert_eq!(
@@ -80,7 +80,7 @@ fn a_path_goes_through_an_interface_or_a_union_where_that_is_shorter() {
          #   Query.search{... on Product}.reviews\n\
          #   Query.productsByIds.reviews\n\
          #   Query.node{... on Product}.reviews\n\
-         #   and 4 more, from other fields of Query\n",
+         #   and 5 more, from other fields of Query\n",
         "in the middle of a path as well as at its end"
     );
 }

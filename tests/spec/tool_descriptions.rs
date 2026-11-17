@@ -15,7 +15,7 @@ schema = "schema.graphql"
 "#;
 
 /// The tools in the order a calling agent uses them.
-const WORKFLOW: [&str; 8] = [
+const WORKFLOW: [&str; 9] = [
     "list_endpoints",
     "list_operations",
     "introspect",
@@ -23,6 +23,7 @@ const WORKFLOW: [&str; 8] = [
     "describe",
     "estimate_cost",
     "execute",
+    "execute_batch",
     "read_result",
 ];
 
@@ -76,7 +77,7 @@ fn annotations_say_only_execute_can_change_anything() {
     let mut mcp = Mcp::start(CONFIG);
     let tools = mcp.tool_list();
 
-    for name in WORKFLOW.iter().filter(|name| **name != "execute") {
+    for name in WORKFLOW.iter().filter(|name| !name.starts_with("execute")) {
         assert_eq!(
             hint(tool(&tools, name), "readOnlyHint"),
             Some(true),
@@ -99,6 +100,22 @@ fn annotations_say_only_execute_can_change_anything() {
         hint(execute, "openWorldHint"),
         Some(true),
         "execute reaches the endpoint"
+    );
+    let batch = tool(&tools, "execute_batch");
+    assert_eq!(
+        hint(batch, "readOnlyHint"),
+        Some(false),
+        "execute_batch sends requests, so a client should not wave it through as a read"
+    );
+    assert_eq!(
+        hint(batch, "destructiveHint"),
+        Some(false),
+        "execute_batch refuses mutations"
+    );
+    assert_eq!(
+        hint(batch, "openWorldHint"),
+        Some(true),
+        "execute_batch reaches the endpoint"
     );
     assert_eq!(
         hint(tool(&tools, "list_endpoints"), "openWorldHint"),
@@ -142,13 +159,17 @@ fn descriptions_carry_the_graphql_habits_where_they_apply() {
     let tools = mcp.tool_list();
     let description = |name: &str| text(tool(&tools, name), "/description").to_owned();
 
-    let expectations: [(&str, &[&str]); 6] = [
+    let expectations: [(&str, &[&str]); 7] = [
         ("introspect", &["`search_schema`", "`describe`"]),
         ("search_schema", &["`describe`"]),
         ("describe", &["deprecated", "... on"]),
         ("estimate_cost", &["`execute`", "`first`", "without sending"]),
         ("execute", &["`estimate_cost`", "variables", "`errors`", "declines"]),
         ("read_result", &["`execute`", "`select`", "sends nothing"]),
+        (
+            "execute_batch",
+            &["`execute`", "`estimate_cost`", "Queries only", "`errors`", "declines"],
+        ),
     ];
     for (name, phrases) in expectations {
         let description = description(name);

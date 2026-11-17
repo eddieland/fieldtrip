@@ -38,6 +38,8 @@ impl ClientHandler for Handler {
         }
         std::future::ready(match self.human {
             Human::Accepts => Ok(ElicitResult::new(ElicitationAction::Accept).with_content(serde_json::json!({}))),
+            Human::AcceptsForSession => Ok(ElicitResult::new(ElicitationAction::Accept)
+                .with_content(serde_json::json!({ "approve": super::FOR_SESSION }))),
             Human::Declines => Ok(ElicitResult::new(ElicitationAction::Decline)),
             Human::Cancels => Ok(ElicitResult::new(ElicitationAction::Cancel)),
             Human::Broken => Err(ErrorData::internal_error("the prompt could not be shown", None)),

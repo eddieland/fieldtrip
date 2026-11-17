@@ -11,8 +11,8 @@ binary, registering it, and making sure nothing runs against your API until you 
 
 ## Read this first: approval in OpenCode
 
-fieldtrip normally asks you to approve each operation through an MCP elicitation prompt. Its prompt is a plain accept or
-decline, with no fields to fill in. **OpenCode accepts a prompt like that automatically, without showing it to you.**
+fieldtrip normally asks you to approve each operation through an MCP elicitation prompt. Its prompt is an accept or a decline,
+with nothing that has to be filled in. **OpenCode accepts a prompt like that automatically, without showing it to you.**
 fieldtrip recognizes OpenCode by the name it gives when it connects, and never asks it: on an endpoint that uses
 fieldtrip's own prompt, `execute` refuses every operation that would need one, and fieldtrip logs a warning when
 OpenCode connects.

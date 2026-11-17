@@ -339,3 +339,45 @@ make check
   says so, and input objects, root types, built-in types and `describe` of a field have none. Both schema sources give
   the same paths.
   Done when: `cargo test query_paths`
+- [x] **59. Approve a query for the session.** The prompt for a query has one optional field, `approve`, that
+  defaults to "this request only" and offers "this query with any variables, until fieldtrip restarts". An accept
+  that chooses the second lets the same canonical text run on that endpoint with no prompt, whatever its variables,
+  until the server exits, and each such run says the user was not asked and why. An accept that chooses nothing
+  approves one request. Another query, or the same one on another endpoint, is still asked about. A mutation's
+  prompt has no field, and a mutation prompts every time whatever the answer holds. On revision 2026-07-28 the
+  choice comes with the retry, counts only with an accept and with the ticket of its own prompt. The audit log
+  records the later runs as `session`.
+  Done when: `cargo test session_approval`
+- [x] **60. `execute_batch`.** A tool that takes an endpoint, one query as `operation` or `operation_name`, and a
+  list of sets of variables, and sends the query once for each set, in order, after one prompt that shows the query,
+  the number of runs, the first five sets and the total estimated cost. A batch of three is one prompt and three
+  requests, and the result has a section for each run, numbered from 0, with its status, its `errors` in full and
+  its data, each cut to an equal share of the result. `select` applies to every run. One run's `errors` do not stop
+  the others, and a run that gets no answer stops the batch. A mutation is refused with no prompt. Every set is
+  checked before anyone is asked, and an error names the set. `auto_approve_cost` is compared with the total, a
+  query approved for the session runs unasked, and on revision 2026-07-28 an approval covers exactly the sets that
+  were shown and is no use to `execute`. `max_batch`, 100 unless an endpoint or template sets it, caps the runs,
+  `fieldtrip check` shows it, and zero stops the server. The audit log has a line per run, and one for a batch that
+  was not sent.
+  Done when: `cargo test execute_batch`
+- [x] **61. Follow pagination.** `execute` takes `paginate = { path, max_pages, variable }`: the path to one
+  connection, such as `data.users`, the most pages to fetch (5 unless given, capped by `max_batch`), and the variable
+  that carries the cursor (`after` unless given). It sends the query, reads `pageInfo` at the path, and sends it again
+  with `endCursor` in that variable until `hasNextPage` is false or the cap is reached, after one prompt that shows
+  the worst-case cost, `max_pages` times one page. With `max_pages = 2` over five pages there are two requests and
+  the result says more pages remain, with the cursor to go on from. Each page has its own section, and `select`
+  applies to each. A page without the connection, a cursor that does not move and a request with no answer each stop
+  it and say why. A path that is not `data` and names, a variable the query does not declare, a mutation, and `save`
+  are refused before anyone is asked. `auto_approve_cost` is compared with the worst case, a query approved for the
+  session is followed unasked, and on revision 2026-07-28 an approval covers exactly the pages that were shown. The
+  audit log has a line per page.
+  Done when: `cargo test execute_paginate`
+- [x] **62. Cursors that are not Relay's.** `paginate` takes `cursor` and `more`: the field that holds the next
+  page's cursor and the field that says whether another page follows, as names joined by `.`, relative to the object
+  at `path`. With `cursor: "nextToken"` the pages are followed until the token is null, and with a `more` such as
+  `hasMore` until it is false. A cursor that is a number is followed, `endCursor` included, and is sent as a number.
+  The prompt and the result name the field the cursor comes from. A page without the named field stops the run and
+  says which field to select, and a name that is not field names is refused before anything is sent. The
+  descriptions of `paginate` and `execute_batch` say that paging by offset or page number goes through
+  `execute_batch`. The fixture schema gains `Query.userPage`, so the tests that pin the fixture change with it.
+  Done when: `cargo test paginate_cursors`

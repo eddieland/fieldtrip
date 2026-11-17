@@ -19,6 +19,8 @@ type Query {
     after: String
     role: Role
   ): UserConnection!
+  "Users a page at a time, for APIs that page by a token or a number instead of a connection."
+  userPage(limit: Int = 20, nextToken: String, cursor: Int): UserPage!
   "Look up one product."
   product(id: ID!): Product
   "Every product. This list takes no size argument."
@@ -72,6 +74,15 @@ type UserConnection {
 type PageInfo {
   hasNextPage: Boolean!
   endCursor: String
+}
+
+type UserPage {
+  items: [User!]!
+  "The token of the next page, or null on the last one."
+  nextToken: String
+  "The position after the last item."
+  cursor: Int
+  hasMore: Boolean!
 }
 
 type Product implements Node {

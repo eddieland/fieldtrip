@@ -54,6 +54,33 @@ pub(crate) struct Attempt<'call> {
     pub(crate) variables: &'call Variables,
     /// The estimated cost, when it was costed.
     pub(crate) cost: Option<u64>,
+    /// Whether the attempt is a request on its own, or part of a call that sends several.
+    pub(crate) series: Series<'call>,
+}
+
+/// How an attempt relates to the call it came from, when one call can send several requests.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum Series<'call> {
+    /// The call sends one request, as `execute` does.
+    Single,
+    /// One run of a batch: this run, counted from 1, and how many the batch has.
+    Run {
+        /// Which run this is, counted from 1.
+        run: usize,
+        /// How many runs the batch has.
+        of: usize,
+    },
+    /// A whole batch that was not sent, with every set of variables it would have run with.
+    Batch(&'call [Variables]),
+    /// One page of a connection that `execute` follows: this page, counted from 1, and the most it would send for.
+    Page {
+        /// Which page this is, counted from 1.
+        page: usize,
+        /// The most pages the call may send for.
+        max: usize,
+    },
+    /// A call to follow up to this many pages, none of which was sent.
+    Pages(usize),
 }
 
 /// Who let an attempt through, or what stopped it.
@@ -221,7 +248,26 @@ impl Audit {
         entry.insert("hash".to_owned(), json!(hash(attempt.text)));
         entry.insert("text".to_owned(), json!(attempt.text));
         if endpoint.audit_variables {
-            entry.insert("variables".to_owned(), Value::Object(attempt.variables.clone()));
+            let variables = match attempt.series {
+                Series::Batch(sets) => sets.iter().cloned().map(Value::Object).collect(),
+                _ => Value::Object(attempt.variables.clone()),
+            };
+            entry.insert("variables".to_owned(), variables);
+        }
+        match attempt.series {
+            Series::Single => {}
+            Series::Run { run, of } => {
+                entry.insert("batch".to_owned(), json!({ "run": run, "of": of }));
+            }
+            Series::Batch(sets) => {
+                entry.insert("batch".to_owned(), json!({ "of": sets.len() }));
+            }
+            Series::Page { page, max } => {
+                entry.insert("page".to_owned(), json!({ "page": page, "max": max }));
+            }
+            Series::Pages(max) => {
+                entry.insert("page".to_owned(), json!({ "max": max }));
+            }
         }
         entry.insert("approval".to_owned(), json!(verdict.approval));
         if let Some(reason) = &verdict.reason {
@@ -285,7 +331,7 @@ pub(crate) fn mutation_name(text: &str) -> Option<String> {
 }
 
 /// `sha256:` and the SHA-256 of `text`, in lowercase hex.
-fn hash(text: &str) -> String {
+pub(crate) fn hash(text: &str) -> String {
     let digest = Sha256::digest(text.as_bytes());
     let mut out = String::with_capacity(7 + 64);
     out.push_str("sha256:");

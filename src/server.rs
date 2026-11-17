@@ -14,12 +14,13 @@ use serde::Deserialize;
 use serde_json::value::RawValue;
 use tokio::sync::Mutex;
 
-use crate::approval::{self, Gate, Outstanding, Returned};
-use crate::audit::{self, Attempt, Audit, Outcome, Verdict};
+use crate::approval::{self, Approvals, Gate, Request, Returned};
+use crate::audit::{self, Attempt, Audit, Outcome, Series, Verdict};
 use crate::config::{Approval, Config, Endpoint, Mutations, show_duration};
 use crate::http::Client;
 use crate::library::Saved;
 use crate::listing::{self, Filters};
+use crate::paginate::{Follow, Next};
 use crate::plan::{Kind, Plan, Variables};
 use crate::results::Results;
 use crate::schema::{Loaded, introspection};
@@ -39,7 +40,9 @@ const INSTRUCTIONS: &str = "fieldtrip lets you use GraphQL APIs the user has con
      5. Write one operation and check it with `estimate_cost` until it is valid and cheap. Nothing is sent.\n\
      6. `execute` sends it, or a saved operation named by `operation_name`. The user approves each request unless \
      their config says otherwise.\n\
-     7. A response too long to show is written to a file, and `execute` returns its path, a preview and its shape. \
+     7. `execute_batch` sends one query once for each of many sets of variables, with a single approval. Use it \
+     instead of calling `execute` in a loop.\n\
+     8. A response too long to show is written to a file, and `execute` returns its path, a preview and its shape. \
      `read_result` then returns any part of it by a path, without sending anything: use it rather than running the \
      operation again.\n\
      GraphQL habits that matter here: take every field and argument name from the schema, never from memory. \
@@ -63,8 +66,8 @@ pub(crate) struct Fieldtrip {
     /// Schemas loaded so far, by endpoint name. The lock is held while loading, so each schema loads once.
     schemas: Arc<Mutex<HashMap<String, Arc<Held>>>>,
     http: Client,
-    /// Approval prompts that are waiting for an answer, on protocol revisions that ask by round trip.
-    outstanding: Arc<Outstanding>,
+    /// What is remembered about approvals: prompts waiting for an answer, and queries approved for the session.
+    approvals: Arc<Approvals>,
     /// Where each `execute` attempt is recorded.
     audit: Arc<Audit>,
     /// Where responses too long to show are written.
@@ -213,6 +216,41 @@ struct EstimateArguments {
     variables: Variables,
 }
 
+/// Arguments of `execute_batch`.
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+struct BatchArguments {
+    /// The endpoint name, as listed by `list_endpoints`.
+    endpoint: String,
+    /// The GraphQL document.
+    #[schemars(description = OPERATION)]
+    operation: Option<String>,
+    /// The name of a saved operation.
+    #[schemars(description = OPERATION_NAME)]
+    operation_name: Option<String>,
+    /// One set of variables for each run.
+    #[schemars(description = "A JSON list with one object of variables for each run, such as \
+                       `[{\"id\": \"1\"}, {\"id\": \"2\"}]`. The query is sent once for each, in this order, and the \
+                       result numbers the runs by their position in this list, from 0. Every set is checked against \
+                       the declared types before the user is asked or anything is sent.")]
+    variables: Vec<Variables>,
+    /// A path that picks part of each response.
+    #[schemars(
+        description = "Optional. A path that picks part of each response once it arrives, as `select` does for \
+                       `execute`, such as `data.user.name`. With many runs it keeps the result short. `errors` is \
+                       still shown in full for each run."
+    )]
+    select: Option<String>,
+}
+
+/// One run of a batch: the variables it is sent with and what it is estimated to cost.
+struct Run {
+    variables: Variables,
+    cost: u64,
+}
+
+/// The fewest characters a run of a batch gets of the result, however many runs there are.
+const MIN_SHARE: usize = 300;
+
 /// Arguments of `execute`.
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 struct ExecuteArguments {
@@ -252,6 +290,58 @@ struct ExecuteArguments {
     )]
     #[serde(default)]
     save: bool,
+    /// A connection whose pages to follow.
+    #[schemars(
+        description = "Optional. Follows the pages of one connection, for a query only: fieldtrip sends the query, \
+                       reads `pageInfo` at `path`, and sends it again with `endCursor` in the cursor variable, until \
+                       the last page or `max_pages`. The user approves all of it once, at the worst-case cost. An \
+                       object such as `{\"path\": \"data.repository.issues\", \"max_pages\": 5}`. The query must \
+                       declare the cursor variable, pass it to the connection, and select \
+                       `pageInfo { hasNextPage endCursor }`. For an API that pages by another field, name it with \
+                       `cursor`, as in `{\"path\": \"data.listItems\", \"cursor\": \"nextToken\", \"variable\": \
+                       \"nextToken\"}`, and add `more` when a separate field such as `hasMore` says whether another \
+                       page follows. Paging by offset or page number has no cursor to follow: use `execute_batch` \
+                       with one set of variables for each page. It cannot be combined with `save`."
+    )]
+    paginate: Option<PaginateArguments>,
+}
+
+/// The `paginate` argument of `execute`.
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+struct PaginateArguments {
+    /// The path to the connection.
+    #[schemars(
+        description = "The path in the response to the connection, the object that holds `pageInfo`: `data` and \
+                       then names joined by `.`, such as `data.repository.issues`. An alias in the query is the name \
+                       here."
+    )]
+    path: String,
+    /// The most pages to fetch.
+    #[schemars(
+        description = "Optional. The most pages to fetch, 5 unless given. The user's config caps it (`max_batch`, \
+                       100 unless they changed it)."
+    )]
+    max_pages: Option<usize>,
+    /// The variable that carries the cursor.
+    #[schemars(
+        description = "Optional. The name of the variable the query passes to the connection as its cursor, \
+                       `after` unless given. Its value in `variables`, if any, is where the first page starts."
+    )]
+    variable: Option<String>,
+    /// The field that holds the cursor.
+    #[schemars(
+        description = "Optional, for an API that does not page the Relay way. The field that holds the cursor of \
+                       the next page, relative to the object at `path`, such as `nextToken`, or `paging.next` for \
+                       one further in. `pageInfo.endCursor` unless given. With `cursor` and no `more`, a null \
+                       cursor means the last page."
+    )]
+    cursor: Option<String>,
+    /// The field that says whether another page follows.
+    #[schemars(
+        description = "Optional, with `cursor`. The field that is `true` while another page follows, relative to \
+                       the object at `path`, such as `hasMore`. `pageInfo.hasNextPage` unless `cursor` is given."
+    )]
+    more: Option<String>,
 }
 
 /// A finished tool call with `text` as its result.
@@ -378,7 +468,7 @@ impl Fieldtrip {
             config: Arc::new(config),
             schemas: Arc::default(),
             http,
-            outstanding: Arc::default(),
+            approvals: Arc::default(),
             results: Arc::new(results),
             audit: Arc::new(audit),
             tools: Arc::new(tools),
@@ -683,7 +773,10 @@ impl Fieldtrip {
                        with `estimate_cost` first, and use `describe` rather than this tool to explore. The user \
                        approves each request in a prompt that shows the operation exactly as it will be sent, its \
                        variables and its cost, unless their config says otherwise (`list_endpoints` shows who \
-                       approves). Write for that reader: name the operation, pass inputs as variables, and select \
+                       approves). In that prompt the user can approve a query for the rest of the session: it then \
+                       runs without a prompt whatever its variables, and the result says so. So when you run one \
+                       query many times, keep its text the same and change only the variables. Mutations are asked \
+                       about every time. Write for that reader: name the operation, pass inputs as variables, and select \
                        only the fields you need. The result starts with what was sent and its estimated cost, then \
                        a line with the HTTP status, how long the request took, any ID fieldtrip generated for the \
                        request (`sent X-Correlation-Id ...`), and any response headers the user chose to show, such \
@@ -697,7 +790,9 @@ impl Fieldtrip {
                        any part of the file by a path. To get one part in this result, pass `select`. Pass `save` to have a short response written to a file too. A \
                        connection with \
                        `hasNextPage: true` is pointed out with its cursor: page through it with `after` rather than \
-                       raising `first`. A response \
+                       raising `first`. To fetch several pages of a query under one approval, pass `paginate` with \
+                       the path to the connection: the result then has a section for each page, and its second \
+                       line says whether more pages remain and from which cursor. A response \
                        can hold both `data` and `errors`: read both, because one field can fail while the rest \
                        succeed. Each error's `path` names the field that failed, and its `extensions` often carry a \
                        code. For a mutation, select the result fields that confirm what changed, and any error \
@@ -726,29 +821,51 @@ impl Fieldtrip {
             arguments.operation_name.as_deref(),
         )?;
         // Before the schema is loaded, so a denied mutation causes no request of any kind.
-        if let Err(refusal) = approval::refuse_denied_mutation(name, endpoint, text) {
-            let operation = audit::mutation_name(text);
-            let attempt = Attempt {
-                endpoint: name,
-                kind: Kind::Mutation,
-                operation: operation.as_deref(),
-                text,
-                variables: &arguments.variables,
-                cost: None,
-            };
-            let verdict = Verdict {
-                approval: "denied",
-                reason: Some("mutations are turned off for this endpoint by `mutations = \"deny\"`".to_owned()),
-            };
-            self.audit.record(endpoint, &attempt, &verdict, Outcome::NotSent).await;
-            return Err(refusal);
-        }
+        self.refuse_denied(name, endpoint, text, &arguments.variables).await?;
         let select = arguments.select.as_deref().map(select::Path::parse).transpose()?;
+        let follow = arguments
+            .paginate
+            .as_ref()
+            .map(|paginate| {
+                Follow::parse(
+                    &paginate.path,
+                    (paginate.cursor.as_deref(), paginate.more.as_deref()),
+                    paginate.variable.as_deref(),
+                    paginate.max_pages,
+                    name,
+                    endpoint.max_batch,
+                )
+            })
+            .transpose()?;
+        if follow.is_some() && arguments.save {
+            return Err(
+                "`paginate` and `save` cannot be combined: `save` writes one response to a file. Nothing was sent. \
+                 Use `select` to keep each page short, or send the pages one at a time with `save`."
+                    .to_owned(),
+            );
+        }
         let schema = self.schema(name, false).await?;
         // From here on the variables are the ones that will be sent, which is what the prompt and the log show.
         let (variables, left_out) = sendable(saved, &arguments.variables);
         let plan = planned(&schema, name, endpoint, text, saved, &variables)?;
+        if let Some(follow) = &follow {
+            follow_checked(name, &plan, follow)?;
+        }
         plan.check_variables(&schema, &variables)?;
+        if let Some(follow) = &follow {
+            let paged = Paged {
+                name,
+                endpoint,
+                plan: &plan,
+                variables: &variables,
+                left_out: left_out.as_deref(),
+                select: select.as_ref(),
+                follow,
+            };
+            return self
+                .follow_pages(&context, state.as_deref(), responses.as_ref(), paged)
+                .await;
+        }
         let attempt = Attempt {
             endpoint: name,
             kind: plan.kind,
@@ -756,22 +873,34 @@ impl Fieldtrip {
             text: &plan.text,
             variables: &variables,
             cost: Some(plan.cost),
+            series: Series::Single,
         };
 
         // Nothing below this point runs unless the human accepted, or the user's config waives the prompt.
+        let covered = serde_json::Value::Object(variables.clone());
+        let request = Request {
+            tool: "execute",
+            name,
+            endpoint,
+            kind: plan.kind,
+            text: &plan.text,
+            cost: plan.cost,
+            prompt: approval::prompt(name, &endpoint.shown_url, &plan, &variables),
+            covered: &covered,
+            offer_session: plan.kind == Kind::Query,
+        };
         let returned = Returned {
             state: state.as_deref(),
             responses: responses.as_ref(),
         };
-        let (verdict, unasked) =
-            match approval::gate(&self.outstanding, &context, name, endpoint, &plan, &variables, returned).await {
-                Gate::Open { verdict, unasked } => (verdict, unasked),
-                Gate::Ask(question) => return Ok(question.into()),
-                Gate::Shut { verdict, refusal } => {
-                    self.audit.record(endpoint, &attempt, &verdict, Outcome::NotSent).await;
-                    return Err(refusal);
-                }
-            };
+        let (verdict, unasked) = match approval::gate(&self.approvals, &context, request, returned).await {
+            Gate::Open { verdict, unasked } => (verdict, unasked),
+            Gate::Ask(question) => return Ok(question.into()),
+            Gate::Shut { verdict, refusal } => {
+                self.audit.record(endpoint, &attempt, &verdict, Outcome::NotSent).await;
+                return Err(refusal);
+            }
+        };
 
         let sent = self
             .http
@@ -818,6 +947,191 @@ impl Fieldtrip {
             arguments.save,
         )
         .map(finished)
+    }
+
+    #[tool(
+        title = "Execute a GraphQL query many times (the user approves once)",
+        description = "Send one query to the endpoint once for each set of variables in a list, and return every \
+                       response. Use it instead of calling `execute` in a loop when you need the same lookup for \
+                       many IDs or inputs: the user is asked once, in a prompt that shows the query, how many times \
+                       it will run, the first few sets of variables and the total estimated cost, and the result \
+                       says so when they were not asked. Pass the GraphQL text as `operation`, or the name of a \
+                       saved operation as `operation_name`, and the sets as `variables`. Check the query with \
+                       `estimate_cost` first. It also fetches several pages of an API that pages by offset or page \
+                       number: pass one set for each page, such as `{\"offset\": 0}`, `{\"offset\": 20}`. Queries \
+                       only: a mutation is refused, because the user approves each mutation on its own with \
+                       `execute`. The user's config caps the number of runs, 100 unless \
+                       they changed it. The runs are sent one after another, in order. The result has one section \
+                       for each run, starting with `[0]` for the first set, with the HTTP status and time, then \
+                       that run's `errors` in full, then its `data`, cut to fit its share of the result: pass \
+                       `select` to keep only the part you need. One run's `errors` do not stop the others. A run \
+                       that gets no answer at all stops the batch, and the result says which runs were not sent. \
+                       If the user declines, nothing was sent: do not send it again, ask what they want instead.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = false,
+            open_world_hint = true
+        )
+    )]
+    async fn execute_batch(
+        &self,
+        context: RequestContext<RoleServer>,
+        RequestState(state): RequestState,
+        InputResponses(responses): InputResponses,
+        Parameters(arguments): Parameters<BatchArguments>,
+    ) -> Result<CallToolResponse, String> {
+        let name = &arguments.endpoint;
+        let endpoint = self.endpoint(name)?;
+        let (text, saved) = chosen(
+            name,
+            endpoint,
+            arguments.operation.as_deref(),
+            arguments.operation_name.as_deref(),
+        )?;
+        let no_variables = Variables::new();
+        let first = arguments.variables.first().unwrap_or(&no_variables);
+        self.refuse_denied(name, endpoint, text, first).await?;
+        let select = arguments.select.as_deref().map(select::Path::parse).transpose()?;
+        let count = arguments.variables.len();
+        if count == 0 {
+            return Err(
+                "`variables` is empty. Give a list with one object of variables for each run, such as \
+                 `[{\"id\": \"1\"}, {\"id\": \"2\"}]`. Nothing was sent."
+                    .to_owned(),
+            );
+        }
+        if count > endpoint.max_batch {
+            return Err(format!(
+                "`variables` has {count} sets, and one call to `execute_batch` on `{name}` sends at most {} \
+                 (`max_batch` in the user's config). Nothing was sent. Split the list into smaller batches.",
+                endpoint.max_batch
+            ));
+        }
+        let schema = self.schema(name, false).await?;
+
+        // Every set is planned and checked before anyone is asked, so a batch never stops halfway on a typo.
+        let mut runs = Vec::with_capacity(count);
+        let mut notes: Vec<String> = Vec::new();
+        let mut shown_plan = None;
+        for (index, given) in arguments.variables.iter().enumerate() {
+            let (variables, left_out) = sendable(saved, given);
+            let plan = planned(&schema, name, endpoint, text, saved, &variables)?;
+            if plan.kind == Kind::Mutation {
+                return Err(format!(
+                    "Nothing was sent to `{name}`. `execute_batch` runs queries only, and this is a mutation. The \
+                     user approves each mutation on its own: send them one at a time with `execute`."
+                ));
+            }
+            plan.check_variables(&schema, &variables)
+                .map_err(|error| format!("`variables[{index}]`: {error} Nothing was sent."))?;
+            notes.extend(left_out.filter(|note| !notes.contains(note)));
+            runs.push(Run {
+                variables,
+                cost: plan.cost,
+            });
+            // The costliest run's plan is the one shown, since its assumptions are the ones that matter most.
+            if shown_plan.as_ref().is_none_or(|shown: &Plan| plan.cost > shown.cost) {
+                shown_plan = Some(plan);
+            }
+        }
+        let Some(plan) = shown_plan else {
+            return Err("`variables` is empty. Nothing was sent.".to_owned());
+        };
+        let total = runs.iter().fold(0_u64, |total, run| total.saturating_add(run.cost));
+        let sets: Vec<Variables> = runs.iter().map(|run| run.variables.clone()).collect();
+
+        // Nothing below this point runs unless the human accepted, or the user's config waives the prompt.
+        let covered: serde_json::Value = sets.iter().cloned().map(serde_json::Value::Object).collect();
+        let whole = Attempt {
+            endpoint: name,
+            kind: plan.kind,
+            operation: plan.name.as_deref(),
+            text: &plan.text,
+            variables: &no_variables,
+            cost: Some(total),
+            series: Series::Batch(&sets),
+        };
+        let request = Request {
+            tool: "execute_batch",
+            name,
+            endpoint,
+            kind: plan.kind,
+            text: &plan.text,
+            cost: total,
+            prompt: approval::batch_prompt(name, &endpoint.shown_url, &plan, &sets, total, plan.cost),
+            covered: &covered,
+            offer_session: false,
+        };
+        let returned = Returned {
+            state: state.as_deref(),
+            responses: responses.as_ref(),
+        };
+        let (verdict, unasked) = match approval::gate(&self.approvals, &context, request, returned).await {
+            Gate::Open { verdict, unasked } => (verdict, unasked),
+            Gate::Ask(question) => return Ok(question.into()),
+            Gate::Shut { verdict, refusal } => {
+                self.audit.record(endpoint, &whole, &verdict, Outcome::NotSent).await;
+                return Err(refusal);
+            }
+        };
+
+        let mut out = format!(
+            "Sent {} to `{name}` {count} times, once for each set of variables. Estimated cost: {total} in \
+             total.{unasked}\nEach run below starts with the position of its set in `variables`, from 0.",
+            plan.title()
+        );
+        for note in &notes {
+            let _ = write!(out, "\n{note}");
+        }
+        let limit = endpoint.max_output_chars;
+        let share = (limit.saturating_sub(out.chars().count() + response::NOTE_ROOM) / count).max(MIN_SHARE);
+        let mut answered = 0;
+        for (index, run) in runs.iter().enumerate() {
+            let attempt = Attempt {
+                variables: &run.variables,
+                cost: Some(run.cost),
+                series: Series::Run {
+                    run: index + 1,
+                    of: count,
+                },
+                ..whole
+            };
+            let sent = self
+                .http
+                .post(endpoint, &plan.payload(&run.variables), endpoint.max_response_bytes)
+                .await;
+            let outcome = sent
+                .as_ref()
+                .map_or_else(Outcome::Failed, |reply| Outcome::Answered(reply, None));
+            self.audit.record(endpoint, &attempt, &verdict, outcome).await;
+            let reply = match sent {
+                Ok(reply) => reply,
+                Err(failed) => {
+                    let _ = write!(out, "\n\n[{index}] No answer: {failed}");
+                    let unsent = count - index - 1;
+                    if unsent > 0 {
+                        let _ = write!(
+                            out,
+                            "\n\n[The {unsent} run{} after `[{index}]` {} not sent: a batch stops at the first \
+                             request that gets no answer, since the rest would likely fail the same way.]",
+                            if unsent == 1 { "" } else { "s" },
+                            if unsent == 1 { "was" } else { "were" }
+                        );
+                    }
+                    break;
+                }
+            };
+            answered += 1;
+            let section = response::section(&format!("[{index}]"), &reply, endpoint, select.as_ref(), share, None);
+            let _ = write!(out, "\n\n{section}");
+        }
+        let out = capped(
+            out,
+            limit.max(count.saturating_mul(MIN_SHARE)),
+            "Pass `select`, or send fewer sets at once.",
+        );
+        if answered == 0 { Err(out) } else { Ok(finished(out)) }
     }
 
     #[tool(
@@ -869,7 +1183,15 @@ impl Fieldtrip {
         } else {
             response::Room::Preview(inline.min(response::SAVED_PREVIEW))
         };
-        Ok(response::laid_out(summary, "", &body, parts, select.as_ref(), room))
+        Ok(response::laid_out(
+            summary,
+            "",
+            &body,
+            parts,
+            select.as_ref(),
+            room,
+            None,
+        ))
     }
 
     #[tool(
@@ -879,10 +1201,11 @@ impl Fieldtrip {
                        start of a task that may have been started before, after an interruption, or when the user \
                        asks what was run. Returns the most recent attempts, oldest first, one JSON object per line \
                        with the time, the `session`, the endpoint, the operation's name and text, its variables \
-                       unless the user keeps them out, and `approval`: `accepted`, `auto` or `client` for one that \
+                       unless the user keeps them out, and `approval`: `accepted`, `auto`, `session` or `client` for one that \
                        was sent, with its HTTP `status`, time in `ms` and number of `errors`, or `declined`, \
-                       `cancelled`, `unavailable`, `failed` or `denied` with a `reason` for one that was not. The \
-                       first line names this session. A response is not in the log, but a line with a `result` \
+                       `cancelled`, `unavailable`, `failed` or `denied` with a `reason` for one that was not. A run \
+                       of `execute_batch` has `batch` with its number, and a page that `execute` followed has \
+                       `page`. The first line names this session. A response is not in the log, but a line with a `result` \
                        is an attempt whose response was written to a file: the files that still exist are listed \
                        after the lines, and `read_result` reads them without sending anything. For any other \
                        attempt, run the operation again to see data. Do not send again what the user declined \
@@ -1011,7 +1334,304 @@ impl Fieldtrip {
     }
 }
 
+/// Checks that `plan` is a query that can carry a cursor for `follow`, on the endpoint called `name`.
+fn follow_checked(name: &str, plan: &Plan, follow: &Follow) -> Result<(), String> {
+    if plan.kind == Kind::Mutation {
+        return Err(format!(
+            "Nothing was sent to `{name}`. `paginate` is for queries only, and this is a mutation: sending it again \
+             for each page would repeat what it does. Send it once, without `paginate`."
+        ));
+    }
+    let variable = &follow.variable;
+    if !plan.declared.iter().any(|declared| declared == variable) {
+        return Err(format!(
+            "Nothing was sent to `{name}`. To follow pages, fieldtrip puts each page's `endCursor` in a variable, \
+             and the operation does not declare `${variable}`. Declare it and pass it to the connection, as in \
+             `query($after: String) {{ items(first: 20, after: $after) {{ pageInfo {{ hasNextPage endCursor }} }} }}`, \
+             or name the variable you use with `paginate.variable`."
+        ));
+    }
+    Ok(())
+}
+
+/// A call of `execute` that follows the pages of a connection.
+struct Paged<'call> {
+    /// The endpoint's name.
+    name: &'call str,
+    /// The endpoint.
+    endpoint: &'call Endpoint,
+    /// The validated query.
+    plan: &'call Plan,
+    /// The variables of the first page.
+    variables: &'call Variables,
+    /// A note about variables a saved operation no longer takes.
+    left_out: Option<&'call str>,
+    /// The part of each page to show.
+    select: Option<&'call select::Path>,
+    /// The connection to follow, and how far.
+    follow: &'call Follow,
+}
+
+impl<'call> Paged<'call> {
+    /// What an approval of the call covers: the first page's variables, and how the pages are followed.
+    fn covered(&self) -> serde_json::Value {
+        serde_json::json!({
+            "variables": self.variables,
+            "path": self.follow.path,
+            "variable": self.follow.variable,
+            "max_pages": self.follow.max_pages,
+            "cursor": self.follow.cursor_name(),
+            "more": self.follow.more_name(),
+        })
+    }
+
+    /// The call as one attempt, at its `worst` cost, for the audit log when none of it is sent.
+    fn whole(&self, worst: u64) -> Attempt<'call> {
+        Attempt {
+            endpoint: self.name,
+            kind: self.plan.kind,
+            operation: self.plan.name.as_deref(),
+            text: &self.plan.text,
+            variables: self.variables,
+            cost: Some(worst),
+            series: Series::Pages(self.follow.max_pages),
+        }
+    }
+
+    /// The result of the call: `head`, then a section for each page. It is an error when `nothing` was answered.
+    fn result(&self, head: String, sections: &str, nothing: bool) -> Result<CallToolResponse, String> {
+        let mut out = head;
+        if let Some(note) = self.left_out {
+            let _ = write!(out, "\n{note}");
+        }
+        out.push_str(sections);
+        let limit = self
+            .endpoint
+            .max_output_chars
+            .max(self.follow.max_pages.saturating_mul(MIN_SHARE));
+        let out = capped(out, limit, "Pass `select`, or ask for fewer pages at once.");
+        if nothing { Err(out) } else { Ok(finished(out)) }
+    }
+}
+
+/// Why `execute` stopped following pages.
+enum Stop {
+    /// The last page was reached.
+    Done,
+    /// `max_pages` pages were sent for and there are more, after this cursor.
+    Capped(serde_json::Value),
+    /// The page has no `pageInfo` at the path.
+    Missing,
+    /// The page's `pageInfo` lacks `hasNextPage`, or `endCursor` when there are more pages.
+    Unselected,
+    /// The page has no value at the cursor field the calling agent named.
+    NoCursor,
+    /// The page has no true or false at the flag the calling agent named.
+    NoFlag,
+    /// The page ended with the cursor it started from.
+    Stuck,
+    /// The page's response was too large to read.
+    TooLarge,
+    /// The request for the page got no answer.
+    Unanswered,
+}
+
+impl Stop {
+    /// One line for the calling agent: why it stopped after `pages` pages, and how to go on. `last` is the cursor
+    /// the last request carried.
+    fn line(&self, pages: usize, follow: &Follow, last: Option<&serde_json::Value>) -> String {
+        let path = &follow.path;
+        let variable = &follow.variable;
+        let cursor_name = follow.cursor_name();
+        let plural = if pages == 1 { "" } else { "s" };
+        let from = last.map_or_else(String::new, |cursor| format!(" The last cursor was {cursor}."));
+        match self {
+            Self::Done => {
+                let says = follow
+                    .more_name()
+                    .map_or_else(|| format!("a null `{cursor_name}`"), |more| format!("`{more}: false`"));
+                format!("That was every page: `{path}` has {says} after {pages} page{plural}.")
+            }
+            Self::Capped(cursor) => {
+                let says = follow
+                    .more_name()
+                    .map_or_else(|| format!("a `{cursor_name}`"), |more| format!("`{more}: true`"));
+                format!(
+                    "More pages remain: `{path}` still has {says} after {pages} page{plural}, which is the \
+                     `max_pages` given. Its `{cursor_name}` is {cursor}. To go on, call again with `{variable}` set \
+                     to it in `variables`."
+                )
+            }
+            Self::Missing if follow.is_named() => format!(
+                "Stopped after page {pages}: its response has no object at `{path}`, so there is no cursor to go on \
+                 from. Read that page's `errors`, and check that the path leads to the object that holds \
+                 `{cursor_name}`.{from}"
+            ),
+            Self::Missing => format!(
+                "Stopped after page {pages}: its response has no `pageInfo` at `{path}`, so there is no cursor to go \
+                 on from. Read that page's `errors`, and check that the path leads to the object that selects \
+                 `pageInfo`. For an API that pages by another field, such as `nextToken`, name it with \
+                 `paginate.cursor`.{from}"
+            ),
+            Self::Unselected => format!(
+                "Stopped after page {pages}: the `pageInfo` at `{path}` has no `hasNextPage`, or no `endCursor` to go \
+                 on from. Select both, as `pageInfo {{ hasNextPage endCursor }}`.{from}"
+            ),
+            Self::NoCursor => format!(
+                "Stopped after page {pages}: the object at `{path}` has no `{cursor_name}` to go on from. Select it \
+                 in the query, or correct `paginate.cursor`.{from}"
+            ),
+            Self::NoFlag => format!(
+                "Stopped after page {pages}: the object at `{path}` has no `{}`, which should say whether another \
+                 page follows. Select it in the query, or correct `paginate.more`.{from}",
+                follow.more_name().unwrap_or_default()
+            ),
+            Self::Stuck => format!(
+                "Stopped after page {pages}: it gave the same `{cursor_name}` as the page before, so the query does \
+                 not seem to pass `${variable}` to the field at `{path}`.{from}"
+            ),
+            Self::TooLarge => format!(
+                "Stopped after page {pages}: its response was too large to read, so its cursor is lost. Ask for a \
+                 smaller page.{from}"
+            ),
+            Self::Unanswered => format!("Stopped at page {pages}, which got no answer.{from}"),
+        }
+    }
+}
+
 impl Fieldtrip {
+    /// Refuses `text` when it holds a mutation and `endpoint` denies them, and records the refusal in the audit log
+    /// with the `variables` given.
+    async fn refuse_denied(
+        &self,
+        name: &str,
+        endpoint: &Endpoint,
+        text: &str,
+        variables: &Variables,
+    ) -> Result<(), String> {
+        let Err(refusal) = approval::refuse_denied_mutation(name, endpoint, text) else {
+            return Ok(());
+        };
+        let operation = audit::mutation_name(text);
+        let attempt = Attempt {
+            endpoint: name,
+            kind: Kind::Mutation,
+            operation: operation.as_deref(),
+            text,
+            variables,
+            cost: None,
+            series: Series::Single,
+        };
+        let verdict = Verdict {
+            approval: "denied",
+            reason: Some("mutations are turned off for this endpoint by `mutations = \"deny\"`".to_owned()),
+        };
+        self.audit.record(endpoint, &attempt, &verdict, Outcome::NotSent).await;
+        Err(refusal)
+    }
+
+    /// Sends the query of `paged` for each page of its connection, after one approval that covers them all.
+    async fn follow_pages(
+        &self,
+        context: &RequestContext<RoleServer>,
+        state: Option<&str>,
+        responses: Option<&rmcp::model::InputResponses>,
+        paged: Paged<'_>,
+    ) -> Result<CallToolResponse, String> {
+        let Paged {
+            name,
+            endpoint,
+            plan,
+            follow,
+            ..
+        } = paged;
+        let max = follow.max_pages;
+        let worst = plan.cost.saturating_mul(u64::try_from(max).unwrap_or(u64::MAX));
+        let covered = paged.covered();
+        let whole = paged.whole(worst);
+        let request = Request {
+            tool: "execute with paginate",
+            name,
+            endpoint,
+            kind: plan.kind,
+            text: &plan.text,
+            cost: worst,
+            prompt: approval::pages_prompt(name, &endpoint.shown_url, plan, paged.variables, follow),
+            covered: &covered,
+            offer_session: false,
+        };
+        let returned = Returned { state, responses };
+        let (verdict, unasked) = match approval::gate(&self.approvals, context, request, returned).await {
+            Gate::Open { verdict, unasked } => (verdict, unasked),
+            Gate::Ask(question) => return Ok(question.into()),
+            Gate::Shut { verdict, refusal } => {
+                self.audit.record(endpoint, &whole, &verdict, Outcome::NotSent).await;
+                return Err(refusal);
+            }
+        };
+
+        let limit = endpoint.max_output_chars;
+        let share = (limit.saturating_sub(2 * response::NOTE_ROOM) / max).max(MIN_SHARE);
+        let mut variables = paged.variables.clone();
+        let mut sections = String::new();
+        let mut page = 0;
+        let stop = loop {
+            page += 1;
+            let attempt = Attempt {
+                variables: &variables,
+                cost: Some(plan.cost),
+                series: Series::Page { page, max },
+                ..whole
+            };
+            let sent = self
+                .http
+                .post(endpoint, &plan.payload(&variables), endpoint.max_response_bytes)
+                .await;
+            let outcome = sent
+                .as_ref()
+                .map_or_else(Outcome::Failed, |reply| Outcome::Answered(reply, None));
+            self.audit.record(endpoint, &attempt, &verdict, outcome).await;
+            let reply = match sent {
+                Ok(reply) => reply,
+                Err(failed) => {
+                    let _ = write!(sections, "\n\n[page {page}] No answer: {failed}");
+                    break Stop::Unanswered;
+                }
+            };
+            let label = format!("[page {page}]");
+            let shown = response::section(&label, &reply, endpoint, paged.select, share, Some(&follow.path));
+            let _ = write!(sections, "\n\n{shown}");
+            if reply.cut_short {
+                break Stop::TooLarge;
+            }
+            let cursor = match follow.next(&reply.body) {
+                Next::More(cursor) => cursor,
+                Next::Last => break Stop::Done,
+                Next::Missing => break Stop::Missing,
+                Next::Unselected => break Stop::Unselected,
+                Next::NoCursor => break Stop::NoCursor,
+                Next::NoFlag => break Stop::NoFlag,
+            };
+            if variables.get(&follow.variable) == Some(&cursor) {
+                break Stop::Stuck;
+            }
+            if page == max {
+                break Stop::Capped(cursor);
+            }
+            variables.insert(follow.variable.clone(), cursor);
+        };
+        let last = variables.get(&follow.variable).filter(|cursor| !cursor.is_null());
+        let head = format!(
+            "Sent {} to `{name}` {page} time{}, following the pages of `{}`. Estimated cost: {worst} at \
+             most.{unasked}\n{}",
+            plan.title(),
+            if page == 1 { "" } else { "s" },
+            follow.path,
+            stop.line(page, follow, last)
+        );
+        paged.result(head, &sections, page == 1 && matches!(stop, Stop::Unanswered))
+    }
+
     /// The server's instructions, which mention `history` only when it is offered.
     fn instructions(&self) -> String {
         if self.audit.path().is_some() {
