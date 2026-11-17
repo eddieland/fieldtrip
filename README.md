@@ -125,6 +125,28 @@ to trust the client), so use a header name the proxy passes through, and list th
 | `audit_variables` | `true` | `false` leaves this endpoint's variables out of the audit log, below |
 | `schema_ttl` | `86400` | Seconds an introspected schema is kept on disk, across restarts. `0` keeps none |
 | `costs` | none | A cost map, below |
+| `glossary` | none | Your words for things in the schema, below |
+
+### Glossary
+
+You describe a task in the words of the product you use, and the schema spells them its own way. On GitHub's API,
+"PR" means `PullRequest` and "draft" means `PullRequest.isDraft`. Write the mapping down once, in a file named by
+`glossary`:
+
+```toml
+# acme.glossary.toml
+[glossary]
+"PR"           = ["PullRequest"]
+"draft"        = ["PullRequest.isDraft"]
+"org"          = ["Organization"]
+"pull request" = ["PullRequest"]
+```
+
+A target is a type, or a type and one of its fields, input fields or enum values. `search_schema` then answers a
+search for your word with what it stands for, first, marked `draft → PullRequest.isDraft`, and `list_operations`
+lists the saved operations that use it. Terms are whole words and ignore case. When the API drops a field a term
+points at, `introspect` tells the agent and `fieldtrip check` warns you. A glossary that doesn't parse stops the
+server at startup, naming the file and the term.
 
 ### Large schemas and responses
 
@@ -177,7 +199,7 @@ schema      = "schemas/acme-prod.graphql"
 mutations   = "deny"
 ```
 
-An endpoint takes `schema`, `headers`, `costs`, `assumed_list_size`, `timeout`, `response_headers`,
+An endpoint takes `schema`, `headers`, `costs`, `glossary`, `assumed_list_size`, `timeout`, `response_headers`,
 the three `max_` limits and `audit_variables` from its template unless it sets them itself. Headers merge by name, and the endpoint's win.
 `approval`, `auto_approve_cost`, `url` and `description` are never taken from a template, so an endpoint that forgets
 them asks before every operation. `mutations` is the other way round: a template can set `mutations = "deny"`, and an

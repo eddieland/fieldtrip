@@ -21,6 +21,7 @@ use apollo_compiler::ast::{self, Definition, Document, OperationType};
 use apollo_compiler::executable::{Selection, SelectionSet};
 
 use crate::config::Endpoint;
+use crate::glossary::Glossary;
 use crate::plan::{Kind, Plan, Variables};
 use crate::schema::Loaded;
 use crate::suggest::{backticked, nearest};
@@ -258,16 +259,72 @@ impl Library {
     /// `query` has no words.
     pub(crate) fn matching(&self, query: &str) -> Vec<&Saved> {
         let terms: Vec<String> = query.split_whitespace().map(str::to_lowercase).collect();
-        self.operations
+        self.operations.iter().filter(|saved| saved.holds(&terms)).collect()
+    }
+
+    /// The operations that match `query`, each with the glossary terms it was found through, written
+    /// `term → Target, Target`. Those found through `glossary` come first.
+    ///
+    /// A term of `glossary` in `query` matches an operation that uses one of the term's targets, as `uses` would,
+    /// or one whose name or description holds the term. Every other word has to be in the name or description.
+    pub(crate) fn matching_with<'library>(
+        &'library self,
+        query: &str,
+        glossary: &Glossary,
+        loaded: &Loaded,
+    ) -> Vec<(&'library Saved, Vec<String>)> {
+        let (found, rest) = glossary.found(query);
+        if found.is_empty() {
+            return self
+                .matching(query)
+                .into_iter()
+                .map(|saved| (saved, Vec::new()))
+                .collect();
+        }
+        // A target the schema lacks is no selector, and matches nothing. `introspect` reports it.
+        let selectors: Vec<Vec<(&str, Selector)>> = found
             .iter()
-            .filter(|saved| {
-                let name = saved.name.to_lowercase();
-                let description = saved.description.as_deref().unwrap_or_default().to_lowercase();
-                terms
+            .map(|term| {
+                term.targets
                     .iter()
-                    .all(|term| name.contains(term.as_str()) || description.contains(term.as_str()))
+                    .filter_map(|target| Some((target.as_str(), Selector::parse(target, loaded).ok()?)))
+                    .collect()
             })
-            .collect()
+            .collect();
+        let mut matching: Vec<(&Saved, Vec<String>)> = self
+            .operations
+            .iter()
+            .filter(|saved| saved.holds(&rest))
+            .filter_map(|saved| {
+                let mut through = Vec::new();
+                for (term, selectors) in found.iter().zip(&selectors) {
+                    let used: Vec<&str> = selectors
+                        .iter()
+                        .filter(|(_, selector)| saved.uses(loaded, std::slice::from_ref(selector)))
+                        .map(|(target, _)| *target)
+                        .collect();
+                    if !used.is_empty() {
+                        through.push(format!("{} → {}", term.text, used.join(", ")));
+                    } else if !saved.holds(term.words()) {
+                        return None;
+                    }
+                }
+                Some((saved, through))
+            })
+            .collect();
+        matching.sort_by_key(|(_, through)| through.is_empty());
+        matching
+    }
+}
+
+impl Saved {
+    /// Whether the operation's name or description holds every one of `words`, which are in lower case.
+    fn holds(&self, words: &[String]) -> bool {
+        let name = self.name.to_lowercase();
+        let description = self.description.as_deref().unwrap_or_default().to_lowercase();
+        words
+            .iter()
+            .all(|word| name.contains(word.as_str()) || description.contains(word.as_str()))
     }
 }
 

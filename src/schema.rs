@@ -12,8 +12,21 @@ use apollo_compiler::schema::{ExtendedType, Implementers};
 use apollo_compiler::validation::Valid;
 use apollo_compiler::{Name, Schema};
 
+use crate::glossary::Glossary;
+
 /// How many lines of schema diagnostics to pass on before cutting off.
 const MAX_DIAGNOSTIC_LINES: usize = 40;
+
+/// What a search of a schema found.
+#[derive(Debug)]
+pub(crate) struct Found {
+    /// What each term of the user's glossary in the query stands for, one per line under a heading. Empty when the
+    /// query holds no term.
+    pub(crate) glossary: String,
+    /// The schema's own matches, or what to try when there are none. Empty when the glossary answered the query and
+    /// nothing else matched.
+    pub(crate) schema: String,
+}
 
 /// A loaded, validated schema.
 #[derive(Debug)]
@@ -80,13 +93,24 @@ impl Loaded {
         describe::describe(self, name)
     }
 
-    /// Searches names and descriptions for `query` and returns the best matches as one-line signatures.
+    /// Searches names and descriptions for `query` and returns the best matches as one-line signatures, after the
+    /// targets of each term of `glossary` that `query` holds.
     ///
     /// # Errors
     ///
     /// Returns a message when `query` has no words in it.
-    pub(crate) fn search(&self, endpoint: &str, query: &str) -> Result<String, String> {
-        search::search(self, endpoint, query)
+    pub(crate) fn search(&self, endpoint: &str, query: &str, glossary: &Glossary) -> Result<Found, String> {
+        search::search(self, endpoint, query, glossary)
+    }
+
+    /// One sentence naming the targets of `glossary` that this schema does not have. `None` when it has them all.
+    pub(crate) fn glossary_finding(&self, glossary: &Glossary) -> Option<String> {
+        lint::glossary_finding(self, glossary)
+    }
+
+    /// Says which targets of `glossary` this schema does not have. Empty when the endpoint has no glossary.
+    pub(crate) fn glossary_report(&self, glossary: &Glossary) -> String {
+        lint::glossary_report(self, glossary)
     }
 
     /// Says which rules of `costs` can never match this schema. Empty when the endpoint has no cost map.

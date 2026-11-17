@@ -1,4 +1,4 @@
-//! Checking a cost map against the schema: which of its rules can never match.
+//! Checking a cost map and a glossary against the schema: which rules can never match, and which targets are gone.
 //!
 //! A cost map is written by hand, or by an agent reading server code. A misspelled type or field makes a rule
 //! that silently does nothing, so `introspect` reports those.
@@ -9,8 +9,9 @@ use apollo_compiler::Name;
 use apollo_compiler::ast::FieldDefinition;
 use apollo_compiler::schema::ExtendedType;
 
-use super::Loaded;
+use super::{Loaded, search};
 use crate::costs::{CostMap, Shape};
+use crate::glossary::Glossary;
 use crate::suggest::backticked;
 
 /// What `introspect` says about the endpoint's cost map. Empty when the endpoint has none.
@@ -143,4 +144,30 @@ fn selectable_under<'schema>(loaded: &'schema Loaded, ty: &'schema Name) -> Vec<
         _ => {}
     }
     types
+}
+
+/// What `introspect` says about the endpoint's glossary. Empty when the endpoint has none.
+pub(super) fn glossary_report(loaded: &Loaded, glossary: &Glossary) -> String {
+    let Some(source) = &glossary.source else {
+        return String::new();
+    };
+    let count = glossary.len();
+    let plural = if count == 1 { "" } else { "s" };
+    let mut out = format!("\nGlossary: {count} term{plural} from {}.", source.display());
+    match glossary_finding(loaded, glossary) {
+        None => out.push_str(" Every target is in this schema.\n"),
+        Some(finding) => {
+            let _ = writeln!(out, "\n{finding} Tell the user, who can fix the glossary.");
+        }
+    }
+    out
+}
+
+/// One sentence naming the targets of `glossary` that this schema does not have. `None` when it has them all.
+///
+/// A glossary is written by hand and outlives the fields it names, so a target for a removed field would otherwise
+/// go on pointing nowhere.
+pub(super) fn glossary_finding(loaded: &Loaded, glossary: &Glossary) -> Option<String> {
+    let missing = search::missing_targets(loaded, glossary);
+    (!missing.is_empty()).then(|| format!("These glossary targets are not in this schema: {}.", missing.join(", ")))
 }
