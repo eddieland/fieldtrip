@@ -4,6 +4,7 @@ mod describe;
 pub(crate) mod introspection;
 mod lint;
 mod overview;
+mod paths;
 mod references;
 mod render;
 mod search;

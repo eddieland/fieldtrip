@@ -42,6 +42,13 @@ type User implements Node {
 }
 # member of: SearchResult
 # used by: Query.viewer, Query.user, Mutation.deactivateUser, Order.customer, Review.author, UserConnection.nodes
+# paths from Query:
+#   Query.viewer
+#   Query.user
+#   Query.search{... on User}
+#   Query.node{... on User}
+#   Query.users.nodes
+#   and 4 more, from other fields of Query
 ";
     assert_eq!(
         describe("User"),
@@ -59,34 +66,38 @@ interface Node {
 }
 # implemented by: User, Product, Order
 # used by: Query.node
+# paths from Query:
+#   Query.node
 ";
     assert_eq!(describe("Node"), expected, "an interface says which types implement it");
 }
 
 #[test]
 fn a_union_an_enum_an_input_and_a_scalar() {
-    assert_eq!(
-        describe("SearchResult"),
-        "union SearchResult = User | Product\n# used by: Query.search\n",
-        "union"
-    );
-    assert_eq!(
-        describe("OrderStatus"),
-        "enum OrderStatus {\n  PENDING\n  PAID\n  SHIPPED\n  CANCELLED\n  \
-         REFUNDED @deprecated(reason: \"Refunds are tracked on payments now.\")\n}\n# used by: Order.status\n",
-        "enum"
-    );
-    assert_eq!(
-        describe("CreateOrderInput"),
-        "input CreateOrderInput {\n  items: [OrderItemInput!]!\n  \"Free-text note for the warehouse.\"\n  \
-         note: String\n  currency: Currency = USD\n}\n# used by: Mutation.createOrder(input:)\n",
-        "input object, with its default value"
-    );
-    assert_eq!(
-        describe("DateTime"),
-        "\"An ISO 8601 timestamp.\"\nscalar DateTime\n# used by: Order.placedAt\n",
-        "scalar"
-    );
+    // What uses each one, and how to reach it, follow the definition. Slices 57 and 58 pin those lines.
+    let cases = [
+        ("SearchResult", "union SearchResult = User | Product\n", "union"),
+        (
+            "OrderStatus",
+            "enum OrderStatus {\n  PENDING\n  PAID\n  SHIPPED\n  CANCELLED\n  \
+             REFUNDED @deprecated(reason: \"Refunds are tracked on payments now.\")\n}\n",
+            "enum",
+        ),
+        (
+            "CreateOrderInput",
+            "input CreateOrderInput {\n  items: [OrderItemInput!]!\n  \"Free-text note for the warehouse.\"\n  \
+             note: String\n  currency: Currency = USD\n}\n",
+            "input object, with its default value",
+        ),
+        ("DateTime", "\"An ISO 8601 timestamp.\"\nscalar DateTime\n", "scalar"),
+    ];
+    for (name, definition, kind) in cases {
+        let text = describe(name);
+        assert!(
+            text.starts_with(&format!("{definition}# used by: ")),
+            "{kind}: the definition, then its uses:\n{text}"
+        );
+    }
 }
 
 #[test]

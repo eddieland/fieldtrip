@@ -32,7 +32,7 @@ fn an_object_lists_its_unions_and_the_fields_that_return_it() {
     let text = describe("User");
 
     assert!(
-        text.ends_with(
+        text.contains(
             "}\n\
              # member of: SearchResult\n\
              # used by: Query.viewer, Query.user, Mutation.deactivateUser, Order.customer, Review.author, \
@@ -45,11 +45,11 @@ fn an_object_lists_its_unions_and_the_fields_that_return_it() {
 #[test]
 fn an_enum_lists_the_arguments_and_input_fields_that_take_it() {
     assert!(
-        describe("Role").ends_with("}\n# used by: Query.users(role:), User.role\n"),
+        describe("Role").contains("}\n# used by: Query.users(role:), User.role\n"),
         "an argument is written `Type.field(argument:)`"
     );
     assert!(
-        describe("Currency").ends_with("}\n# used by: CreateOrderInput.currency, Money.currency\n"),
+        describe("Currency").contains("}\n# used by: CreateOrderInput.currency, Money.currency\n"),
         "an input field and an output field"
     );
 }
@@ -57,11 +57,11 @@ fn an_enum_lists_the_arguments_and_input_fields_that_take_it() {
 #[test]
 fn an_input_object_lists_what_takes_it() {
     assert!(
-        describe("ProductFilter").ends_with("}\n# used by: Query.catalog(filter:)\n"),
+        describe("ProductFilter").contains("}\n# used by: Query.catalog(filter:)\n"),
         "an argument of a root field"
     );
     assert!(
-        describe("OrderItemInput").ends_with("}\n# used by: CreateOrderInput.items\n"),
+        describe("OrderItemInput").contains("}\n# used by: CreateOrderInput.items\n"),
         "an input field of another input object, as a list"
     );
 }
@@ -70,11 +70,11 @@ fn an_input_object_lists_what_takes_it() {
 fn an_interface_and_a_union_list_the_fields_that_return_them() {
     let node = describe("Node");
     assert!(
-        node.ends_with("# implemented by: User, Product, Order\n# used by: Query.node\n"),
+        node.contains("}\n# implemented by: User, Product, Order\n# used by: Query.node\n"),
         "after the implementers:\n{node}"
     );
     assert!(
-        describe("SearchResult").ends_with("union SearchResult = User | Product\n# used by: Query.search\n"),
+        describe("SearchResult").starts_with("union SearchResult = User | Product\n# used by: Query.search\n"),
         "a union"
     );
 }
@@ -86,9 +86,7 @@ fn a_type_nothing_uses_says_so() {
     let reply = mcp.call("describe", &json!({ "endpoint": "own", "name": "Orphan" }));
     reply.succeeded();
     assert!(
-        reply
-            .text
-            .ends_with("}\n# used by: no field, argument or input field\n"),
+        reply.text.contains("}\n# used by: no field, argument or input field\n"),
         "an unused type is not mistaken for a missing section:\n{}",
         reply.text
     );

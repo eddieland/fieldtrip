@@ -26,7 +26,7 @@ in the user's config, out of the agent's sight and out of its control.
 | `list_operations` | `endpoint`, `query?`, `uses?`, `kind?`, `name?` | Saved operations: name, kind, description, variables, cost, text |
 | `introspect` | `endpoint`, `refresh?` | Overview: root types, counts, query and mutation names |
 | `search_schema` | `endpoint`, `query` | Glossary targets, then ranked matches as one-line signatures |
-| `describe` | `endpoint`, `name` (`Type` or `Type.field`) | That definition as compact SDL. A type adds what uses it |
+| `describe` | `endpoint`, `name` (`Type` or `Type.field`) | That definition as compact SDL. A type adds what uses it and paths to it from `Query` |
 | `estimate_cost` | `endpoint`, `operation` or `operation_name`, `variables?` | Validation errors, or cost, depth, breakdown, assumptions |
 | `execute` | `endpoint`, `operation` or `operation_name`, `variables?`, `select?`, `save?` | Status, `errors`, then the rest, or a file's path with a preview |
 | `read_result` | `result`, `select?` | Part of a response `execute` wrote to a file, by a path. Sends nothing |
@@ -395,3 +395,11 @@ Settled. To change one, ask the user, then add a new dated line instead of editi
   by field order within a type, so an introspected schema and a schema file answer alike. At most 30 are listed and
   the rest are counted. Root types and built-in types list none.
 - 2026-11-17: Directive arguments are not uses, since an introspected schema carries no directive definitions.
+- 2026-11-17: `describe` of a type that can be selected ends with the shortest paths to it from `Query`: for each field
+  of `Query` that leads there, the shortest way through it, as `Query.users.nodes`. A step from an interface or a
+  union to one of its types is written `{... on Type}` and is not counted, since it selects nothing.
+- 2026-11-17: Paths are ordered by how many fields they hold, then by the order of the fields of `Query`. At most five
+  are shown and the rest counted. Where several ways through one root field are as short, fields come before
+  `... on`, then the schema's field order, then possible types by name, so both schema sources answer alike.
+- 2026-11-17: A path never passes through a root type, so a field that returns `Query` is not a way in. A type with no
+  path says so. Input objects, root types, built-in types and `describe` of a field have none.
