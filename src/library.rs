@@ -22,7 +22,7 @@ use apollo_compiler::executable::{Selection, SelectionSet};
 
 use crate::config::Endpoint;
 use crate::glossary::Glossary;
-use crate::plan::{Kind, Plan, Variables};
+use crate::plan::{Invalid, Kind, Plan, Variables};
 use crate::schema::Loaded;
 use crate::suggest::{backticked, nearest};
 
@@ -813,13 +813,13 @@ impl Saved {
     /// # Errors
     ///
     /// Returns the validation errors when the operation no longer fits the schema.
-    pub(crate) fn plan(&self, loaded: &Loaded, name: &str, endpoint: &Endpoint) -> Result<Plan, String> {
+    pub(crate) fn plan(&self, loaded: &Loaded, name: &str, endpoint: &Endpoint) -> Result<Plan, Invalid> {
         Plan::new(loaded, name, endpoint, &self.text, &Variables::new())
     }
 
     /// The message for a call that named this operation when it no longer validates for `endpoint`. `error` is
     /// what planning it said.
-    pub(crate) fn broken(&self, endpoint: &str, error: &str) -> String {
+    pub(crate) fn broken(&self, endpoint: &str, error: &Invalid) -> String {
         let mut out = format!(
             "The saved operation `{}` ({}{}) no longer validates against the schema of `{endpoint}`, so it cannot be \
              run. The API has probably changed since it was saved. Tell the user, who can fix the file. Meanwhile you \
@@ -828,10 +828,10 @@ impl Saved {
             self.file.display(),
             self.with_fragments()
         );
-        for problem in problems(error) {
+        for problem in error.problems() {
             let _ = write!(out, "\n- {problem}");
         }
-        if let Some(hint) = directive_hint(error) {
+        if let Some(hint) = error.directive_hint() {
             let _ = write!(out, "\n{hint}");
         }
         out
@@ -877,22 +877,6 @@ impl Saved {
             .collect();
         format!(", with shared fragments from {}", files.join(", "))
     }
-}
-
-/// What to tell the calling agent about an unknown directive in a saved operation, when `error` reports one. Code
-/// generators let operations carry directives that only they read, and the user can list those.
-pub(crate) fn directive_hint(error: &str) -> Option<&'static str> {
-    error.contains("cannot find directive").then_some(
-        "If a directive the schema does not have is one that only the user's code generator reads, the user can \
-         name it in `client_directives` for this endpoint, and fieldtrip will remove it from saved operations before \
-         they are checked and sent. A misspelled directive has to be fixed in the file.",
-    )
-}
-
-/// The problems in an error from [`Plan::new`], without the advice around them.
-pub(crate) fn problems(error: &str) -> Vec<&str> {
-    let listed: Vec<&str> = error.lines().filter_map(|line| line.strip_prefix("- ")).collect();
-    if listed.is_empty() { vec![error.trim()] } else { listed }
 }
 
 /// A filter on what an operation selects: a type, or a chain of fields written as in a cost map.

@@ -248,7 +248,7 @@ fn with_no_copy_a_failed_introspection_is_still_an_error() {
     let mut mcp = start(&config(&mock.url(), ""), &cache);
     let reply = mcp.call("introspect", &json!({ "endpoint": "live" }));
 
-    assert!(reply.is_error, "{}", reply.text);
+    reply.failed();
 }
 
 #[test]

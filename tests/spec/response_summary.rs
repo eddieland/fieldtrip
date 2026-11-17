@@ -6,15 +6,12 @@
 
 use serde_json::{Map, Value, json};
 
-use crate::support::{Human, Launch, Mcp, MockServer, Reply, Response};
+use crate::support::{Human, Launch, Mcp, MockServer, Reply, Response, store_config};
 
 /// Starts a server whose `store` endpoint answers every request with `body`, and never prompts.
 fn start(body: String, settings: &str) -> (Mcp, MockServer) {
     let mock = MockServer::start(move |_| Response::new(200, body.clone()));
-    let config = format!(
-        "[endpoints.store]\nurl = \"{}\"\nschema = \"schema.graphql\"\napproval = \"client\"\n{settings}",
-        mock.url()
-    );
+    let config = store_config(&mock, &format!("approval = \"client\"\n{settings}"));
     (Launch::new(&config).human(Human::Absent).start(), mock)
 }
 
@@ -135,7 +132,7 @@ fn a_body_just_over_the_limit_is_summarized() {
 
     let reply = execute(&mut mcp);
 
-    assert!(!reply.is_error, "{}", reply.text);
+    reply.succeeded();
     let (parts, note) = parts(&reply);
     assert!(note.contains("this is a summary"), "{note}");
     let list = part(&parts, "data")["products"].as_array().expect("the list is kept");

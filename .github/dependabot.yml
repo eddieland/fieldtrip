@@ -1,0 +1,23 @@
+# Weekly pull requests for the crates in Cargo.lock and for the actions the workflows pin by commit.
+version: 2
+updates:
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      # Patch and minor releases arrive as one pull request. A major release gets its own, since it needs reading.
+      compatible:
+        update-types: [minor, patch]
+    cooldown:
+      default-days: 7
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns: ["*"]
+    cooldown:
+      default-days: 7

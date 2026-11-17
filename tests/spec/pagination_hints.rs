@@ -3,15 +3,12 @@
 
 use serde_json::{Value, json};
 
-use crate::support::{Human, Launch, Mcp, MockServer, Reply};
+use crate::support::{Human, Launch, Mcp, MockServer, Reply, store_config};
 
 /// Starts a server whose `store` endpoint answers every request with `body`, and never prompts.
 fn start(body: &Value) -> (Mcp, MockServer) {
     let mock = MockServer::answering(body);
-    let config = format!(
-        "[endpoints.store]\nurl = \"{}\"\nschema = \"schema.graphql\"\napproval = \"client\"\n",
-        mock.url()
-    );
+    let config = store_config(&mock, "approval = \"client\"\n");
     (Launch::new(&config).human(Human::Absent).start(), mock)
 }
 
@@ -48,7 +45,7 @@ fn a_connection_with_more_pages_is_pointed_out_with_its_cursor() {
 
     let reply = execute(&mut mcp, None);
 
-    assert!(!reply.is_error, "{}", reply.text);
+    reply.succeeded();
     assert_eq!(
         hints(&reply),
         [

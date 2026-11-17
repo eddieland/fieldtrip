@@ -17,10 +17,7 @@ slice covers, add a slice for it instead of folding it into the current one.
 The full check, which is what CI runs:
 
 ```sh
-cargo fmt --all --check
-RUSTFLAGS="-D warnings" cargo clippy --workspace --all-targets --all-features
-RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --document-private-items
-cargo test --workspace --all-features
+make check
 ```
 
 ## Slices

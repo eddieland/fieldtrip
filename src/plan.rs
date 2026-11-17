@@ -75,14 +75,14 @@ impl Plan {
     ///
     /// # Errors
     ///
-    /// Returns a message listing what is wrong when the text is not exactly one valid query or mutation.
+    /// Returns what is wrong when the text is not exactly one valid query or mutation.
     pub(crate) fn new(
         loaded: &Loaded,
         name: &str,
         endpoint: &Endpoint,
         operation: &str,
         variables: &Variables,
-    ) -> Result<Self, String> {
+    ) -> Result<Self, Invalid> {
         let document = ExecutableDocument::parse_and_validate(loaded.schema(), operation, "operation.graphql")
             .map_err(|invalid| invalid_operation(loaded, name, &invalid.errors))?;
         let operation = single_operation(&document)?;
@@ -90,11 +90,9 @@ impl Plan {
             OperationType::Query => Kind::Query,
             OperationType::Mutation => Kind::Mutation,
             OperationType::Subscription => {
-                return Err(
-                    "Subscriptions are not supported. Only queries and mutations can be estimated and \
-                            executed."
-                        .to_owned(),
-                );
+                return Err(Invalid::one(
+                    "Subscriptions are not supported. Only queries and mutations can be estimated and executed.",
+                ));
             }
         };
 
@@ -185,11 +183,13 @@ impl Plan {
 }
 
 /// Returns the document's only operation.
-fn single_operation(document: &Valid<ExecutableDocument>) -> Result<&Operation, String> {
+fn single_operation(document: &Valid<ExecutableDocument>) -> Result<&Operation, Invalid> {
     let mut operations = document.operations.iter();
     match (operations.next(), operations.next()) {
         (Some(operation), None) => Ok(operation),
-        (None, _) => Err("The document has no operation in it. Send one query or one mutation.".to_owned()),
+        (None, _) => Err(Invalid::one(
+            "The document has no operation in it. Send one query or one mutation.",
+        )),
         (Some(_), Some(_)) => {
             let names: Vec<String> = document
                 .operations
@@ -201,32 +201,88 @@ fn single_operation(document: &Valid<ExecutableDocument>) -> Result<&Operation, 
                         .map_or_else(|| "(unnamed)".to_owned(), ToString::to_string)
                 })
                 .collect();
-            Err(format!(
+            Err(Invalid::one(&format!(
                 "The document has {} operations ({}). Send exactly one operation per call, with the fragments it \
                  uses.",
                 names.len(),
                 names.join(", ")
-            ))
+            )))
         }
     }
 }
 
 /// The error for an operation that does not parse or does not validate.
-fn invalid_operation(loaded: &Loaded, endpoint: &str, errors: &apollo_compiler::validation::DiagnosticList) -> String {
-    let mut out = format!("The operation is not valid for `{endpoint}`:\n");
+fn invalid_operation(loaded: &Loaded, endpoint: &str, errors: &apollo_compiler::validation::DiagnosticList) -> Invalid {
+    let mut message = format!("The operation is not valid for `{endpoint}`:\n");
+    let mut problems = Vec::new();
+    let mut unknown_directive = false;
     for diagnostic in errors.iter().take(MAX_ERRORS) {
-        let message = diagnostic.error.to_string();
+        let raw = diagnostic.error.to_string();
         let position = diagnostic.line_column_range().map_or_else(String::new, |range| {
             format!("{}:{} ", range.start.line, range.start.column)
         });
-        let _ = write!(out, "- {position}{}", hints::explain(loaded, &message));
-        out.push('\n');
+        let explained = hints::explain(loaded, &raw);
+        unknown_directive |= explained.contains(UNKNOWN_DIRECTIVE);
+        problems.push(format!("{position}{explained}"));
     }
     if errors.len() > MAX_ERRORS {
-        let _ = writeln!(out, "- and {} more", errors.len() - MAX_ERRORS);
+        problems.push(format!("and {} more", errors.len() - MAX_ERRORS));
     }
-    out.push_str("Use `describe` to check the names and types, then try again.");
-    out
+    for problem in &problems {
+        let _ = writeln!(message, "- {problem}");
+    }
+    message.push_str("Use `describe` to check the names and types, then try again.");
+    Invalid {
+        message,
+        problems,
+        unknown_directive,
+    }
+}
+
+/// How the validator reports a directive that the schema does not define.
+const UNKNOWN_DIRECTIVE: &str = "cannot find directive";
+
+/// Why a text is not one valid query or mutation for a schema.
+#[derive(Debug)]
+pub(crate) struct Invalid {
+    /// The whole error for the calling agent, with what to do next.
+    message: String,
+    /// Each thing that is wrong, without the advice around them.
+    problems: Vec<String>,
+    /// Whether one of the problems is a directive the schema does not have.
+    unknown_directive: bool,
+}
+
+impl Invalid {
+    /// An error with one problem, which is also the whole message.
+    fn one(message: &str) -> Self {
+        Self {
+            message: message.to_owned(),
+            problems: vec![message.trim().to_owned()],
+            unknown_directive: false,
+        }
+    }
+
+    /// Each thing that is wrong, without the advice around them.
+    pub(crate) fn problems(&self) -> &[String] {
+        &self.problems
+    }
+
+    /// What to tell the calling agent about an unknown directive in a saved operation, when there is one. Code
+    /// generators let operations carry directives that only they read, and the user can list those.
+    pub(crate) fn directive_hint(&self) -> Option<&'static str> {
+        self.unknown_directive.then_some(
+            "If a directive the schema does not have is one that only the user's code generator reads, the user can \
+             name it in `client_directives` for this endpoint, and fieldtrip will remove it from saved operations \
+             before they are checked and sent. A misspelled directive has to be fixed in the file.",
+        )
+    }
+}
+
+impl From<Invalid> for String {
+    fn from(invalid: Invalid) -> Self {
+        invalid.message
+    }
 }
 
 /// Walks an operation and adds up its cost.

@@ -95,7 +95,7 @@ async fn attempt(
         ));
     }
     let Ok(response) = serde_json::from_str::<Response>(&reply.body) else {
-        let excerpt: String = reply.body.chars().take(EXCERPT).collect();
+        let excerpt = crate::text::excerpt(&reply.body, EXCERPT);
         return Ok(Err(format!(
             "HTTP {} with a body that is not a GraphQL response: {excerpt}",
             reply.status

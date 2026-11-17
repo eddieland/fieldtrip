@@ -5,7 +5,7 @@ use std::fmt::Write as _;
 
 use serde_json::json;
 
-use crate::support::{Human, Launch, Mcp, MockServer, Response};
+use crate::support::{Human, Launch, Mcp, MockServer, Response, store_config};
 
 /// A GraphQL response whose body is a little over `kilobytes` long.
 fn large_response(kilobytes: usize) -> String {
@@ -17,10 +17,7 @@ fn large_response(kilobytes: usize) -> String {
 /// Starts a server whose `store` endpoint answers from `mock`, reads the fixture schema, never prompts, and has
 /// `settings`.
 fn start(mock: &MockServer, settings: &str) -> Mcp {
-    let config = format!(
-        "[endpoints.store]\nurl = \"{}\"\nschema = \"schema.graphql\"\napproval = \"client\"\n{settings}",
-        mock.url()
-    );
+    let config = store_config(mock, &format!("approval = \"client\"\n{settings}"));
     Launch::new(&config).human(Human::Absent).start()
 }
 
@@ -100,7 +97,7 @@ fn the_output_limit_applies_to_execute_and_describe() {
     let described = mcp.call("describe", &json!({ "endpoint": "store", "name": "Query" }));
 
     for reply in [&executed, &described] {
-        assert!(!reply.is_error, "{}", reply.text);
+        reply.succeeded();
         assert!(reply.text.contains("2000"), "the note names the limit: {}", reply.text);
         assert!(
             reply.text.chars().count() < 2_600,

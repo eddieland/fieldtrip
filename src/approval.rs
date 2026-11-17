@@ -15,12 +15,13 @@ use rmcp::model::{
 use rmcp::service::{ElicitationMode, RequestContext};
 use rmcp::{Peer, RoleServer};
 
+use crate::audit::Verdict;
 use crate::config::{Approval, Endpoint, Mutations};
 use crate::plan::{Kind, Plan, Variables};
 
 /// What came of asking.
 #[derive(Debug)]
-pub(crate) enum Decision {
+enum Decision {
     /// The human accepted.
     Approved,
     /// The human declined.
@@ -131,7 +132,7 @@ pub(crate) fn auto_accepting(client: Option<&Implementation>) -> Option<&'static
 
 /// The refusal for an operation on the endpoint called `name` that would have to be approved by asking `client`,
 /// which accepts without showing the prompt.
-pub(crate) fn unseen(name: &str, client: &str) -> String {
+fn unseen(name: &str, client: &str) -> String {
     format!(
         "Nothing was sent to `{name}`. This MCP client, {client}, accepts fieldtrip's approval prompts without showing \
          them to the user, so asking it would approve the operation unseen, and fieldtrip does not ask it. Tell the \
@@ -144,7 +145,7 @@ pub(crate) fn unseen(name: &str, client: &str) -> String {
 
 /// Why an operation may be sent without asking.
 #[derive(Debug)]
-pub(crate) struct Waiver {
+struct Waiver {
     /// The word the audit log records: `client` or `auto`.
     pub(crate) label: &'static str,
     /// The reason, as a clause: `the cost is within ...`.
@@ -154,7 +155,7 @@ pub(crate) struct Waiver {
 /// Why `plan` may be sent to `endpoint` without asking, when the user's config says so. `None` means ask.
 ///
 /// Both ways out are set by the user in the config file. Mutations are only ever waived by `approval = "client"`.
-pub(crate) fn waiver(endpoint: &Endpoint, plan: &Plan) -> Option<Waiver> {
+fn waiver(endpoint: &Endpoint, plan: &Plan) -> Option<Waiver> {
     if endpoint.approval == Approval::Client {
         return Some(Waiver {
             label: "client",
@@ -198,7 +199,7 @@ pub(crate) fn policy(endpoint: &Endpoint) -> String {
 ///
 /// Everything in it comes from the parsed operation, the variables and the config. It is what will be sent, and
 /// nothing the calling agent wrote about it.
-pub(crate) fn prompt(endpoint: &str, url: &str, plan: &Plan, variables: &Variables) -> String {
+fn prompt(endpoint: &str, url: &str, plan: &Plan, variables: &Variables) -> String {
     let kind = plan.kind.keyword();
     let article = if kind.starts_with(['a', 'e', 'i', 'o', 'u']) {
         "an"
@@ -226,7 +227,7 @@ pub(crate) fn prompt(endpoint: &str, url: &str, plan: &Plan, variables: &Variabl
 }
 
 /// Shows `prompt` to the human and waits for the answer. Only [`Decision::Approved`] allows sending.
-pub(crate) async fn ask(peer: &Peer<RoleServer>, prompt: String) -> Decision {
+async fn ask(peer: &Peer<RoleServer>, prompt: String) -> Decision {
     if !peer.supported_elicitation_modes().contains(&ElicitationMode::Form) {
         return Decision::Unavailable;
     }
@@ -258,15 +259,105 @@ const MAX_OUTSTANDING: usize = 1024;
 ///
 /// From revision 2026-07-28 on, a server asks for input by answering the tool call with an "input required"
 /// result. The client fulfils it and calls again.
-pub(crate) fn asks_by_round_trip(context: &RequestContext<RoleServer>) -> bool {
+fn asks_by_round_trip(context: &RequestContext<RoleServer>) -> bool {
     context
         .protocol_version()
         .is_some_and(|version| version >= ProtocolVersion::V_2026_07_28)
 }
 
+/// What `execute` does next with an operation that is valid and ready to send.
+#[derive(Debug)]
+pub(crate) enum Gate {
+    /// Send it. `unasked` is the sentence that tells the calling agent the human was not asked, or is empty.
+    Open {
+        /// What the audit log records about the approval.
+        verdict: Verdict,
+        /// Why no prompt was shown, as a sentence for the tool result. Empty when the human accepted a prompt.
+        unasked: String,
+    },
+    /// On a round-trip revision, the human has not been asked yet. The call ends with this result, which asks.
+    Ask(InputRequiredResult),
+    /// Nothing is sent.
+    Shut {
+        /// What the audit log records about the refusal.
+        verdict: Verdict,
+        /// The error the calling agent sees.
+        refusal: String,
+    },
+}
+
+/// What came back with a call of `execute` on a round-trip revision: nothing on the first call, and the ticket and
+/// the human's answer on the retry.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Returned<'call> {
+    /// The request state, which is the ticket of the prompt being answered.
+    pub(crate) state: Option<&'call str>,
+    /// The answers to the input requests of the first call.
+    pub(crate) responses: Option<&'call InputResponses>,
+}
+
+/// Decides whether `plan` may be sent to the endpoint called `name`, asking the human when the config calls for it.
+///
+/// This is the only way to a [`Gate::Open`]: the user's config waives the prompt, or the human accepted it. Every
+/// other path ends in a refusal or, on a round-trip revision, in the question itself.
+pub(crate) async fn gate(
+    outstanding: &Outstanding,
+    context: &RequestContext<RoleServer>,
+    name: &str,
+    endpoint: &Endpoint,
+    plan: &Plan,
+    variables: &Variables,
+    returned: Returned<'_>,
+) -> Gate {
+    if let Some(waiver) = waiver(endpoint, plan) {
+        return Gate::Open {
+            unasked: format!(" The user was not asked: {}.", waiver.reason),
+            verdict: Verdict {
+                approval: waiver.label,
+                reason: Some(waiver.reason),
+            },
+        };
+    }
+    if let Some(client) = auto_accepting(context.client_info().as_ref()) {
+        tracing::warn!("refused an operation on `{name}`: {client} would accept the prompt unseen");
+        return Gate::Shut {
+            verdict: Verdict {
+                approval: "unavailable",
+                reason: Some(format!("{client} accepts approval prompts without showing them")),
+            },
+            refusal: unseen(name, client),
+        };
+    }
+    let prompt = prompt(name, &endpoint.shown_url, plan, variables);
+    let decision = if asks_by_round_trip(context) {
+        let operation = Operation {
+            endpoint: name,
+            text: &plan.text,
+            variables,
+        };
+        match outstanding.round(context, &operation, prompt, returned.state, returned.responses) {
+            Round::Ask(question) => return Gate::Ask(question),
+            Round::Decided(decision) => decision,
+        }
+    } else {
+        ask(&context.peer, prompt).await
+    };
+    let verdict = Verdict {
+        approval: decision.label(),
+        reason: decision.reason(),
+    };
+    match decision.into_result(name) {
+        Ok(()) => Gate::Open {
+            verdict,
+            unasked: String::new(),
+        },
+        Err(refusal) => Gate::Shut { verdict, refusal },
+    }
+}
+
 /// What one call of `execute` does about approval on a round-trip revision.
 #[derive(Debug)]
-pub(crate) enum Round {
+enum Round {
     /// The human has not been asked yet. This result asks them, and the call ends here.
     Ask(InputRequiredResult),
     /// The call came back with an answer.
@@ -292,7 +383,7 @@ impl Outstanding {
     ///
     /// With no `responses` this is the first call, and the result asks the human. With `responses` it is the
     /// retry, and the decision is whatever the human answered, provided `state` is the ticket for this operation.
-    pub(crate) fn round(
+    fn round(
         &self,
         context: &RequestContext<RoleServer>,
         operation: &Operation<'_>,
@@ -374,7 +465,7 @@ impl Outstanding {
 
 /// What an approval covers: where the operation goes, its canonical text, and its variables.
 #[derive(Debug, Clone, Copy)]
-pub(crate) struct Operation<'call> {
+struct Operation<'call> {
     /// The endpoint's name.
     pub(crate) endpoint: &'call str,
     /// The operation in canonical form, as it is shown and sent.

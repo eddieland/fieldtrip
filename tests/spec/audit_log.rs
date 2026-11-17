@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use rmcp::model::{CallToolResponse, InputResponses};
 use serde_json::{Value, json};
 
-use crate::support::{Human, Launch, Mcp, MockServer, Response, Retry, SdkClient, sdk_reply};
+use crate::support::{Human, Launch, Mcp, MockServer, Response, Retry, SdkClient, sdk_reply, store_config};
 
 /// A value the `env` plug sends, which the calling agent might paste into a variable.
 const SECRET: &str = "env-audit-s3cret-77";
@@ -102,7 +102,7 @@ fn an_accepted_query_is_recorded_with_its_outcome() {
     let mut mcp = start(&config(&mock, ""), Human::Accepts);
 
     let reply = mcp.call("execute", &arguments(QUERY, &json!({ "text": "lamp" })));
-    assert!(!reply.is_error, "{}", reply.text);
+    reply.succeeded();
 
     let entry = only_line(&mcp);
     assert_describes_the_operation(&entry, "query", "Find");
@@ -126,7 +126,7 @@ fn a_declined_attempt_is_recorded_with_the_reason() {
     let mut mcp = start(&config(&mock, ""), Human::Declines);
 
     let reply = mcp.call("execute", &arguments(QUERY, &json!({ "text": "lamp" })));
-    assert!(reply.is_error, "{}", reply.text);
+    reply.failed();
     assert_eq!(mock.requests().len(), 0, "nothing was sent");
 
     let entry = only_line(&mcp);
@@ -152,7 +152,7 @@ fn every_refusal_is_recorded_under_its_own_name() {
         let mut mcp = start(&config(&mock, ""), human);
 
         let reply = mcp.call("execute", &arguments(QUERY, &json!({ "text": "lamp" })));
-        assert!(reply.is_error, "{}", reply.text);
+        reply.failed();
 
         let entry = only_line(&mcp);
         assert_eq!(entry["approval"], approval, "{human:?}: {entry}");
@@ -167,7 +167,7 @@ fn a_denied_mutation_is_recorded() {
     let mut mcp = start(&config(&mock, "mutations = \"deny\"\n"), Human::Accepts);
 
     let reply = mcp.call("execute", &arguments(MUTATION, &json!({})));
-    assert!(reply.is_error, "{}", reply.text);
+    reply.failed();
 
     let entry = only_line(&mcp);
     assert_describes_the_operation(&entry, "mutation", "Remove");
@@ -187,7 +187,7 @@ fn an_operation_sent_without_asking_says_why() {
     let first = mock();
     let mut mcp = start(&config(&first, "auto_approve_cost = 1000\n"), Human::Absent);
     let reply = mcp.call("execute", &arguments(QUERY, &json!({ "text": "lamp" })));
-    assert!(!reply.is_error, "{}", reply.text);
+    reply.succeeded();
     let entry = only_line(&mcp);
     assert_eq!(entry["approval"], "auto", "{entry}");
     assert!(
@@ -201,7 +201,7 @@ fn an_operation_sent_without_asking_says_why() {
     let other = mock();
     let mut mcp = start(&config(&other, "approval = \"client\"\n"), Human::Absent);
     let reply = mcp.call("execute", &arguments(MUTATION, &json!({})));
-    assert!(!reply.is_error, "{}", reply.text);
+    reply.succeeded();
     let entry = only_line(&mcp);
     assert_eq!(entry["approval"], "client", "{entry}");
     assert_eq!(entry["kind"], "mutation", "{entry}");
@@ -216,7 +216,7 @@ fn a_request_that_gets_no_answer_is_recorded_with_the_error() {
     let mut mcp = start(config, Human::Absent);
 
     let reply = mcp.call("execute", &arguments(QUERY, &json!({ "text": "lamp" })));
-    assert!(reply.is_error, "{}", reply.text);
+    reply.failed();
 
     let entry = only_line(&mcp);
     assert_eq!(entry["approval"], "client", "{entry}");
@@ -233,7 +233,7 @@ fn an_operation_that_is_not_valid_is_not_an_attempt() {
     let mut mcp = start(&config(&mock, ""), Human::Accepts);
 
     let reply = mcp.call("execute", &arguments("{ nope }", &json!({})));
-    assert!(reply.is_error, "{}", reply.text);
+    reply.failed();
     let reply = mcp.call("execute", &arguments(QUERY, &json!({})));
     assert!(reply.is_error, "a missing variable is refused: {}", reply.text);
 
@@ -251,9 +251,9 @@ fn a_secret_in_a_variable_is_redacted_and_header_values_are_never_recorded() {
         "execute",
         &arguments(QUERY, &json!({ "text": format!("key is {SECRET}") })),
     );
-    assert!(!reply.is_error, "{}", reply.text);
+    reply.succeeded();
     let reply = mcp.call("execute", &arguments(QUERY, &json!({ "text": SECRET })));
-    assert!(!reply.is_error, "{}", reply.text);
+    reply.succeeded();
 
     let written = std::fs::read_to_string(mcp.dir().join("audit.jsonl")).expect("read the audit log");
     assert!(!written.contains(SECRET), "the secret is not in the log:\n{written}");
@@ -274,7 +274,7 @@ fn audit_variables_off_leaves_the_variables_out() {
     let mut mcp = start(&config(&mock, "audit_variables = false\n"), Human::Accepts);
 
     let reply = mcp.call("execute", &arguments(QUERY, &json!({ "text": "a private search" })));
-    assert!(!reply.is_error, "{}", reply.text);
+    reply.succeeded();
 
     let entry = only_line(&mcp);
     assert!(entry.get("variables").is_none(), "{entry}");
@@ -294,7 +294,7 @@ fn audit_variables_comes_from_a_template() {
     let mut mcp = start(&config, Human::Accepts);
 
     let reply = mcp.call("execute", &arguments(QUERY, &json!({ "text": "a private search" })));
-    assert!(!reply.is_error, "{}", reply.text);
+    reply.succeeded();
     let entry = only_line(&mcp);
     assert!(entry.get("variables").is_none(), "{entry}");
 }
@@ -305,7 +305,7 @@ fn lines_are_appended_across_sessions() {
     let config = config(&mock, "");
     let mut mcp = start(&config, Human::Accepts);
     let reply = mcp.call("execute", &arguments(QUERY, &json!({ "text": "one" })));
-    assert!(!reply.is_error, "{}", reply.text);
+    reply.succeeded();
     let path = mcp.dir().join("audit.jsonl");
     let earlier = std::fs::read_to_string(&path).expect("read the audit log");
 
@@ -316,7 +316,7 @@ fn lines_are_appended_across_sessions() {
         .human(Human::Accepts);
     let mut mcp = second.start();
     let reply = mcp.call("execute", &arguments(QUERY, &json!({ "text": "two" })));
-    assert!(!reply.is_error, "{}", reply.text);
+    reply.succeeded();
 
     let entries = lines(&mcp.dir().join("audit.jsonl"));
     assert_eq!(entries.len(), 2, "the earlier line is kept: {entries:#?}");
@@ -331,17 +331,14 @@ fn lines_are_appended_across_sessions() {
 #[test]
 fn without_the_setting_no_file_is_created() {
     let mock = mock();
-    let config = format!(
-        "[endpoints.store]\nurl = \"{}\"\nschema = \"schema.graphql\"\n",
-        mock.url()
-    );
+    let config = store_config(&mock, "");
     let mut mcp = start(&config, Human::Accepts);
     let before = files(mcp.dir());
 
     let reply = mcp.call("execute", &arguments(QUERY, &json!({ "text": "lamp" })));
-    assert!(!reply.is_error, "{}", reply.text);
+    reply.succeeded();
     let reply = mcp.call("execute", &arguments(MUTATION, &json!({})));
-    assert!(!reply.is_error, "{}", reply.text);
+    reply.succeeded();
 
     assert_eq!(files(mcp.dir()), before, "no file was written anywhere");
 }
@@ -378,7 +375,7 @@ fn the_file_and_its_folders_are_created_in_the_home_directory_for_the_user_alone
         .start();
 
     let reply = mcp.call("execute", &arguments(QUERY, &json!({ "text": "lamp" })));
-    assert!(!reply.is_error, "{}", reply.text);
+    reply.succeeded();
 
     let path = home.path().join("state").join("fieldtrip").join("audit.jsonl");
     assert_eq!(lines(&path).len(), 1);

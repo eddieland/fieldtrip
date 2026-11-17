@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use serde_json::json;
 
-use crate::support::{Human, Launch, Mcp, MockServer, Response};
+use crate::support::{Human, Launch, Mcp, MockServer, Response, store_config};
 
 /// A value the `env` plug sends, which a server could echo back in a header.
 const SECRET: &str = "env-sekrit-0005";
@@ -26,10 +26,7 @@ fn mock_with_headers(body: &serde_json::Value, headers: &[(&str, &str)]) -> Mock
 
 /// Starts a server whose `store` endpoint reads the fixture schema, has `settings`, and never prompts.
 fn start(mock: &MockServer, settings: &str) -> Mcp {
-    let config = format!(
-        "[endpoints.store]\nurl = \"{}\"\nschema = \"schema.graphql\"\napproval = \"client\"\n{settings}",
-        mock.url()
-    );
+    let config = store_config(mock, &format!("approval = \"client\"\n{settings}"));
     Launch::new(&config)
         .env("FIELDTRIP_SPEC_SECRET", SECRET)
         .human(Human::Absent)
@@ -105,7 +102,7 @@ fn errors_come_before_data() {
 
     let reply = execute(&mut mcp);
 
-    assert!(!reply.is_error, "{}", reply.text);
+    reply.succeeded();
     let parts: Vec<&str> = reply
         .text
         .lines()
@@ -154,7 +151,7 @@ fn a_header_that_is_not_configured_is_not_shown() {
 
     let reply = execute(&mut mcp);
 
-    assert!(!reply.is_error, "{}", reply.text);
+    reply.succeeded();
     assert_eq!(
         after_timing(status_line(&reply.text), 200),
         Some(" · X-Request-ID req-abc123"),
@@ -178,7 +175,7 @@ fn a_header_that_echoes_a_secret_is_redacted() {
 
     let reply = execute(&mut mcp);
 
-    assert!(!reply.is_error, "{}", reply.text);
+    reply.succeeded();
     assert!(!reply.text.contains(SECRET), "the secret is not shown: {}", reply.text);
     assert_eq!(
         after_timing(status_line(&reply.text), 200),
@@ -293,7 +290,7 @@ fn a_connection_error_says_how_long_fieldtrip_waited() {
 
     let reply = execute(&mut mcp);
 
-    assert!(reply.is_error, "{}", reply.text);
+    reply.failed();
     assert!(
         reply.text.contains("failed after ") && reply.text.contains(" ms: "),
         "says how long it waited: {}",
@@ -311,7 +308,7 @@ fn a_timeout_says_how_long_fieldtrip_waited() {
 
     let reply = execute(&mut mcp);
 
-    assert!(reply.is_error, "{}", reply.text);
+    reply.failed();
     let waited = reply
         .text
         .split_once("fieldtrip waited ")

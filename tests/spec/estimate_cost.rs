@@ -2,14 +2,11 @@
 
 use serde_json::{Value, json};
 
-use crate::support::{Mcp, MockServer, Reply};
+use crate::support::{Mcp, MockServer, Reply, store_config};
 
 /// Starts a server whose `store` endpoint reads the fixture schema, with `extra` lines added to the endpoint.
 fn start(mock: &MockServer, extra: &str) -> Mcp {
-    Mcp::start(&format!(
-        "[endpoints.store]\nurl = \"{}\"\nschema = \"schema.graphql\"\n{extra}",
-        mock.url()
-    ))
+    Mcp::start(&store_config(mock, extra))
 }
 
 /// Estimates `operation` on the fixture endpoint.

@@ -210,20 +210,25 @@ struct RawConfig {
     audit_log: Option<PathBuf>,
     result_ttl: Option<u64>,
     #[serde(default)]
-    endpoints: BTreeMap<String, RawEndpoint>,
+    endpoints: BTreeMap<String, RawTable>,
     #[serde(default)]
-    templates: BTreeMap<String, RawTemplate>,
+    templates: BTreeMap<String, RawTable>,
 }
 
-/// One `[endpoints.NAME]` table as written.
+/// One `[endpoints.NAME]` or `[templates.NAME]` table as written.
+///
+/// Both tables are read into this one shape, so a setting is listed once. The settings a template cannot hold are
+/// read from it too, so that the error can say why instead of only that the key is unknown.
 #[derive(Default, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct RawEndpoint {
-    url: String,
+struct RawTable {
+    // Only an endpoint can set these. `Template::from_raw` refuses each of them.
+    url: Option<String>,
     description: Option<String>,
     template: Option<String>,
     approval: Option<String>,
     auto_approve_cost: Option<u64>,
+    // An endpoint takes each of these from its template when it leaves it out.
     mutations: Option<String>,
     schema: Option<PathBuf>,
     schema_ttl: Option<u64>,
@@ -242,84 +247,6 @@ struct RawEndpoint {
     max_output_chars: Option<u64>,
     max_inline_chars: Option<u64>,
     audit_variables: Option<bool>,
-}
-
-/// One `[templates.NAME]` table as written.
-///
-/// The settings a template cannot hold are read too, so that the error can say why instead of only that the key
-/// is unknown.
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct RawTemplate {
-    url: Option<toml::Value>,
-    description: Option<toml::Value>,
-    template: Option<toml::Value>,
-    approval: Option<toml::Value>,
-    auto_approve_cost: Option<toml::Value>,
-    mutations: Option<String>,
-    schema: Option<PathBuf>,
-    schema_ttl: Option<u64>,
-    #[serde(default)]
-    headers: BTreeMap<String, toml::Value>,
-    assumed_list_size: Option<u64>,
-    costs: Option<PathBuf>,
-    glossary: Option<PathBuf>,
-    operations: Option<PathBuf>,
-    fragments: Option<PathBuf>,
-    client_directives: Option<Vec<String>>,
-    timeout: Option<u64>,
-    response_headers: Option<Vec<String>>,
-    max_schema_bytes: Option<u64>,
-    max_response_bytes: Option<u64>,
-    max_output_chars: Option<u64>,
-    max_inline_chars: Option<u64>,
-    audit_variables: Option<bool>,
-}
-
-/// The settings an endpoint can take from a template. serde cannot flatten them into a table that denies
-/// unknown keys, so both tables list them and hand them over in this.
-#[derive(Default)]
-struct RawShared {
-    schema: Option<PathBuf>,
-    schema_ttl: Option<u64>,
-    headers: BTreeMap<String, toml::Value>,
-    assumed_list_size: Option<u64>,
-    costs: Option<PathBuf>,
-    glossary: Option<PathBuf>,
-    operations: Option<PathBuf>,
-    fragments: Option<PathBuf>,
-    client_directives: Option<Vec<String>>,
-    timeout: Option<u64>,
-    response_headers: Option<Vec<String>>,
-    max_schema_bytes: Option<u64>,
-    max_response_bytes: Option<u64>,
-    max_output_chars: Option<u64>,
-    max_inline_chars: Option<u64>,
-    audit_variables: Option<bool>,
-}
-
-/// Moves the shared settings out of a raw endpoint or template.
-macro_rules! shared {
-    ($raw:expr) => {
-        RawShared {
-            schema: $raw.schema,
-            schema_ttl: $raw.schema_ttl,
-            headers: $raw.headers,
-            assumed_list_size: $raw.assumed_list_size,
-            costs: $raw.costs,
-            glossary: $raw.glossary,
-            operations: $raw.operations,
-            fragments: $raw.fragments,
-            client_directives: $raw.client_directives,
-            timeout: $raw.timeout,
-            response_headers: $raw.response_headers,
-            max_schema_bytes: $raw.max_schema_bytes,
-            max_response_bytes: $raw.max_response_bytes,
-            max_output_chars: $raw.max_output_chars,
-            max_inline_chars: $raw.max_inline_chars,
-            audit_variables: $raw.audit_variables,
-        }
-    };
 }
 
 /// A template, checked and ready to be applied to the endpoints that name it.
@@ -380,10 +307,10 @@ impl Config {
 
     /// Builds the configuration for `--url`, with an optional `--schema`: one endpoint called `default`.
     fn from_flags(url: &str, schema: Option<&PathBuf>) -> Result<Self, ConfigError> {
-        let raw = RawEndpoint {
-            url: url.to_owned(),
+        let raw = RawTable {
+            url: Some(url.to_owned()),
             schema: schema.cloned(),
-            ..RawEndpoint::default()
+            ..RawTable::default()
         };
         // A relative `--schema` is relative to where the server was started, as any command-line path is.
         let base = std::env::current_dir().unwrap_or_else(|_error| PathBuf::from("."));
@@ -448,7 +375,7 @@ impl Config {
 
 impl Template {
     /// Checks one template. Paths in it are resolved against `base`, the config file's directory.
-    fn from_raw(raw: RawTemplate, base: &Path) -> Result<Self, String> {
+    fn from_raw(raw: RawTable, base: &Path) -> Result<Self, String> {
         let never_shared = [
             ("url", raw.url.is_some(), "each endpoint names its own"),
             (
@@ -476,20 +403,19 @@ impl Template {
             return Err(format!("`{key}` cannot be set in a template: {why}"));
         }
         let mutations = mutations(raw.mutations.as_deref())?;
-        let shared = shared!(raw);
-        let operations_path = shared.operations.map(|operations| resolve(&operations, base));
-        let fragments_path = shared.fragments.map(|fragments| resolve(&fragments, base));
-        let client_directives = client_directives(shared.client_directives)?;
+        let operations_path = raw.operations.map(|operations| resolve(&operations, base));
+        let fragments_path = raw.fragments.map(|fragments| resolve(&fragments, base));
+        let client_directives = client_directives(raw.client_directives)?;
         Ok(Self {
-            schema: schema_path(shared.schema.as_deref(), base)?,
-            schema_ttl: shared.schema_ttl.map(Duration::from_secs),
-            headers: headers(shared.headers, base)?,
-            assumed_list_size: assumed_list_size(shared.assumed_list_size)?,
-            costs: shared
+            schema: schema_path(raw.schema.as_deref(), base)?,
+            schema_ttl: raw.schema_ttl.map(Duration::from_secs),
+            headers: headers(raw.headers, base)?,
+            assumed_list_size: assumed_list_size(raw.assumed_list_size)?,
+            costs: raw
                 .costs
                 .map(|costs| CostMap::load(&resolve(&costs, base)).map(Arc::new))
                 .transpose()?,
-            glossary: shared
+            glossary: raw
                 .glossary
                 .map(|glossary| Glossary::load(&resolve(&glossary, base)).map(Arc::new))
                 .transpose()?,
@@ -507,14 +433,14 @@ impl Template {
             operations_path,
             fragments_path,
             client_directives,
-            timeout: timeout(shared.timeout)?,
-            response_headers: response_headers(shared.response_headers)?,
+            timeout: timeout(raw.timeout)?,
+            response_headers: response_headers(raw.response_headers)?,
             mutations,
-            max_schema_bytes: byte_limit("max_schema_bytes", shared.max_schema_bytes)?,
-            max_response_bytes: byte_limit("max_response_bytes", shared.max_response_bytes)?,
-            max_output_chars: output_limit("max_output_chars", shared.max_output_chars)?,
-            max_inline_chars: output_limit("max_inline_chars", shared.max_inline_chars)?,
-            audit_variables: shared.audit_variables,
+            max_schema_bytes: byte_limit("max_schema_bytes", raw.max_schema_bytes)?,
+            max_response_bytes: byte_limit("max_response_bytes", raw.max_response_bytes)?,
+            max_output_chars: output_limit("max_output_chars", raw.max_output_chars)?,
+            max_inline_chars: output_limit("max_inline_chars", raw.max_inline_chars)?,
+            audit_variables: raw.audit_variables,
         })
     }
 }
@@ -528,8 +454,12 @@ impl Endpoint {
 
     /// Validates one endpoint and applies its template. A relative path is resolved against `base`, the config
     /// file's directory.
-    fn from_raw(raw: RawEndpoint, base: &Path, templates: &BTreeMap<String, Template>) -> Result<Self, String> {
-        let shown_url = check_url(&raw.url)?;
+    fn from_raw(raw: RawTable, base: &Path, templates: &BTreeMap<String, Template>) -> Result<Self, String> {
+        let url = raw.url.ok_or_else(|| {
+            "`url` is missing. Every endpoint needs one, such as `url = \"https://api.example.com/graphql\"`."
+                .to_owned()
+        })?;
+        let shown_url = check_url(&url)?;
         let template = match &raw.template {
             None => &Template::default(),
             Some(name) => templates.get(name).ok_or_else(|| {
@@ -556,23 +486,10 @@ impl Endpoint {
                     .to_owned(),
             );
         }
-        // A template's deny holds: an endpoint can only make `mutations` stricter.
-        let mutations = match (template.mutations, mutations(raw.mutations.as_deref())?) {
-            (Some(Mutations::Deny), Some(Mutations::Prompt)) => {
-                return Err(format!(
-                    "`mutations = \"prompt\"` cannot loosen template `{}`, which sets `mutations = \"deny\"`. An \
-                     endpoint can only make it stricter. Remove the line to keep mutations denied, or define the \
-                     endpoint that may write without this template.",
-                    raw.template.as_deref().unwrap_or_default()
-                ));
-            }
-            (_, Some(own)) => own,
-            (inherited, None) => inherited.unwrap_or(Mutations::Prompt),
-        };
-        let shared = shared!(raw);
+        let mutations = inherited_mutations(template, raw.template.as_deref(), raw.mutations.as_deref())?;
 
         // The endpoint's own headers win over the template's, compared ignoring case as HTTP does.
-        let mut headers = headers(shared.headers, base)?;
+        let mut headers = headers(raw.headers, base)?;
         let own: Vec<String> = headers.iter().map(|header| header.wire_name().to_owned()).collect();
         headers.extend(
             template
@@ -583,14 +500,14 @@ impl Endpoint {
         );
         headers.sort_by(|left, right| left.name.cmp(&right.name));
 
-        let costs = match &shared.costs {
+        let costs = match &raw.costs {
             Some(path) => Arc::new(CostMap::load(&resolve(path, base))?),
             None => template.costs.clone().unwrap_or_default(),
         };
         let operations = library(
-            shared.operations.as_deref(),
-            shared.fragments.as_deref(),
-            client_directives(shared.client_directives)?,
+            raw.operations.as_deref(),
+            raw.fragments.as_deref(),
+            client_directives(raw.client_directives)?,
             template,
             base,
         )?;
@@ -598,40 +515,40 @@ impl Endpoint {
             shown_url,
             description: raw.description.as_deref().map(one_line).filter(|text| !text.is_empty()),
             template: raw.template,
-            schema: schema_path(shared.schema.as_deref(), base)?.or_else(|| template.schema.clone()),
-            schema_ttl: shared
+            schema: schema_path(raw.schema.as_deref(), base)?.or_else(|| template.schema.clone()),
+            schema_ttl: raw
                 .schema_ttl
                 .map(Duration::from_secs)
                 .or(template.schema_ttl)
                 .unwrap_or(DEFAULT_SCHEMA_TTL),
             headers,
-            assumed_list_size: assumed_list_size(shared.assumed_list_size)?
+            assumed_list_size: assumed_list_size(raw.assumed_list_size)?
                 .or(template.assumed_list_size)
                 .unwrap_or(DEFAULT_ASSUMED_LIST_SIZE),
             costs,
-            glossary: glossary(shared.glossary.as_deref(), template, base)?,
+            glossary: glossary(raw.glossary.as_deref(), template, base)?,
             operations,
-            timeout: timeout(shared.timeout)?.or(template.timeout).unwrap_or(DEFAULT_TIMEOUT),
-            response_headers: response_headers(shared.response_headers)?
+            timeout: timeout(raw.timeout)?.or(template.timeout).unwrap_or(DEFAULT_TIMEOUT),
+            response_headers: response_headers(raw.response_headers)?
                 .or_else(|| template.response_headers.clone())
                 .unwrap_or_default(),
-            max_schema_bytes: byte_limit("max_schema_bytes", shared.max_schema_bytes)?
+            max_schema_bytes: byte_limit("max_schema_bytes", raw.max_schema_bytes)?
                 .or(template.max_schema_bytes)
                 .unwrap_or(DEFAULT_MAX_SCHEMA_BYTES),
-            max_response_bytes: byte_limit("max_response_bytes", shared.max_response_bytes)?
+            max_response_bytes: byte_limit("max_response_bytes", raw.max_response_bytes)?
                 .or(template.max_response_bytes)
                 .unwrap_or(DEFAULT_MAX_RESPONSE_BYTES),
-            max_output_chars: output_limit("max_output_chars", shared.max_output_chars)?
+            max_output_chars: output_limit("max_output_chars", raw.max_output_chars)?
                 .or(template.max_output_chars)
                 .unwrap_or(DEFAULT_MAX_OUTPUT_CHARS),
-            max_inline_chars: output_limit("max_inline_chars", shared.max_inline_chars)?
+            max_inline_chars: output_limit("max_inline_chars", raw.max_inline_chars)?
                 .or(template.max_inline_chars)
                 .unwrap_or(DEFAULT_MAX_INLINE_CHARS),
-            audit_variables: shared.audit_variables.or(template.audit_variables).unwrap_or(true),
+            audit_variables: raw.audit_variables.or(template.audit_variables).unwrap_or(true),
             approval,
             auto_approve_cost: raw.auto_approve_cost,
             mutations,
-            url: raw.url,
+            url,
         })
     }
 }
@@ -641,6 +558,26 @@ fn glossary(own: Option<&Path>, template: &Template, base: &Path) -> Result<Arc<
     match own {
         Some(path) => Ok(Arc::new(Glossary::load(&resolve(path, base))?)),
         None => Ok(template.glossary.clone().unwrap_or_default()),
+    }
+}
+
+/// An endpoint's `mutations`: its `own` setting, or else that of `template`, which is called `template_name`.
+///
+/// A template's deny holds: an endpoint can only make `mutations` stricter.
+fn inherited_mutations(
+    template: &Template,
+    template_name: Option<&str>,
+    own: Option<&str>,
+) -> Result<Mutations, String> {
+    match (template.mutations, mutations(own)?) {
+        (Some(Mutations::Deny), Some(Mutations::Prompt)) => Err(format!(
+            "`mutations = \"prompt\"` cannot loosen template `{}`, which sets `mutations = \"deny\"`. An endpoint can \
+             only make it stricter. Remove the line to keep mutations denied, or define the endpoint that may write \
+             without this template.",
+            template_name.unwrap_or_default()
+        )),
+        (_, Some(own)) => Ok(own),
+        (inherited, None) => Ok(inherited.unwrap_or(Mutations::Prompt)),
     }
 }
 

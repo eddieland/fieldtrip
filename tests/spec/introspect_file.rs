@@ -2,14 +2,11 @@
 
 use serde_json::json;
 
-use crate::support::{Mcp, MockServer};
+use crate::support::{Mcp, MockServer, store_config};
 
 /// A config whose only endpoint reads the fixture schema from a file and points at `mock`.
 fn config(mock: &MockServer) -> String {
-    format!(
-        "[endpoints.store]\nurl = \"{}\"\nschema = \"schema.graphql\"\n",
-        mock.url()
-    )
+    store_config(mock, "")
 }
 
 #[test]

@@ -3,7 +3,7 @@
 
 use serde_json::{Value, json};
 
-use crate::support::{Human, Launch, Mcp, MockServer, Reply};
+use crate::support::{Human, Launch, Mcp, MockServer, Reply, store_config};
 
 /// A response with a viewer, three products and one error, written with `errors` last.
 fn response() -> Value {
@@ -22,10 +22,7 @@ fn response() -> Value {
 
 /// Starts a server whose `store` endpoint answers with `body` and asks a human who accepts.
 fn start(mock: &MockServer) -> Mcp {
-    let config = format!(
-        "[endpoints.store]\nurl = \"{}\"\nschema = \"schema.graphql\"\n",
-        mock.url()
-    );
+    let config = store_config(mock, "");
     Launch::new(&config).human(Human::Accepts).start()
 }
 
@@ -67,7 +64,7 @@ fn a_path_picks_one_value_and_errors_come_first() {
 
     let reply = execute(&mut mcp, "data.viewer.name");
 
-    assert!(!reply.is_error, "{}", reply.text);
+    reply.succeeded();
     let (lines, json) = lines_and_json(&reply);
     assert_eq!(lines, ["Selected `data.viewer.name`."]);
     assert_eq!(json, json!({ "errors": response()["errors"], "selected": "Ada" }));

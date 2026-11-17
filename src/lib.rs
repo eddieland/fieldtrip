@@ -15,6 +15,7 @@ mod headers;
 mod hints;
 mod http;
 mod library;
+mod listing;
 mod plan;
 mod response;
 mod results;
@@ -23,6 +24,7 @@ mod select;
 mod server;
 mod shape;
 mod suggest;
+mod text;
 
 use std::ffi::OsString;
 use std::process::ExitCode;

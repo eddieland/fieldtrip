@@ -5,7 +5,7 @@
 
 use serde_json::{Value, json};
 
-use crate::support::{Human, Launch, Mcp, MockServer, SdkClient};
+use crate::support::{Human, Launch, Mcp, MockServer, SdkClient, store_config};
 
 /// A saved query that fits the fixture schema, with a two-line description.
 const VALID: &str = "# Look up a user's name and email by ID.\n\
@@ -24,10 +24,7 @@ const CANONICAL: &str = "query UserById($id: ID!) {\n  user(id: $id) {\n    name
 
 /// The `store` endpoint with `settings` and the operations in `operations/`, sending operations to `mock`.
 fn config(mock: &MockServer, settings: &str) -> String {
-    format!(
-        "[endpoints.store]\nurl = \"{}\"\nschema = \"schema.graphql\"\noperations = \"operations\"\n{settings}",
-        mock.url()
-    )
+    store_config(mock, &format!("operations = \"operations\"\n{settings}"))
 }
 
 /// A launch of `config` with the valid, the stale and the mutation operations saved.
@@ -51,7 +48,7 @@ fn list_operations_shows_each_with_the_broken_one_marked() {
 
     let reply = mcp.call("list_operations", &json!({ "endpoint": "store" }));
 
-    assert!(!reply.is_error, "{}", reply.text);
+    reply.succeeded();
     let text = &reply.text;
     assert!(text.starts_with("3 saved operations for `store`"), "{text}");
     assert!(text.contains("UserById (query)"), "{text}");
@@ -102,7 +99,7 @@ fn a_query_narrows_the_list() {
     );
 
     let reply = mcp.call("list_operations", &json!({ "endpoint": "store", "query": "refund" }));
-    assert!(!reply.is_error, "{}", reply.text);
+    reply.succeeded();
     assert!(reply.text.contains("No saved operation"), "{}", reply.text);
     assert!(
         reply.text.contains("`UserById`"),
@@ -121,7 +118,7 @@ fn execute_by_name_sends_the_canonical_text_after_approval() {
         &json!({ "endpoint": "store", "operation_name": "UserById", "variables": { "id": "u-1" } }),
     );
 
-    assert!(!reply.is_error, "{}", reply.text);
+    reply.succeeded();
     assert!(reply.text.contains("Sent query `UserById`"), "{}", reply.text);
     let prompts = mcp.prompts();
     assert_eq!(prompts.len(), 1, "the human is asked as for any query");
@@ -148,7 +145,7 @@ fn execute_by_name_works_on_revision_2026_07_28() {
         &json!({ "endpoint": "store", "operation_name": "UserById", "variables": { "id": "u-1" } }),
     );
 
-    assert!(!reply.is_error, "{}", reply.text);
+    reply.succeeded();
     let prompts = client.prompts();
     assert_eq!(prompts.len(), 1, "the human is asked");
     assert!(prompts[0].contains(CANONICAL), "{}", prompts[0]);
@@ -165,7 +162,7 @@ fn a_broken_operation_is_never_sent() {
         &json!({ "endpoint": "store", "operation_name": "OrderById", "variables": { "id": "o-1" } }),
     );
 
-    assert!(reply.is_error, "{}", reply.text);
+    reply.failed();
     assert!(reply.text.contains("saved operation `OrderById`"), "{}", reply.text);
     assert!(reply.text.contains("no longer validates"), "{}", reply.text);
     assert!(reply.text.contains("order.graphql"), "names the file: {}", reply.text);
@@ -182,7 +179,7 @@ fn estimate_cost_takes_a_name_too() {
         &json!({ "endpoint": "store", "operation_name": "UserById", "variables": { "id": "u-1" } }),
     );
 
-    assert!(!reply.is_error, "{}", reply.text);
+    reply.succeeded();
     assert!(reply.text.contains("Valid query `UserById`"), "{}", reply.text);
 }
 
@@ -195,15 +192,15 @@ fn a_name_and_an_operation_are_exclusive_and_one_is_needed() {
         "execute",
         &json!({ "endpoint": "store", "operation_name": "UserById", "operation": "{ viewer { name } }" }),
     );
-    assert!(both.is_error, "{}", both.text);
+    both.failed();
     assert!(both.text.contains("not both"), "{}", both.text);
 
     let neither = mcp.call("execute", &json!({ "endpoint": "store" }));
-    assert!(neither.is_error, "{}", neither.text);
+    neither.failed();
     assert!(neither.text.contains("`operation_name`"), "{}", neither.text);
 
     let unknown = mcp.call("execute", &json!({ "endpoint": "store", "operation_name": "UserByID" }));
-    assert!(unknown.is_error, "{}", unknown.text);
+    unknown.failed();
     assert!(unknown.text.contains("Nearest names: `UserById`"), "{}", unknown.text);
 
     assert_eq!(mcp.prompts().len(), 0, "the human is not asked");
@@ -224,7 +221,7 @@ fn a_denied_mutation_is_refused_by_name_too() {
         "execute",
         &json!({ "endpoint": "store", "operation_name": "CancelOrder", "variables": { "id": "o-1" } }),
     );
-    assert!(reply.is_error, "{}", reply.text);
+    reply.failed();
     assert!(reply.text.contains("`mutations = \"deny\"`"), "{}", reply.text);
     assert_eq!(mcp.prompts().len(), 0, "the human is not asked");
     assert_eq!(mock.requests().len(), 0, "nothing is sent");
@@ -235,7 +232,7 @@ fn search_schema_finds_saved_operations_by_name_and_description() {
     let mut mcp = launch(&config(&MockServer::unreachable(), "")).start();
 
     let reply = mcp.call("search_schema", &json!({ "endpoint": "store", "query": "user" }));
-    assert!(!reply.is_error, "{}", reply.text);
+    reply.succeeded();
     assert!(reply.text.starts_with("Saved operations that match"), "{}", reply.text);
     assert!(
         reply.text.contains("UserById (query, cost 1, $id: ID!)"),
@@ -271,13 +268,10 @@ fn list_endpoints_points_to_the_saved_operations() {
 #[test]
 fn an_endpoint_without_a_library_says_how_to_add_one() {
     let mock = MockServer::unreachable();
-    let mut mcp = Mcp::start(&format!(
-        "[endpoints.store]\nurl = \"{}\"\nschema = \"schema.graphql\"\n",
-        mock.url()
-    ));
+    let mut mcp = Mcp::start(&store_config(&mock, ""));
 
     let reply = mcp.call("list_operations", &json!({ "endpoint": "store" }));
-    assert!(!reply.is_error, "{}", reply.text);
+    reply.succeeded();
     assert!(reply.text.contains("`operations`"), "{}", reply.text);
 }
 

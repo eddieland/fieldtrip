@@ -82,8 +82,8 @@ fn each_request_carries_new_values_and_the_result_shows_them() {
     let first = execute(&mut mcp);
     let second = execute(&mut mcp);
 
-    assert!(!first.is_error, "{}", first.text);
-    assert!(!second.is_error, "{}", second.text);
+    first.succeeded();
+    second.succeeded();
     let ids = sent(&mock, "x-correlation-id");
     let traces = sent(&mock, "traceparent");
     assert_eq!(ids.len(), 2, "two requests");
@@ -114,7 +114,7 @@ fn the_audit_line_records_what_was_sent() {
     let mut mcp = Launch::new(&config(&mock, "", GENERATED)).start();
 
     let reply = execute(&mut mcp);
-    assert!(!reply.is_error, "{}", reply.text);
+    reply.succeeded();
 
     let entries = audit(&mcp);
     let entry = entries.first().expect("one line");
@@ -199,7 +199,7 @@ fn a_request_that_never_left_names_no_id() {
 
     let reply = execute(&mut mcp);
 
-    assert!(reply.is_error, "{}", reply.text);
+    reply.failed();
     assert!(reply.text.contains("GENERATED_TEST_UNSET"), "{}", reply.text);
     assert!(
         !reply.text.contains("X-Correlation-Id"),
@@ -223,7 +223,7 @@ fn introspection_carries_them_too() {
 
     let reply = mcp.call("introspect", &json!({ "endpoint": "live" }));
 
-    assert!(!reply.is_error, "{}", reply.text);
+    reply.succeeded();
     let ids = sent(&mock, "x-correlation-id");
     assert!(!ids.is_empty() && ids.iter().all(|id| is_uuid_v4(id)), "{ids:?}");
 }

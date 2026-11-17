@@ -5,14 +5,11 @@ use std::time::{Duration, Instant};
 
 use serde_json::json;
 
-use crate::support::{Human, Launch, Mcp, MockServer, Response};
+use crate::support::{Human, Launch, Mcp, MockServer, Response, store_config};
 
 /// Starts a server whose `store` endpoint reads the fixture schema, has `settings`, and never prompts.
 fn start(mock: &MockServer, settings: &str) -> Mcp {
-    let config = format!(
-        "[endpoints.store]\nurl = \"{}\"\nschema = \"schema.graphql\"\napproval = \"client\"\n{settings}",
-        mock.url()
-    );
+    let config = store_config(mock, &format!("approval = \"client\"\n{settings}"));
     Launch::new(&config).human(Human::Absent).start()
 }
 
@@ -40,10 +37,10 @@ fn a_redirect_is_refused_and_its_target_receives_nothing() {
         headers: vec![("location".to_owned(), location.clone())],
         body: String::new(),
     });
-    let config = format!(
-        "[endpoints.store]\nurl = \"{}\"\nschema = \"schema.graphql\"\napproval = \"client\"\n\n\
+    let config = store_config(
+        &mock,
+        "approval = \"client\"\n\n\
          [endpoints.store.headers]\nAuthorization = \"Bearer must-not-travel\"\n",
-        mock.url()
     );
     let mut mcp = Mcp::start(&config);
 

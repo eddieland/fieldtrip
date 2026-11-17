@@ -20,7 +20,7 @@ This file doesn't restate any of them. It covers how to work here.
 1. Open PLAN.md and take the first unchecked slice.
 2. Write its integration test first, in the file the slice names.
 3. Make it pass.
-4. Run the full check (below). All four commands must pass.
+4. Run the full check (below). Every target must pass.
 5. Tick the slice in PLAN.md in the same commit as the code.
 6. Go to the next slice.
 
@@ -46,11 +46,16 @@ send the user's token to another host.
 The toolchain is pinned in `rust-toolchain.toml`. This is the full check, the same one CI runs:
 
 ```sh
-cargo fmt --all --check
-RUSTFLAGS="-D warnings" cargo clippy --workspace --all-targets --all-features
-RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --document-private-items
-cargo test --workspace --all-features
+make check
 ```
+
+It runs four targets, `fmt`, `clippy`, `doc` and `test`, with every warning an error. Each can be run alone, as in
+`make clippy test`, and `make` with no target lists them all. CI calls the same targets, one per job, so the
+commands live in one place: the `Makefile`. Document a new target with `## what it does` after its name.
+
+A fifth target, `make deny`, checks every crate in `Cargo.lock` against `deny.toml`: security advisories, licenses
+and where crates come from. It needs `cargo-deny` and CI runs it. Run it when you add or update a dependency.
+Dependabot opens the weekly update pull requests, as `.github/dependabot.yml` sets out.
 
 The lint set in `Cargo.toml` is strict, and CI turns every warning into an error:
 
@@ -72,6 +77,9 @@ The lint set in `Cargo.toml` is strict, and CI turns every warning into an error
   approval needs a test on both.
 - `Launch` says how the server starts: with a config file, with flags, with environment variables, and how the
   human at the client answers a prompt (`Human`).
+- `store_config(mock, settings)` writes the usual config: a `store` endpoint on the mock that reads the fixture
+  schema. Use it instead of formatting that TOML again. `reply.succeeded()` and `reply.failed()` assert on a tool
+  result and show its text. Write the `assert!` out when the reason it should hold is worth a message of its own.
 - The fixture schema is `tests/fixtures/schema.graphql`. Extend it when a slice needs a new shape, instead of adding
   a second schema. Every file in `tests/fixtures/` is copied next to the config file of each test.
 - No test touches the real network. `MockServer` is a local HTTP endpoint that records every request, and

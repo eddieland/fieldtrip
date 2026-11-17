@@ -45,6 +45,29 @@ pub(crate) struct Reply {
     pub(crate) is_error: bool,
 }
 
+impl Reply {
+    /// Fails the test, showing the text, unless the tool succeeded.
+    #[track_caller]
+    pub(crate) fn succeeded(&self) {
+        assert!(!self.is_error, "the tool should have succeeded: {}", self.text);
+    }
+
+    /// Fails the test, showing the text, unless the tool reported an error.
+    #[track_caller]
+    pub(crate) fn failed(&self) {
+        assert!(self.is_error, "the tool should have reported an error: {}", self.text);
+    }
+}
+
+/// A config whose `store` endpoint sends to `mock`, reads the fixture schema from its file, and has `settings`, which
+/// are lines of TOML that each end in a newline.
+pub(crate) fn store_config(mock: &MockServer, settings: &str) -> String {
+    format!(
+        "[endpoints.store]\nurl = \"{}\"\nschema = \"schema.graphql\"\n{settings}",
+        mock.url()
+    )
+}
+
 /// A running `fieldtrip` process with an initialized MCP session.
 #[derive(Debug)]
 pub(crate) struct Mcp {

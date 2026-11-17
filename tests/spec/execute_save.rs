@@ -6,14 +6,11 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json};
 
-use crate::support::{Human, Launch, Mcp, MockServer, Reply, Response};
+use crate::support::{Human, Launch, Mcp, MockServer, Reply, Response, store_config};
 
 /// Starts a server whose `store` endpoint answers from `mock` and asks `human`, with `settings`.
 fn start(mock: &MockServer, human: Human, settings: &str) -> Mcp {
-    let config = format!(
-        "[endpoints.store]\nurl = \"{}\"\nschema = \"schema.graphql\"\n{settings}",
-        mock.url()
-    );
+    let config = store_config(mock, settings);
     Launch::new(&config)
         .human(human)
         .env("FIELDTRIP_SPEC_KEY", "env-s3cret-value")
@@ -202,7 +199,7 @@ fn nothing_is_saved_when_nothing_is_sent_or_the_body_is_cut_off() {
     let refused = execute(&mut declined, None);
     let cut = execute(&mut capped, None);
 
-    assert!(refused.is_error, "{}", refused.text);
+    refused.failed();
     assert!(!responses(&declined).exists(), "a declined operation saves nothing");
     assert!(
         cut.text
