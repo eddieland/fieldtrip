@@ -16,6 +16,7 @@ mod hints;
 mod http;
 mod library;
 mod listing;
+mod paginate;
 mod plan;
 mod response;
 mod results;

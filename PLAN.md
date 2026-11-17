@@ -360,3 +360,15 @@ make check
   `fieldtrip check` shows it, and zero stops the server. The audit log has a line per run, and one for a batch that
   was not sent.
   Done when: `cargo test execute_batch`
+- [x] **61. Follow pagination.** `execute` takes `paginate = { path, max_pages, variable }`: the path to one
+  connection, such as `data.users`, the most pages to fetch (5 unless given, capped by `max_batch`), and the variable
+  that carries the cursor (`after` unless given). It sends the query, reads `pageInfo` at the path, and sends it again
+  with `endCursor` in that variable until `hasNextPage` is false or the cap is reached, after one prompt that shows
+  the worst-case cost, `max_pages` times one page. With `max_pages = 2` over five pages there are two requests and
+  the result says more pages remain, with the cursor to go on from. Each page has its own section, and `select`
+  applies to each. A page without the connection, a cursor that does not move and a request with no answer each stop
+  it and say why. A path that is not `data` and names, a variable the query does not declare, a mutation, and `save`
+  are refused before anyone is asked. `auto_approve_cost` is compared with the worst case, a query approved for the
+  session is followed unasked, and on revision 2026-07-28 an approval covers exactly the pages that were shown. The
+  audit log has a line per page.
+  Done when: `cargo test execute_paginate`

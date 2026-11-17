@@ -49,6 +49,8 @@ mod execute_approved;
 #[cfg(test)]
 mod execute_batch;
 #[cfg(test)]
+mod execute_paginate;
+#[cfg(test)]
 mod execute_refused;
 #[cfg(test)]
 mod execute_save;

@@ -28,7 +28,7 @@ in the user's config, out of the agent's sight and out of its control.
 | `search_schema` | `endpoint`, `query` | Glossary targets, then ranked matches as one-line signatures |
 | `describe` | `endpoint`, `name` (`Type` or `Type.field`) | That definition as compact SDL. A type adds what uses it and paths to it from `Query` |
 | `estimate_cost` | `endpoint`, `operation` or `operation_name`, `variables?` | Validation errors, or cost, depth, breakdown, assumptions |
-| `execute` | `endpoint`, `operation` or `operation_name`, `variables?`, `select?`, `save?` | Status, `errors`, then the rest, or a file's path with a preview |
+| `execute` | `endpoint`, `operation` or `operation_name`, `variables?`, `select?`, `save?`, `paginate?` | Status, `errors`, then the rest, or a file's path with a preview |
 | `execute_batch` | `endpoint`, `operation` or `operation_name`, `variables` (a list of sets), `select?` | One section per run: status, `errors`, then the rest or a summary |
 | `read_result` | `result`, `select?` | Part of a response `execute` wrote to a file, by a path. Sends nothing |
 | `history` | `endpoint?`, `limit?` | The latest `execute` attempts from the audit log. Only offered with `audit_log` |
@@ -52,7 +52,7 @@ max_schema_bytes  = 33554432                 # optional, default 32 MiB, read of
 max_response_bytes = 8388608                 # optional, default 8 MiB, read of a response to `execute`
 max_output_chars  = 40000                    # optional, default 40,000, characters in one tool result
 max_inline_chars  = 10000                    # optional, default 10,000, a longer response goes to a file
-max_batch         = 100                      # optional, default 100, runs in one `execute_batch`
+max_batch         = 100                      # optional, default 100, requests one call sends: runs, or pages
 audit_variables   = false                    # optional, default true: leave variables out of the audit log
 schema_ttl        = 86400                    # optional, seconds a schema is cached, default 1 day
 
@@ -151,6 +151,7 @@ variables, until fieldtrip restarts". A mutation's prompt has no field.
 | Query the human approved for the session, with any variables | Sent without a prompt |
 | `execute_batch` | One prompt for all its runs, or none when the total cost is waived as a query's is |
 | `execute_batch` with a mutation | Not sent, and no prompt is shown |
+| `execute` with `paginate` | One prompt for all its pages, at `max_pages` times the cost of one |
 | Endpoint sets `approval = "client"` | Sent without a prompt, mutations included |
 | Mutation, and the endpoint or its template sets `mutations = "deny"` | Not sent, and no prompt is shown |
 | A prompt is needed, and the client is known to accept prompts unseen | Not sent, and no prompt is shown |
@@ -440,3 +441,20 @@ Settled. To change one, ask the user, then add a new dated line instead of editi
   `save`, and no run's response is written to a file, whatever `max_inline_chars` is.
 - 2026-11-17: The audit log has a line for each run that was sent, with `batch: {run, of}`. A batch that was not sent
   is one line, with every set under `variables` and `batch: {of}`.
+- 2026-11-17: `execute` takes `paginate = { path, max_pages?, variable? }` and follows the pages of the connection
+  at `path` under one approval. `path` is `data` and names, to the one object that holds `pageInfo`.
+- 2026-11-17: After each page, `endCursor` goes into the variable named by `variable`, `after` unless given, which
+  the query must declare. Nothing else about the request changes. The first page starts from the variables given.
+- 2026-11-17: `max_pages` is 5 unless given, and `max_batch` caps it as it caps a batch: it is the most requests one
+  call sends.
+- 2026-11-17: The prompt shows the canonical text, the variables, the path, the variable and the worst case:
+  `max_pages` times the estimate for one page. That worst case is what `auto_approve_cost` is compared with. The
+  prompt has no field. A query approved for the session is followed unasked.
+- 2026-11-17: Following is for queries. A mutation with `paginate` is refused with no prompt. `paginate` does not
+  combine with `save`. `select` applies to every page.
+- 2026-11-17: It stops at `hasNextPage: false`, at `max_pages`, at a page with no `pageInfo` at the path, at a cursor
+  that did not move, and at a request that gets no answer. The result's second line says which, and from which
+  cursor to go on. Each page then has its own section, with an equal share of `max_output_chars`. No page is
+  written to a file.
+- 2026-11-17: The audit log has a line for each page sent, with `page: {page, max}`. A call that was not sent is one
+  line, with `page: {max}` and the worst-case cost.

@@ -125,7 +125,8 @@ pub(crate) struct Endpoint {
     /// The longest response `execute` shows in its result. A longer one is written to a file, and the result
     /// previews it. [`Endpoint::inline_limit`] is what applies.
     pub(crate) max_inline_chars: usize,
-    /// The most requests one call may send under a single approval: the runs of `execute_batch`.
+    /// The most requests one call may send under a single approval: the runs of `execute_batch`, or the pages
+    /// `execute` follows with `paginate`.
     pub(crate) max_batch: usize,
     /// Who approves an operation before it is sent.
     pub(crate) approval: Approval,

@@ -65,6 +65,8 @@ pub(crate) struct Plan {
     pub(crate) assumptions: Vec<String>,
     /// Every cost map rule the estimate used, and what it set.
     pub(crate) overrides: Vec<String>,
+    /// The names of the variables the operation declares, without their `$`.
+    pub(crate) declared: Vec<String>,
 }
 
 impl Plan {
@@ -121,6 +123,11 @@ impl Plan {
             breakdown,
             assumptions: estimator.assumptions,
             overrides: estimator.overrides,
+            declared: operation
+                .variables
+                .iter()
+                .map(|variable| variable.name.to_string())
+                .collect(),
         })
     }
 

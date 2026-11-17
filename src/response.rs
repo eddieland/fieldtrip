@@ -293,10 +293,15 @@ fn connections(value: &Value, path: &str, found: &mut Vec<Connection>) {
 
 /// One line for each connection in a response's `data` that says it has more pages, so the calling agent pages
 /// through it instead of asking for a bigger page.
-pub(crate) fn page_hints(data: &Value) -> Vec<String> {
+///
+/// The connection at the path `followed` is left out: `execute` is following its pages itself.
+pub(crate) fn page_hints(data: &Value, followed: Option<&str>) -> Vec<String> {
     let mut found = Vec::new();
     connections(data, "data", &mut found);
-    let with_more: Vec<&Connection> = found.iter().filter(|connection| connection.more > 0).collect();
+    let with_more: Vec<&Connection> = found
+        .iter()
+        .filter(|connection| connection.more > 0 && Some(connection.path.as_str()) != followed)
+        .collect();
     let mut hints: Vec<String> = with_more
         .iter()
         .take(MAX_PAGE_HINTS)
@@ -426,10 +431,11 @@ pub(crate) fn laid_out(
     mut parts: BTreeMap<String, Box<RawValue>>,
     select: Option<&select::Path>,
     room: Room,
+    followed: Option<&str>,
 ) -> String {
     let mut head = summary;
     let data = parts.get("data").and_then(|data| serde_json::from_str(data.get()).ok());
-    for hint in data.as_ref().map_or_else(Vec::new, page_hints) {
+    for hint in data.as_ref().map_or_else(Vec::new, |data| page_hints(data, followed)) {
         let _ = write!(head, "\n{hint}");
     }
     head.push_str(saved_note);
@@ -559,18 +565,20 @@ pub(crate) fn render(
         ));
     }
 
-    Ok(laid_out(summary, &saved_note, &reply.body, parts, select, room))
+    Ok(laid_out(summary, &saved_note, &reply.body, parts, select, room, None))
 }
 
-/// One response of a call that sends several, under `label`, such as `[0]`: the status line, then `errors` in full,
-/// then the rest or the part `select` picks, in `share` characters. Nothing is written to a file. A response that
-/// is not GraphQL is shown as what is wrong with it.
+/// One response of a call that sends several, under `label`, such as `[0]` or `[page 2]`: the status line, then
+/// `errors` in full, then the rest or the part `select` picks, in `share` characters. Nothing is written to a file.
+/// A response that is not GraphQL is shown as what is wrong with it. No page hint is given for the connection at the
+/// path `followed`, whose pages the call is following itself.
 pub(crate) fn section(
     label: &str,
     reply: &Reply,
     endpoint: &Endpoint,
     select: Option<&select::Path>,
     share: usize,
+    followed: Option<&str>,
 ) -> String {
     let mut head = format!("{label} {}", reply.metadata());
     if let Some(note) = &reply.refused_twice {
@@ -592,5 +600,5 @@ pub(crate) fn section(
             excerpt(&reply.body, EXCERPT)
         );
     };
-    laid_out(head, "", &reply.body, parts, select, Room::Share(share))
+    laid_out(head, "", &reply.body, parts, select, Room::Share(share), followed)
 }

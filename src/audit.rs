@@ -72,6 +72,15 @@ pub(crate) enum Series<'call> {
     },
     /// A whole batch that was not sent, with every set of variables it would have run with.
     Batch(&'call [Variables]),
+    /// One page of a connection that `execute` follows: this page, counted from 1, and the most it would send for.
+    Page {
+        /// Which page this is, counted from 1.
+        page: usize,
+        /// The most pages the call may send for.
+        max: usize,
+    },
+    /// A call to follow up to this many pages, none of which was sent.
+    Pages(usize),
 }
 
 /// Who let an attempt through, or what stopped it.
@@ -241,7 +250,7 @@ impl Audit {
         if endpoint.audit_variables {
             let variables = match attempt.series {
                 Series::Batch(sets) => sets.iter().cloned().map(Value::Object).collect(),
-                Series::Single | Series::Run { .. } => Value::Object(attempt.variables.clone()),
+                _ => Value::Object(attempt.variables.clone()),
             };
             entry.insert("variables".to_owned(), variables);
         }
@@ -252,6 +261,12 @@ impl Audit {
             }
             Series::Batch(sets) => {
                 entry.insert("batch".to_owned(), json!({ "of": sets.len() }));
+            }
+            Series::Page { page, max } => {
+                entry.insert("page".to_owned(), json!({ "page": page, "max": max }));
+            }
+            Series::Pages(max) => {
+                entry.insert("page".to_owned(), json!({ "max": max }));
             }
         }
         entry.insert("approval".to_owned(), json!(verdict.approval));

@@ -311,6 +311,44 @@ pub(crate) fn prompt(endpoint: &str, url: &str, plan: &Plan, variables: &Variabl
     out
 }
 
+/// The text of the approval prompt for following pages: `plan` sent up to `follow.max_pages` times, each page
+/// costing what `plan` does, with `variables` on the first.
+///
+/// Like [`prompt`], it holds nothing the calling agent wrote but the operation, the variables, and here the path and
+/// the variable name, which are checked to be plain names.
+pub(crate) fn pages_prompt(
+    endpoint: &str,
+    url: &str,
+    plan: &Plan,
+    variables: &Variables,
+    follow: &crate::paginate::Follow,
+) -> String {
+    let pages = follow.max_pages;
+    let mut out = format!(
+        "fieldtrip wants to send a {} to `{endpoint}` ({url}) up to {pages} times, to follow the pages of `{}`.\n\n\
+         {}\n\n",
+        plan.kind.keyword(),
+        follow.path,
+        plan.text
+    );
+    if variables.is_empty() {
+        out.push_str("Variables: none\n");
+    } else {
+        let _ = writeln!(out, "Variables: {}", serde_json::Value::Object(variables.clone()));
+    }
+    let worst = plan.cost.saturating_mul(u64::try_from(pages).unwrap_or(u64::MAX));
+    let _ = write!(
+        out,
+        "After the first page, `${}` is the `endCursor` of the page before.\nEstimated cost: {worst} at most, {} for \
+         each page\n\nAccept to send up to {pages} pages. Decline to stop.",
+        follow.variable, plan.cost
+    );
+    for assumption in &plan.assumptions {
+        let _ = write!(out, "\nThe estimate assumes: {assumption}");
+    }
+    out
+}
+
 /// How many sets of variables the prompt for a batch shows. The rest are counted.
 const BATCH_SAMPLE: usize = 5;
 
