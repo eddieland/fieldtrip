@@ -303,3 +303,12 @@ cargo test --workspace --all-features
   outside `[glossary]`, a term with no words or no targets, two terms that differ only in case, or a target that is
   not a `Type` or `Type.member` stop the server at startup.
   Done when: `cargo test glossary`
+- [x] **54. Large responses go to a file.** A response to `execute` longer than `max_inline_chars`, 10,000 unless an
+  endpoint or its template sets it, is written whole to a new file in a directory of the session's own under
+  `fieldtrip/responses`, named after the endpoint. The result gives the path and size, `errors` in full, a preview of
+  at most 4,000 characters cut like any summary, and the shape of the response: one line per path with its type, list
+  lengths and long strings' lengths, such as `data.products[200].title: string (100 chars)`, at most 40 lines. A
+  response under the limit is shown as before and writes nothing. With `select` the file is still written and the
+  selection is shown, cut when it is longer than the limit itself. The limit never exceeds `max_output_chars`, one
+  under 1,000 stops the server, and `fieldtrip check` shows it. `save` still forces a file at any size.
+  Done when: `cargo test response_spill`

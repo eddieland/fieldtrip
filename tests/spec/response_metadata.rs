@@ -236,16 +236,25 @@ fn errors_are_kept_whole_when_data_is_cut() {
     let reply = execute(&mut mcp);
 
     assert!(!reply.is_error, "{}", reply.text.len());
-    let errors_line = reply.text.lines().nth(2).unwrap_or_default();
+    let errors_line = reply
+        .text
+        .lines()
+        .find(|line| line.starts_with("errors: "))
+        .unwrap_or_default();
     assert_eq!(
         errors_line,
         format!("errors: {}", json!(errors)),
         "the errors are whole"
     );
-    let note = reply.text.lines().last().unwrap_or_default();
+    let note = reply
+        .text
+        .lines()
+        .find(|line| line.starts_with("[The result would have "))
+        .unwrap_or_default();
     assert!(
-        note.starts_with("[The result would have ") && note.contains("`errors` is whole."),
-        "the data is summarized instead, with a note: {note}"
+        note.contains("`errors` is whole."),
+        "the data is summarized instead, with a note: {}",
+        reply.text
     );
 }
 

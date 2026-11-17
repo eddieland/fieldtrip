@@ -28,7 +28,7 @@ in the user's config, out of the agent's sight and out of its control.
 | `search_schema` | `endpoint`, `query` | Glossary targets, then ranked matches as one-line signatures |
 | `describe` | `endpoint`, `name` (`Type` or `Type.field`) | That definition as compact SDL |
 | `estimate_cost` | `endpoint`, `operation` or `operation_name`, `variables?` | Validation errors, or cost, depth, breakdown, assumptions |
-| `execute` | `endpoint`, `operation` or `operation_name`, `variables?`, `select?`, `save?` | Status, `errors`, then the rest or a summary |
+| `execute` | `endpoint`, `operation` or `operation_name`, `variables?`, `select?`, `save?` | Status, `errors`, then the rest, or a file's path with a preview |
 | `history` | `endpoint?`, `limit?` | The latest `execute` attempts from the audit log. Only offered with `audit_log` |
 
 ## Config shape
@@ -48,6 +48,7 @@ response_headers  = ["x-request-id", "traceparent"]   # optional, shown by `exec
 max_schema_bytes  = 33554432                 # optional, default 32 MiB, read of an introspection response
 max_response_bytes = 8388608                 # optional, default 8 MiB, read of a response to `execute`
 max_output_chars  = 40000                    # optional, default 40,000, characters in one tool result
+max_inline_chars  = 10000                    # optional, default 10,000, a longer response goes to a file
 audit_variables   = false                    # optional, default true: leave variables out of the audit log
 schema_ttl        = 86400                    # optional, seconds a schema is cached, default 1 day
 
@@ -70,7 +71,7 @@ X-Api-Key = { env = "ACME_API_KEY" }
 ```
 
 An endpoint takes `schema`, `schema_ttl`, `headers`, `costs`, `glossary`, `operations`, `fragments`, `client_directives`,
-`assumed_list_size`, `timeout`, `response_headers`, the three `max_` limits and `audit_variables` from its template
+`assumed_list_size`, `timeout`, `response_headers`, the four `max_` limits and `audit_variables` from its template
 unless it sets them.
 Headers merge by name, ignoring case, and the endpoint's win.
 `url`, `description`, `approval` and `auto_approve_cost` are only ever set on the endpoint. `mutations` comes from the
@@ -353,3 +354,16 @@ Settled. To change one, ask the user, then add a new dated line instead of editi
 - 2026-11-17: `introspect` reports the targets the schema lacks, as it does unmatched cost rules, and `check` warns
   about them. A search for such a term still shows the target, marked as not in the schema. `list_endpoints` shows
   the glossary file and how many terms it has.
+- 2026-11-17: A response to `execute` longer than `max_inline_chars` (10,000, set per endpoint or template) is written
+  whole to a file without being asked, and the result has its path and size, `errors` in full, a preview and the shape
+  of the response, never the body. A shorter one is shown as before. This replaces the 2026-11-13 summary of up to
+  `max_output_chars` for a response to `execute`. That summary remains for a file that could not be written.
+- 2026-11-17: `max_inline_chars` cannot show more than `max_output_chars`: the smaller applies. Under 1,000 stops the
+  server.
+- 2026-11-17: The preview is the 2026-11-13 summary, in at most 4,000 characters, and at least 1,000 of them after
+  `errors` however long those are. The shape is one line per path with its type, list items merged, at most 40 lines.
+- 2026-11-17: With `select`, the response is still written whole when it is too long, and the selection is shown up to
+  `max_inline_chars`.
+- 2026-11-17: A response file goes in a directory of the session's own, `fieldtrip/responses/<session>`, in the cache
+  directory, and is named by the endpoint and an ID fieldtrip makes for it. This refines the 2026-11-13 line on `save`,
+  which still forces a file at any size.

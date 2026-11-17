@@ -145,21 +145,29 @@ pub(crate) fn summarize(parts: &Map<String, Value>, budget: usize) -> Option<Sum
     fallback.map(|(_, summary)| summary)
 }
 
-/// How much of a response a result shows: all it holds, or a preview of a response that was saved to a file.
+/// How much of a response a result shows: all it holds, or less of a response that was written to a file.
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum Room {
     /// A result holds at most this many characters, the endpoint's `max_output_chars`.
     Result(usize),
-    /// The response was saved to a file, and the result shows at most this many characters of it.
+    /// The response was written to a file, and the result shows at most this many characters of it.
     Preview(usize),
+    /// The response was written to a file, and the result shows the part `select` picked, up to this many
+    /// characters, the endpoint's `max_inline_chars`.
+    Selection(usize),
 }
 
 impl Room {
     /// The most characters the result holds.
     pub(crate) const fn limit(self) -> usize {
         match self {
-            Self::Result(limit) | Self::Preview(limit) => limit,
+            Self::Result(limit) | Self::Preview(limit) | Self::Selection(limit) => limit,
         }
+    }
+
+    /// Whether the whole response is in a file, so that what is shown is never all there is.
+    pub(crate) const fn is_of_a_file(self) -> bool {
+        matches!(self, Self::Preview(_) | Self::Selection(_))
     }
 }
 
@@ -174,6 +182,10 @@ pub(crate) fn note(summary: &Summary, length: usize, room: Room) -> String {
         Room::Preview(limit) => (
             format!("more than the {limit} shown of a saved response"),
             "The file has all of it.",
+        ),
+        Room::Selection(limit) => (
+            format!("more than the {limit} shown of a selection (`max_inline_chars`)"),
+            "The file has all of it. Pick a smaller part with a longer `select` path.",
         ),
     };
     let mut cuts = Vec::new();

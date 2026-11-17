@@ -91,14 +91,18 @@ fn a_large_response_is_summarized_with_a_note() {
         lines.next().unwrap_or_default().starts_with("HTTP 200 · "),
         "the status line comes next"
     );
-    let note = reply.text.lines().last().unwrap_or_default();
+    let note = reply
+        .text
+        .lines()
+        .find(|line| line.starts_with("[The result would have "))
+        .unwrap_or_default();
+    assert!(note.contains("this is a summary"), "there is a note: {}", reply.text);
     assert!(
-        note.starts_with("[The result would have ") && note.contains("this is a summary"),
-        "the last line is the note: {note}"
+        note.contains("The file has all of it"),
+        "the note says where the rest is: {note}"
     );
-    assert!(note.contains("Ask for less"), "the note says what to do: {note}");
     assert!(
-        reply.text.chars().count() <= 40_000,
+        reply.text.chars().count() <= 5_000,
         "the result fits the cap: {}",
         reply.text.len()
     );

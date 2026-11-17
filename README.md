@@ -122,6 +122,7 @@ to trust the client), so use a header name the proxy passes through, and list th
 | `max_schema_bytes` | 32 MiB | Bytes of an introspection response that are read. Raise it for a larger schema |
 | `max_response_bytes` | 8 MiB | Bytes of a response to `execute` that are read. A body cut off here cannot be parsed |
 | `max_output_chars` | `40000` | Characters in one tool result, which is what reaches the agent's context |
+| `max_inline_chars` | `10000` | The longest response `execute` shows. A longer one goes to a file, with a preview |
 | `audit_variables` | `true` | `false` leaves this endpoint's variables out of the audit log, below |
 | `schema_ttl` | `86400` | Seconds an introspected schema is kept on disk, across restarts. `0` keeps none |
 | `costs` | none | A cost map, below |
@@ -154,15 +155,22 @@ A large API, such as GitHub's, has an introspection response of several megabyte
 `max_schema_bytes` of it, 32 MiB unless you set it, and says so when a schema is larger. A response to `execute` is
 read up to `max_response_bytes`, 8 MiB.
 
-What reaches the agent is at most `max_output_chars` per tool result, 40,000 unless you set it. `errors` always comes
-first and whole. When `data` and what follows it don't fit, they come back as a summary that is still valid JSON:
-long lists cut to their first items and long strings to their first characters, each cut marked with what it
-dropped, such as `"…(+412 more items)"`. The agent can also ask for less after the fact, without changing what you approve:
+What reaches the agent is at most `max_output_chars` per tool result, 40,000 unless you set it. A response to
+`execute` is shown whole only up to `max_inline_chars`, 10,000 unless you set it, because one long value can cost more
+context than the rest of a task. A longer response is written whole to a file, and the result holds:
+
+- the path and size of the file, next to the HTTP status and any request ID
+- `errors`, first and always whole
+- a preview of at most 4,000 characters that is still valid JSON: long lists cut to their first items and long strings
+  to their first characters, each cut marked with what it dropped, such as `"…(+412 more items)"`
+- the shape of the response, one line per path, such as `data.repository.issues.nodes[50].body: string (31,204 chars)`
+
+The file is in `fieldtrip/responses` under your cache directory (`$XDG_CACHE_HOME` or `~/.cache`), in a directory for
+that run of the server, and is named after the endpoint. Header values are removed from it as from any response, and
+only you can read it. The agent can also choose what it gets, without changing what you approve:
 
 - `select` picks part of the response with a path such as `data.repository.pullRequests.nodes[*].number`.
-- `save` writes the whole response to a new file in `fieldtrip/responses` under your cache directory
-  (`$XDG_CACHE_HOME` or `~/.cache`), and returns its path, size and a short preview. Header values are removed from
-  the file as from any response, and only you can read it. fieldtrip does not delete these files.
+- `save` writes the response to a file whatever its size.
 
 When a connection in the response has `pageInfo.hasNextPage: true`, the result points it out with its cursor, so the
 agent pages through it instead of asking for a bigger page.

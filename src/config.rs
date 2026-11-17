@@ -120,6 +120,9 @@ pub(crate) struct Endpoint {
     pub(crate) max_response_bytes: usize,
     /// The most characters one tool result about this endpoint carries.
     pub(crate) max_output_chars: usize,
+    /// The longest response `execute` shows in its result. A longer one is written to a file, and the result
+    /// previews it. [`Endpoint::inline_limit`] is what applies.
+    pub(crate) max_inline_chars: usize,
     /// Who approves an operation before it is sent.
     pub(crate) approval: Approval,
     /// Queries with an estimated cost at or below this are sent without asking. Mutations always ask.
@@ -168,7 +171,12 @@ const DEFAULT_MAX_RESPONSE_BYTES: usize = 8 * MIB;
 /// The `max_output_chars` of an endpoint that does not set one: about 10,000 tokens, a fair share of a context.
 const DEFAULT_MAX_OUTPUT_CHARS: usize = 40_000;
 
-/// The smallest `max_output_chars` allowed. A smaller result cannot hold a useful summary of a response.
+/// The `max_inline_chars` of an endpoint that does not set one: about 2,500 tokens. A response longer than this
+/// is rarely read whole, and costs more context than the rest of a task.
+const DEFAULT_MAX_INLINE_CHARS: usize = 10_000;
+
+/// The smallest `max_output_chars` and `max_inline_chars` allowed. A smaller result cannot hold a useful summary
+/// of a response.
 const MIN_OUTPUT_CHARS: u64 = 1_000;
 
 /// A mebibyte.
@@ -226,6 +234,7 @@ struct RawEndpoint {
     max_schema_bytes: Option<u64>,
     max_response_bytes: Option<u64>,
     max_output_chars: Option<u64>,
+    max_inline_chars: Option<u64>,
     audit_variables: Option<bool>,
 }
 
@@ -257,6 +266,7 @@ struct RawTemplate {
     max_schema_bytes: Option<u64>,
     max_response_bytes: Option<u64>,
     max_output_chars: Option<u64>,
+    max_inline_chars: Option<u64>,
     audit_variables: Option<bool>,
 }
 
@@ -278,6 +288,7 @@ struct RawShared {
     max_schema_bytes: Option<u64>,
     max_response_bytes: Option<u64>,
     max_output_chars: Option<u64>,
+    max_inline_chars: Option<u64>,
     audit_variables: Option<bool>,
 }
 
@@ -299,6 +310,7 @@ macro_rules! shared {
             max_schema_bytes: $raw.max_schema_bytes,
             max_response_bytes: $raw.max_response_bytes,
             max_output_chars: $raw.max_output_chars,
+            max_inline_chars: $raw.max_inline_chars,
             audit_variables: $raw.audit_variables,
         }
     };
@@ -326,6 +338,7 @@ struct Template {
     max_schema_bytes: Option<usize>,
     max_response_bytes: Option<usize>,
     max_output_chars: Option<usize>,
+    max_inline_chars: Option<usize>,
     audit_variables: Option<bool>,
 }
 
@@ -485,13 +498,20 @@ impl Template {
             mutations,
             max_schema_bytes: byte_limit("max_schema_bytes", shared.max_schema_bytes)?,
             max_response_bytes: byte_limit("max_response_bytes", shared.max_response_bytes)?,
-            max_output_chars: output_limit(shared.max_output_chars)?,
+            max_output_chars: output_limit("max_output_chars", shared.max_output_chars)?,
+            max_inline_chars: output_limit("max_inline_chars", shared.max_inline_chars)?,
             audit_variables: shared.audit_variables,
         })
     }
 }
 
 impl Endpoint {
+    /// The longest response `execute` shows in its result: `max_inline_chars`, or `max_output_chars` when that is
+    /// smaller, since no result holds more.
+    pub(crate) fn inline_limit(&self) -> usize {
+        self.max_inline_chars.min(self.max_output_chars)
+    }
+
     /// Validates one endpoint and applies its template. A relative path is resolved against `base`, the config
     /// file's directory.
     fn from_raw(raw: RawEndpoint, base: &Path, templates: &BTreeMap<String, Template>) -> Result<Self, String> {
@@ -587,9 +607,12 @@ impl Endpoint {
             max_response_bytes: byte_limit("max_response_bytes", shared.max_response_bytes)?
                 .or(template.max_response_bytes)
                 .unwrap_or(DEFAULT_MAX_RESPONSE_BYTES),
-            max_output_chars: output_limit(shared.max_output_chars)?
+            max_output_chars: output_limit("max_output_chars", shared.max_output_chars)?
                 .or(template.max_output_chars)
                 .unwrap_or(DEFAULT_MAX_OUTPUT_CHARS),
+            max_inline_chars: output_limit("max_inline_chars", shared.max_inline_chars)?
+                .or(template.max_inline_chars)
+                .unwrap_or(DEFAULT_MAX_INLINE_CHARS),
             audit_variables: shared.audit_variables.or(template.audit_variables).unwrap_or(true),
             approval,
             auto_approve_cost: raw.auto_approve_cost,
@@ -832,12 +855,12 @@ fn byte_limit(key: &str, bytes: Option<u64>) -> Result<Option<usize>, String> {
     Ok(Some(usize::try_from(bytes).unwrap_or(usize::MAX)))
 }
 
-/// Checks `max_output_chars`.
-fn output_limit(chars: Option<u64>) -> Result<Option<usize>, String> {
+/// Checks a limit in characters, `max_output_chars` or `max_inline_chars`, called `key` in the config.
+fn output_limit(key: &str, chars: Option<u64>) -> Result<Option<usize>, String> {
     let Some(chars) = chars else { return Ok(None) };
     if chars < MIN_OUTPUT_CHARS {
         return Err(format!(
-            "`max_output_chars` must be at least {MIN_OUTPUT_CHARS}. A smaller result cannot hold a useful summary \
+            "`{key}` must be at least {MIN_OUTPUT_CHARS}. A smaller result cannot hold a useful summary \
              of a response."
         ));
     }

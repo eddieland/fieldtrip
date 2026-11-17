@@ -91,6 +91,8 @@ mod response_limits;
 #[cfg(test)]
 mod response_metadata;
 #[cfg(test)]
+mod response_spill;
+#[cfg(test)]
 mod response_summary;
 #[cfg(test)]
 mod saved_operations;

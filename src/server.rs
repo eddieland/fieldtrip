@@ -20,9 +20,10 @@ use crate::config::{Approval, Config, Endpoint, Mutations, show_bytes, show_dura
 use crate::http::Client;
 use crate::library::{self, Saved};
 use crate::plan::{Kind, Plan, Variables};
+use crate::results::Results;
 use crate::schema::{Loaded, introspection};
 use crate::suggest::backticked;
-use crate::{cache, response, saved, select};
+use crate::{cache, response, select, shape};
 
 /// What the server tells a client about itself and how to use it.
 const INSTRUCTIONS: &str = "fieldtrip lets you use GraphQL APIs the user has configured, reading the real schema \
@@ -60,6 +61,8 @@ pub(crate) struct Fieldtrip {
     outstanding: Arc<Outstanding>,
     /// Where each `execute` attempt is recorded.
     audit: Arc<Audit>,
+    /// Where responses too long to show are written.
+    results: Arc<Results>,
     /// The tools this server offers. `history` is left out when there is no audit log to read.
     tools: Arc<ToolRouter<Self>>,
 }
@@ -242,10 +245,10 @@ struct ExecuteArguments {
     select: Option<String>,
     /// Whether to save the whole response to a file.
     #[schemars(
-        description = "Optional. Set to `true` to write the whole response to a new file that fieldtrip names, and \
-                       get back its path and size with a short preview instead of the response. Use it when the \
-                       response may be large and you can read files, or need all of it but not in your context. It \
-                       changes neither what is sent nor what the user approves."
+        description = "Optional. Set to `true` to write the whole response to a new file that fieldtrip names, \
+                       whatever its size, and get back its path and size with the response or a short preview of it. \
+                       A long response is written to a file without this. Use it when you want a small one on disk \
+                       too. It changes neither what is sent nor what the user approves."
     )]
     #[serde(default)]
     save: bool,
@@ -288,9 +291,55 @@ const SAVED_PREVIEW: usize = 4_000;
 /// Room kept in a result for the note that follows a summary.
 const NOTE_ROOM: usize = 500;
 
+/// The least room the preview of a saved response gets, however long the `errors` before it are: this much, or a
+/// quarter of what the result may hold when that is less.
+const MIN_PREVIEW: usize = 1_000;
+
+/// The most paths shown of a response's shape.
+const SHAPE_PATHS: usize = 40;
+
+/// The most characters of one line of a response's shape.
+const SHAPE_LINE: usize = 200;
+
+/// The shape of `body`, a response that was written to a file, in at most `budget` characters: a heading, then one
+/// line per path. Empty when the body is not JSON.
+fn shape_of(body: &str, budget: usize) -> String {
+    let Ok(response) = serde_json::from_str::<serde_json::Value>(body) else {
+        return String::new();
+    };
+    let lines = shape::lines(&response);
+    let mut out = "\nShape of the whole response, one line per path. `nodes[50]` is a list of 50 items, and `select` \
+                   takes one with `nodes[0]` or all with `nodes[*]`:"
+        .to_owned();
+    let mut room = budget.saturating_sub(out.chars().count() + 40);
+    let mut shown = 0;
+    for line in lines.iter().take(SHAPE_PATHS) {
+        let mut line: String = line.chars().take(SHAPE_LINE).collect();
+        if line.chars().count() == SHAPE_LINE {
+            line.push('…');
+        }
+        let length = line.chars().count() + 1;
+        if length > room {
+            break;
+        }
+        room -= length;
+        let _ = write!(out, "\n{line}");
+        shown += 1;
+    }
+    match lines.len() - shown {
+        0 => {}
+        1 => out.push_str("\n… and 1 more path."),
+        more => {
+            let _ = write!(out, "\n… and {more} more paths.");
+        }
+    }
+    out
+}
+
 /// The result of `execute`: `head`, which ends with the errors, then each of the `rest` of the response's parts as
-/// the server wrote it when they fit in the `room`, or a summary of them that is still valid JSON when not.
-fn shown(head: String, rest: &[(String, Box<RawValue>)], room: response::Room) -> String {
+/// the server wrote it when they fit in the `room`, or a summary of them that is still valid JSON when not. `shape`
+/// follows a summary of a response that was written to a file.
+fn shown(head: String, rest: &[(String, Box<RawValue>)], room: response::Room, shape: &str) -> String {
     let limit = room.limit();
     let mut written = String::new();
     for (name, value) in rest {
@@ -304,11 +353,19 @@ fn shown(head: String, rest: &[(String, Box<RawValue>)], room: response::Room) -
         .iter()
         .filter_map(|(name, value)| Some((name.clone(), serde_json::from_str(value.get()).ok()?)))
         .collect();
-    let space = limit.saturating_sub(head.chars().count() + NOTE_ROOM);
+    let mut space = limit.saturating_sub(head.chars().count() + NOTE_ROOM + shape.chars().count());
+    if room.is_of_a_file() {
+        // Errors are never cut, and can use the room up. The preview is all the result shows of the rest.
+        space = space.max(MIN_PREVIEW.min(limit / 4));
+    }
     match response::summarize(&parts, space) {
         Some(summary) => {
             let note = response::note(&summary, length, room);
-            format!("{head}{}\n{note}", summary.lines)
+            format!("{head}{}\n{note}{shape}", summary.lines)
+        }
+        None if room.is_of_a_file() => {
+            let limit = limit.saturating_sub(shape.chars().count());
+            capped_after(head, &written, limit, "The file has all of it.") + shape
         }
         None => capped_after(head, &written, limit, ASK_FOR_LESS),
     }
@@ -646,6 +703,7 @@ impl Fieldtrip {
             schemas: Arc::default(),
             http,
             outstanding: Arc::default(),
+            results: Arc::new(Results::new(audit.session())),
             audit: Arc::new(audit),
             tools: Arc::new(tools),
         }
@@ -941,11 +999,13 @@ impl Fieldtrip {
                        request (`sent X-Correlation-Id ...`), and any response headers the user chose to show, such \
                        as a request or trace ID. Give those IDs to the user when something needs looking up in the \
                        server's logs; a generated one is shown even when no answer came. Then come `errors`, \
-                       in full, then `data`, then any `extensions`, each as the server wrote it. When those after \
-                       `errors` are too long for one result, they come back as a summary that is still valid JSON, \
-                       with long lists cut to their first items, each cut marked with what it dropped. To keep a \
-                       large response out of your context, pass `select` to pick the part you need, or `save` to \
-                       write all of it to a file and get its path and a preview. A connection with \
+                       in full, then `data`, then any `extensions`, each as the server wrote it. A response too \
+                       long to show is written whole to a file instead: the result gives the file's path, `errors` \
+                       in full, a preview that is still valid JSON, with long lists and strings cut and each cut \
+                       marked with what it dropped, and the shape of the response, one line per path with its type \
+                       and size. Nothing was lost, so do not send the operation again to see more. To get one part \
+                       in the result, pass `select`. Pass `save` to have a short response written to a file too. A \
+                       connection with \
                        `hasNextPage: true` is pointed out with its cursor: page through it with `after` rather than \
                        raising `first`. A response \
                        can hold both `data` and `errors`: read both, because one field can fail while the rest \
@@ -1096,36 +1156,63 @@ impl Fieldtrip {
                 Err(text)
             };
         }
-        let (summary, room) = if arguments.save {
-            match saved::save(name, &reply.body) {
-                Ok(path) => (
-                    format!(
-                        "{summary}\nSaved the whole response, {} bytes, to {}",
-                        reply.body.len(),
-                        path.display()
-                    ),
-                    response::Room::Preview(endpoint.max_output_chars.min(SAVED_PREVIEW)),
-                ),
+        // A response too long to show is written to a file whole, so nothing has to be sent again to see the rest.
+        let inline = endpoint.inline_limit();
+        let length = reply.body.chars().count();
+        let (saved_note, room) = if arguments.save || length > inline {
+            match self.results.write(name, &reply.body) {
+                Ok(stored) => {
+                    let why = if length > inline {
+                        format!(
+                            "\nThe response has {} characters, more than the {} that are shown here \
+                             (`max_inline_chars`), so it was saved instead.",
+                            shape::grouped(length),
+                            shape::grouped(inline)
+                        )
+                    } else {
+                        String::new()
+                    };
+                    let room = if select.is_some() {
+                        response::Room::Selection(inline)
+                    } else {
+                        response::Room::Preview(inline.min(SAVED_PREVIEW))
+                    };
+                    (
+                        format!(
+                            "{why}\nSaved the whole response, {} bytes, to {}",
+                            reply.body.len(),
+                            stored.path.display()
+                        ),
+                        room,
+                    )
+                }
                 Err(error) => (
-                    format!("{summary}\nThe response was not saved: {error}."),
+                    format!("\nThe response was not saved: {error}."),
                     response::Room::Result(endpoint.max_output_chars),
                 ),
             }
         } else {
-            (summary, response::Room::Result(endpoint.max_output_chars))
+            (String::new(), response::Room::Result(endpoint.max_output_chars))
         };
         let Ok(mut parts) = serde_json::from_str::<BTreeMap<String, Box<RawValue>>>(&reply.body) else {
             let excerpt: String = reply.body.chars().take(EXCERPT).collect();
-            return Err(format!("{summary}\nThe response was not a GraphQL response: {excerpt}"));
+            return Err(format!(
+                "{summary}{saved_note}\nThe response was not a GraphQL response: {excerpt}"
+            ));
         };
         if !parts.contains_key("errors") && !parts.contains_key("data") {
             return Err(capped(
                 format!(
-                    "{summary}\nThe response has neither `data` nor `errors`, so it is not a GraphQL response:\n{}",
+                    "{summary}{saved_note}\nThe response has neither `data` nor `errors`, so it is not a GraphQL \
+                     response:\n{}",
                     reply.body.trim()
                 ),
-                endpoint.max_output_chars,
-                ASK_FOR_LESS,
+                room.limit(),
+                if room.is_of_a_file() {
+                    "The file has all of it."
+                } else {
+                    ASK_FOR_LESS
+                },
             ));
         }
 
@@ -1135,6 +1222,7 @@ impl Fieldtrip {
         for hint in data.as_ref().map_or_else(Vec::new, response::page_hints) {
             let _ = write!(head, "\n{hint}");
         }
+        head.push_str(&saved_note);
         let errors = parts.remove("errors");
         let rest = if let Some(path) = &select {
             let picked = serde_json::from_str(&reply.body)
@@ -1156,7 +1244,11 @@ impl Fieldtrip {
             let data = parts.remove("data").map(|data| ("data".to_owned(), data));
             data.into_iter().chain(parts).collect::<Vec<_>>()
         };
-        Ok(finished(shown(head, &rest, room)))
+        let shape = match room {
+            response::Room::Preview(limit) => shape_of(&reply.body, limit / 3),
+            response::Room::Result(_) | response::Room::Selection(_) => String::new(),
+        };
+        Ok(finished(shown(head, &rest, room, &shape)))
     }
 
     #[tool(

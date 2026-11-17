@@ -54,6 +54,7 @@ fn a_good_config_passes_and_shows_what_each_endpoint_resolves_to() {
            assumed list size: 10\n  \
            max response bytes: 8 MiB\n  \
            max output chars: 40000\n  \
+           max inline chars: 10000\n  \
            schema: file {schema}: ok\n  \
            cost map: {costs} (2 rules): warning: These rules match nothing in this schema: `Product.nope`.\n  \
            header Authorization: command `sh`, formatted, reused for 300s: ok\n  \

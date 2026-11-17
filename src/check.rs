@@ -173,6 +173,7 @@ async fn endpoint_report(out: &mut Out, name: &str, endpoint: &Endpoint, http: O
     }
     out.line("max response bytes", show_bytes(endpoint.max_response_bytes));
     out.line("max output chars", endpoint.max_output_chars);
+    out.line("max inline chars", endpoint.max_inline_chars);
 
     let schema = match &endpoint.schema {
         None => {
