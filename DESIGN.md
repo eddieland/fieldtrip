@@ -316,3 +316,8 @@ Settled. To change one, ask the user, then add a new dated line instead of editi
 - 2026-11-17: `check --introspect` introspects each endpoint that has no `schema` file, ignoring any kept copy, and
   keeps the result as `introspect` does. It is the one way `check` sends anything, and only the user can ask for it.
   This refines the 2026-11-13 line that `check` sends nothing. An introspection that fails is a problem.
+- 2026-11-17: A variable that only removed client directives used is removed from the saved operation with them,
+  since a declared variable that nothing uses is not valid. Shared fragments count, both for what was removed and for
+  what still uses a variable. One that was unused before the directives were removed stays and is reported.
+- 2026-11-17: A dropped variable passed with `operation_name` is left out with a note, not refused, since the
+  generated client would pass it. The prompt, the request and the audit log show the variables that are sent.

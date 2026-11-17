@@ -9,7 +9,8 @@
 //!
 //! A code generator can let its operations carry directives that only it reads. `client_directives` names them, and
 //! every use of one is removed from the operations and the shared fragments as they are read, so what is validated,
-//! shown and sent is what the generator itself would send.
+//! shown and sent is what the generator itself would send. A variable that only such a directive used goes with it,
+//! since an operation may not declare a variable it does not use.
 
 use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
 use std::fmt::Write as _;
@@ -85,7 +86,14 @@ pub(crate) struct Shared {
     text: String,
     /// The names of the fragments it spreads, in the order they appear.
     spreads: Vec<String>,
+    /// The variables it still uses, once the client directives are removed.
+    variables: BTreeSet<String>,
+    /// The variables that the client directives removed from it used.
+    removed: Removed,
 }
+
+/// The variables that removed client directives used, each with the names of those directives.
+type Removed = BTreeMap<String, BTreeSet<String>>;
 
 /// One operation from the library.
 #[derive(Debug)]
@@ -106,6 +114,9 @@ pub(crate) struct Saved {
     pub(crate) fragment_files: Vec<PathBuf>,
     /// The names of the shared fragments appended to its text.
     shared: Vec<String>,
+    /// The variables the file declares that only client directives used, each with the names of those directives.
+    /// They are removed along with the directives, so the operation does not declare them.
+    dropped: Removed,
 }
 
 impl Library {
@@ -353,20 +364,24 @@ impl Shelf {
                 )));
                 continue;
             }
-            strip(&mut document, client, used);
-            let fragments = document.definitions.iter().filter_map(|definition| match definition {
-                Definition::FragmentDefinition(fragment) => Some(fragment),
-                _ => None,
-            });
-            for fragment in fragments {
+            for definition in &mut document.definitions {
+                let mut removed = Removed::new();
+                strip_definition(definition, client, used, &mut removed);
+                let Definition::FragmentDefinition(fragment) = &*definition else {
+                    continue;
+                };
                 let mut spread = Vec::new();
                 spreads(&fragment.selection_set, &mut spread);
+                let mut variables = BTreeSet::new();
+                definition_variables(definition, &mut variables);
                 by_name.entry(fragment.name.to_string()).or_default().push(Shared {
                     name: fragment.name.to_string(),
                     file: file.clone(),
                     used: false,
                     text: fragment.to_string(),
                     spreads: spread,
+                    variables,
+                    removed,
                 });
             }
         }
@@ -440,11 +455,8 @@ impl Saved {
         let problem = |what: &str| (None, format!("the saved operation {} {what}", file.display()));
         let (mut text, mut document) = parse(file, |what| problem(what).1).map_err(|error| (None, error))?;
         let description = description(&text);
-        // The text as written is kept unless a directive was removed, in which case it is printed from what is left.
-        // Either way the canonical text is printed from the parsed document later, so comments never reach a server.
-        if strip(&mut document, client, used) {
-            text = document.to_string();
-        }
+        let mut removed = Removed::new();
+        let mut changed = strip(&mut document, client, used, &mut removed);
         let mut operations = document.definitions.iter().filter_map(|definition| match definition {
             Definition::OperationDefinition(operation) => Some(operation),
             _ => None,
@@ -469,20 +481,65 @@ impl Saved {
                  to it.",
             ));
         };
-        let variables = operation.variables.iter().map(ToString::to_string).collect();
+        let name = name.to_string();
         let mut pending = Vec::new();
         spreads(&operation.selection_set, &mut pending);
-        let (text, fragment_files, shared) = match shelf {
-            Some(shelf) => with_shared(text, &document, pending, shelf).map_err(|conflict| {
+        let (appended, fragment_files, shared) = match shelf {
+            Some(shelf) => with_shared(&document, pending, shelf).map_err(|conflict| {
                 (
-                    Some(name.to_string()),
+                    Some(name.clone()),
                     format!("the saved operation {} {conflict}", file.display()),
                 )
             })?,
-            None => (text, Vec::new(), Vec::new()),
+            None => (String::new(), Vec::new(), Vec::new()),
         };
+
+        // A variable that only removed directives used would now be declared and unused, which is not valid, so it
+        // goes too. One that was unused all along is not in `removed`, and stays to be reported.
+        let mut still_used = BTreeSet::new();
+        for definition in &document.definitions {
+            definition_variables(definition, &mut still_used);
+        }
+        for shared in shared.iter().filter_map(|name| shelf.and_then(|shelf| shelf.get(name))) {
+            still_used.extend(shared.variables.iter().cloned());
+            for (variable, directives) in &shared.removed {
+                removed
+                    .entry(variable.clone())
+                    .or_default()
+                    .extend(directives.iter().cloned());
+            }
+        }
+        removed.retain(|variable, _| !still_used.contains(variable));
+        let mut dropped = Removed::new();
+        let mut variables = Vec::new();
+        for definition in &mut document.definitions {
+            let Definition::OperationDefinition(operation) = definition else {
+                continue;
+            };
+            if operation
+                .variables
+                .iter()
+                .any(|variable| removed.contains_key(variable.name.as_str()))
+            {
+                operation.make_mut().variables.retain(|variable| {
+                    let Some((variable, directives)) = removed.remove_entry(variable.name.as_str()) else {
+                        return true;
+                    };
+                    dropped.insert(variable, directives);
+                    false
+                });
+                changed = true;
+            }
+            variables = operation.variables.iter().map(ToString::to_string).collect();
+        }
+        // The text as written is kept unless something was removed, in which case it is printed from what is left.
+        // Either way the canonical text is printed from the parsed document later, so comments never reach a server.
+        if changed {
+            text = document.to_string();
+        }
+        text.push_str(&appended);
         Ok(Self {
-            name: name.to_string(),
+            name,
             kind,
             description,
             variables,
@@ -490,14 +547,84 @@ impl Saved {
             file: file.to_path_buf(),
             fragment_files,
             shared,
+            dropped,
         })
     }
 }
 
-/// Removes every use of a directive named in `client` from the operations and fragments in `document`: on the
-/// definitions themselves, on variables, and on every field, fragment spread and inline fragment. Adds each name it
-/// removed to `used`, and says whether it removed any.
-fn strip(document: &mut Document, client: &[String], used: &mut BTreeSet<String>) -> bool {
+/// Removes every use of a directive named in `client` from the operations and fragments in `document`. Adds each
+/// name it removed to `used` and each variable those uses took to `variables`, and says whether it removed any.
+fn strip(document: &mut Document, client: &[String], used: &mut BTreeSet<String>, variables: &mut Removed) -> bool {
+    let mut removed = false;
+    for definition in &mut document.definitions {
+        removed |= strip_definition(definition, client, used, variables);
+    }
+    removed
+}
+
+/// Adds the variables in `value`, at any depth, to `out`.
+fn value_variables(value: &ast::Value, out: &mut BTreeSet<String>) {
+    match value {
+        ast::Value::Variable(name) => {
+            out.insert(name.to_string());
+        }
+        ast::Value::List(items) => items.iter().for_each(|item| value_variables(item, out)),
+        ast::Value::Object(fields) => fields.iter().for_each(|(_, field)| value_variables(field, out)),
+        _ => {}
+    }
+}
+
+/// Adds the variables in the arguments of `directives` to `out`.
+fn directive_variables(directives: &ast::DirectiveList, out: &mut BTreeSet<String>) {
+    for argument in directives.iter().flat_map(|directive| &directive.arguments) {
+        value_variables(&argument.value, out);
+    }
+}
+
+/// Adds every variable that `selections` use, at any depth, in an argument of a field or of a directive, to `out`.
+fn selection_variables(selections: &[ast::Selection], out: &mut BTreeSet<String>) {
+    for selection in selections {
+        match selection {
+            ast::Selection::Field(field) => {
+                for argument in &field.arguments {
+                    value_variables(&argument.value, out);
+                }
+                directive_variables(&field.directives, out);
+                selection_variables(&field.selection_set, out);
+            }
+            ast::Selection::InlineFragment(inline) => {
+                directive_variables(&inline.directives, out);
+                selection_variables(&inline.selection_set, out);
+            }
+            ast::Selection::FragmentSpread(spread) => directive_variables(&spread.directives, out),
+        }
+    }
+}
+
+/// Adds every variable that the operation or fragment `definition` uses to `out`.
+fn definition_variables(definition: &Definition, out: &mut BTreeSet<String>) {
+    match definition {
+        Definition::OperationDefinition(operation) => {
+            directive_variables(&operation.directives, out);
+            selection_variables(&operation.selection_set, out);
+        }
+        Definition::FragmentDefinition(fragment) => {
+            directive_variables(&fragment.directives, out);
+            selection_variables(&fragment.selection_set, out);
+        }
+        _ => {}
+    }
+}
+
+/// Removes every use of a directive named in `client` from the operation or fragment `definition`: on the definition
+/// itself, on variables, and on every field, fragment spread and inline fragment. Adds each name it removed to
+/// `used`, files each variable those uses took under it in `variables`, and says whether it removed any.
+fn strip_definition(
+    definition: &mut Definition,
+    client: &[String],
+    used: &mut BTreeSet<String>,
+    variables: &mut Removed,
+) -> bool {
     if client.is_empty() {
         return false;
     }
@@ -509,27 +636,32 @@ fn strip(document: &mut Document, client: &[String], used: &mut BTreeSet<String>
             if listed {
                 used.insert(name.to_owned());
                 removed = true;
+                let mut taken = BTreeSet::new();
+                for argument in &directive.arguments {
+                    value_variables(&argument.value, &mut taken);
+                }
+                for variable in taken {
+                    variables.entry(variable).or_default().insert(name.to_owned());
+                }
             }
             !listed
         });
     };
-    for definition in &mut document.definitions {
-        match definition {
-            Definition::OperationDefinition(operation) => {
-                let operation = operation.make_mut();
-                list(&mut operation.directives);
-                for variable in &mut operation.variables {
-                    list(&mut variable.make_mut().directives);
-                }
-                strip_selections(&mut operation.selection_set, &mut list);
+    match definition {
+        Definition::OperationDefinition(operation) => {
+            let operation = operation.make_mut();
+            list(&mut operation.directives);
+            for variable in &mut operation.variables {
+                list(&mut variable.make_mut().directives);
             }
-            Definition::FragmentDefinition(fragment) => {
-                let fragment = fragment.make_mut();
-                list(&mut fragment.directives);
-                strip_selections(&mut fragment.selection_set, &mut list);
-            }
-            _ => {}
+            strip_selections(&mut operation.selection_set, &mut list);
         }
+        Definition::FragmentDefinition(fragment) => {
+            let fragment = fragment.make_mut();
+            list(&mut fragment.directives);
+            strip_selections(&mut fragment.selection_set, &mut list);
+        }
+        _ => {}
     }
     removed
 }
@@ -553,14 +685,13 @@ fn strip_selections(selections: &mut [ast::Selection], list: &mut dyn FnMut(&mut
     }
 }
 
-/// `text`, the text of `document`, followed by every fragment from `shelf` that is reached from the spreads in
-/// `pending` and not defined in `document`, each once, with the files they came from and their names. A fragment the
+/// The text of every fragment from `shelf` that is reached from the spreads in `pending` and not defined in
+/// `document`, each once and ready to follow the document's own text, with the files they came from and their names. A fragment the
 /// document defines wins over a shared one of the same name, and its own spreads are followed too. A name found
 /// nowhere is left for validation to report.
 ///
 /// Returns what is wrong, to follow the file's name, when it reaches a shared fragment that is defined twice.
 fn with_shared(
-    mut text: String,
     document: &Document,
     pending: Vec<String>,
     shelf: &Shelf,
@@ -573,6 +704,7 @@ fn with_shared(
             _ => None,
         })
         .collect();
+    let mut text = String::new();
     let mut pending = VecDeque::from(pending);
     let mut seen = HashSet::new();
     let mut files = Vec::new();
@@ -650,6 +782,32 @@ impl Saved {
 }
 
 impl Saved {
+    /// `variables` without the ones this operation no longer declares because only client directives used them, and
+    /// a note for the calling agent about each one that was passed. A generated client would pass them, so they are
+    /// left out rather than refused.
+    pub(crate) fn sendable(&self, variables: &Variables) -> (Variables, Option<String>) {
+        let mut kept = variables.clone();
+        let mut note = String::new();
+        for (variable, directives) in &self.dropped {
+            if kept.remove(variable).is_none() {
+                continue;
+            }
+            let directives: Vec<String> = directives.iter().map(|directive| format!("`@{directive}`")).collect();
+            if !note.is_empty() {
+                note.push('\n');
+            }
+            let _ = write!(
+                note,
+                "Left out `${variable}`: the saved operation `{}` used it only in {}, which fieldtrip removes as a \
+                 client directive, so the operation no longer declares it and it is not sent. `list_operations` \
+                 shows the variables it takes.",
+                self.name,
+                directives.join(" and ")
+            );
+        }
+        (kept, (!note.is_empty()).then_some(note))
+    }
+
     /// `, with shared fragments from FILES` when it uses any, to follow the operation's own file in a message.
     pub(crate) fn with_fragments(&self) -> String {
         if self.fragment_files.is_empty() {

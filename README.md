@@ -292,6 +292,10 @@ server receives. A directive that is neither listed nor in the schema is still a
 operation the agent writes is validated as written. `@skip`, `@include`, `@defer` and `@stream` can't be listed,
 since the server acts on them. `fieldtrip check` warns about a listed directive that nothing uses.
 
+A variable that only a removed directive used, such as `$precision` in `@geometryPrecision(digits: $precision)`, is
+removed from the operation too, because GraphQL rejects a variable that is declared and never used. If the agent
+passes one anyway, fieldtrip leaves it out and says so. A variable that nothing used to begin with is still an error.
+
 `list_operations` shows the agent each one with its description, variables, estimated cost and text, and
 `search_schema` lists matching ones first. A library can hold hundreds, so the agent can narrow the list: `query`
 matches words in the name or description, `kind` keeps queries or mutations, and `uses` keeps operations that select
