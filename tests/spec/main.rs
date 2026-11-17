@@ -41,6 +41,8 @@ mod describe;
 #[cfg(test)]
 mod descriptions;
 #[cfg(test)]
+mod dropped_variables;
+#[cfg(test)]
 mod estimate_cost;
 #[cfg(test)]
 mod execute_approved;

@@ -280,3 +280,10 @@ cargo test --workspace --all-features
   before. `fieldtrip check --introspect` introspects such endpoints instead, ignoring the copy, and keeps the result.
   A failure is a problem, and an endpoint with a `schema` file is never contacted.
   Done when: `cargo test check_cached`
+- [x] **51. Variables only a client directive used.** When removing the `client_directives` leaves a variable that
+  nothing uses, in the operation or in the fragments it spreads, shared ones included, the variable's declaration is
+  removed too, so the operation still validates. `list_operations` and `search_schema` show the variables that are
+  left. A variable nothing used before the directives were removed stays, and still marks the operation broken. When
+  the agent passes a dropped variable to `execute` or `estimate_cost` with `operation_name`, it is left out of the
+  prompt, the request and the audit log, and the result says so, naming the directive.
+  Done when: `cargo test dropped_variables`

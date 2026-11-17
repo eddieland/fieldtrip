@@ -362,6 +362,12 @@ fn planned(
     })
 }
 
+/// The variables to send with an operation, and a note about any that were left out. Only a `saved` operation leaves
+/// any out: the ones it lost along with its client directives.
+fn sendable(saved: Option<&Saved>, variables: &Variables) -> (Variables, Option<String>) {
+    saved.map_or_else(|| (variables.clone(), None), |saved| saved.sendable(variables))
+}
+
 /// One saved operation on one line: name, kind, cost or `BROKEN`, variables and the start of its description.
 fn summary(schema: &Loaded, name: &str, endpoint: &Endpoint, saved: &Saved) -> String {
     let mut line = match saved.plan(schema, name, endpoint) {
@@ -876,8 +882,12 @@ impl Fieldtrip {
             arguments.operation_name.as_deref(),
         )?;
         let schema = self.schema(name, false).await?;
-        let plan = planned(&schema, name, endpoint, text, saved, &arguments.variables)?;
+        let (variables, left_out) = sendable(saved, &arguments.variables);
+        let plan = planned(&schema, name, endpoint, text, saved, &variables)?;
         let mut out = format!("Valid {} for `{name}`.\n{}", plan.title(), plan.estimate());
+        if let Some(note) = left_out {
+            let _ = writeln!(out, "{note}");
+        }
         if plan.kind == Kind::Mutation && endpoint.mutations == Mutations::Deny {
             out.push_str(
                 "`execute` will refuse it: mutations are turned off for this endpoint by `mutations = \"deny\"` in \
@@ -955,14 +965,16 @@ impl Fieldtrip {
         }
         let select = arguments.select.as_deref().map(select::Path::parse).transpose()?;
         let schema = self.schema(name, false).await?;
-        let plan = planned(&schema, name, endpoint, text, saved, &arguments.variables)?;
-        plan.check_variables(&schema, &arguments.variables)?;
+        // From here on the variables are the ones that will be sent, which is what the prompt and the log show.
+        let (variables, left_out) = sendable(saved, &arguments.variables);
+        let plan = planned(&schema, name, endpoint, text, saved, &variables)?;
+        plan.check_variables(&schema, &variables)?;
         let attempt = Attempt {
             endpoint: name,
             kind: plan.kind,
             operation: plan.name.as_deref(),
             text: &plan.text,
-            variables: &arguments.variables,
+            variables: &variables,
             cost: Some(plan.cost),
         };
 
@@ -984,12 +996,12 @@ impl Fieldtrip {
                 self.audit.record(endpoint, &attempt, &verdict, Outcome::NotSent).await;
                 return Err(approval::unseen(name, client));
             }
-            let prompt = approval::prompt(name, &endpoint.shown_url, &plan, &arguments.variables);
+            let prompt = approval::prompt(name, &endpoint.shown_url, &plan, &variables);
             let decision = if approval::asks_by_round_trip(&context) {
                 let operation = Operation {
                     endpoint: name,
                     text: &plan.text,
-                    variables: &arguments.variables,
+                    variables: &variables,
                 };
                 match self
                     .outstanding
@@ -1014,11 +1026,7 @@ impl Fieldtrip {
 
         let sent = self
             .http
-            .post(
-                endpoint,
-                &plan.payload(&arguments.variables),
-                endpoint.max_response_bytes,
-            )
+            .post(endpoint, &plan.payload(&variables), endpoint.max_response_bytes)
             .await;
         let outcome = sent.as_ref().map_or_else(Outcome::Failed, Outcome::Answered);
         self.audit.record(endpoint, &attempt, &verdict, outcome).await;
@@ -1029,6 +1037,9 @@ impl Fieldtrip {
             plan.cost,
             reply.metadata()
         );
+        if let Some(note) = &left_out {
+            let _ = write!(summary, "\n{note}");
+        }
         if let Some(note) = &reply.refused_twice {
             let _ = write!(summary, "\n{note}");
         }
